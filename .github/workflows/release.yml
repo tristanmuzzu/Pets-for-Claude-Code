@@ -27,10 +27,10 @@ jobs:
 
       - run: npm ci
 
-      - name: Verify the sprite atlas is in sync with the generator
+      - name: Verify the sprite atlases are in sync with their generators
         run: |
-          node tools/gen-sprites.mjs
-          git diff --exit-code public/pets/pip
+          npm run sprites
+          git diff --exit-code public/pets
 
       - uses: tauri-apps/tauri-action@v0
         env:

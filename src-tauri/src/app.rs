@@ -98,12 +98,20 @@ fn save_position(app: AppHandle, x: i32, y: i32) -> Result<(), String> {
 
 #[tauri::command]
 fn list_pets() -> Vec<PetInfo> {
-    let mut pets = vec![PetInfo {
-        id: "pip".into(),
-        display_name: "Pip".into(),
-        description: "An ember-fox with a status wisp.".into(),
-        source: "builtin",
-    }];
+    let mut pets = vec![
+        PetInfo {
+            id: "ember".into(),
+            display_name: "Ember".into(),
+            description: "A clay pebble with a spark for a status light.".into(),
+            source: "builtin",
+        },
+        PetInfo {
+            id: "pip".into(),
+            display_name: "Pip".into(),
+            description: "An ember-fox with a status wisp.".into(),
+            source: "builtin",
+        },
+    ];
     for (dir, source) in [(pets_dir(), "user"), (codex_pets_dir(), "codex")] {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -146,7 +154,7 @@ fn list_pets() -> Vec<PetInfo> {
 
 #[tauri::command]
 fn load_pet(id: String) -> Result<PetPayload, String> {
-    if id == "pip" {
+    if id == "ember" || id == "pip" {
         return Ok(PetPayload {
             manifest: Value::Null,
             image_data_url: None,

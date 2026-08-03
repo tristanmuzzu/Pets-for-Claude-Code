@@ -80,7 +80,10 @@ pub struct Session {
     pub session_id: String,
     /// idle | thinking | running | waiting | failed | done | compacting
     pub state: String,
-    /// One glanceable line: "Editing render.js", "Running npm test".
+    /// What this turn is *about*. Set when the turn starts and replaced when it
+    /// ends — never by tool events, so it stays readable while tools churn.
+    pub headline: String,
+    /// The live line: "Editing render.js", "Running: npm test".
     pub activity: String,
     /// Longer text for the expanded panel (assistant summary, error body).
     pub detail: String,
@@ -127,7 +130,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            pet: "pip".to_string(),
+            pet: "ember".to_string(),
             scale: 2.0,
             click_through: false,
             show_bubble: true,

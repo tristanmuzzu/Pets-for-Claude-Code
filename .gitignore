@@ -6,6 +6,7 @@ src-tauri/gen/
 src-tauri/icons/android/
 src-tauri/icons/ios/
 assets/atlas-preview.png
+assets/ember-preview.png
 assets/row-check.png
 *.local
 .DS_Store

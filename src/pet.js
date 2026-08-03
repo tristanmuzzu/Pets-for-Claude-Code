@@ -51,8 +51,9 @@ export class PetRenderer {
     let manifest
     let src
     if (!payload || !payload.imageDataUrl) {
-      manifest = await fetch('/pets/pip/pet.json').then((r) => r.json())
-      src = '/pets/pip/spritesheet.png'
+      // Built-in pets ship inside the frontend bundle.
+      manifest = await fetch(`/pets/${id}/pet.json`).then((r) => r.json())
+      src = `/pets/${id}/spritesheet.png`
     } else {
       manifest = payload.manifest ?? {}
       src = payload.imageDataUrl

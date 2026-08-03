@@ -1,14 +1,14 @@
 {
   "name": "pipsqueak",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "A tiny desktop pet that shows what Claude Code is doing, at a glance.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "sprites": "node tools/gen-sprites.mjs",
+    "sprites": "node tools/gen-ember.mjs && node tools/gen-sprites.mjs",
     "states": "node tools/gen-states.mjs",
     "simulate": "node tools/simulate.mjs",
     "tauri": "tauri",

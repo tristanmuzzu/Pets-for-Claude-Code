@@ -1,6 +1,7 @@
 :root {
   --ink: #f6f1ea;
   --muted: #a9a19a;
+  --faint: #7d7670;
   /* Opaque-ish rather than blurred: backdrop-filter has nothing to sample in a
      transparent window and WebView2 paints a black rectangle where it tries. */
   --surface: rgba(20, 17, 23, 0.93);
@@ -59,31 +60,26 @@ body {
   transform: scale(0.96);
 }
 
-/* --- status card ---------------------------------------------------- */
-.card {
+/* --- the stack -------------------------------------------------------- */
+#stack {
   position: absolute;
   right: 10px;
-  bottom: 104px;
-  width: 316px;
-  padding: 9px 11px 10px;
+  bottom: 106px;
+  width: 322px;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.card {
+  width: 100%;
+  padding: 8px 10px 9px;
   border: 1px solid var(--edge);
   border-radius: 12px;
   background: var(--surface);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
   animation: rise 160ms ease-out;
-}
-
-.card::after {
-  content: "";
-  position: absolute;
-  right: 30px;
-  bottom: -7px;
-  width: 12px;
-  height: 12px;
-  border-right: 1px solid var(--edge);
-  border-bottom: 1px solid var(--edge);
-  background: var(--surface);
-  transform: rotate(45deg);
 }
 
 @keyframes rise {
@@ -93,24 +89,42 @@ body {
   }
 }
 
+/* Only the card nearest the pet gets the speech tail. */
+#stack .card:first-of-type {
+  position: relative;
+}
+
+#stack .card:first-of-type::after {
+  content: "";
+  position: absolute;
+  right: 26px;
+  bottom: -7px;
+  width: 12px;
+  height: 12px;
+  border-right: 1px solid var(--edge);
+  border-bottom: 1px solid var(--edge);
+  background: var(--surface);
+  transform: rotate(45deg);
+}
+
 .card[data-dim="true"] {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
 .card[data-state="waiting"] {
-  border-color: rgba(250, 146, 52, 0.55);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42), 0 0 0 3px rgba(250, 146, 52, 0.14);
+  border-color: rgba(250, 146, 52, 0.6);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(250, 146, 52, 0.15);
 }
 
 .card[data-state="failed"] {
-  border-color: rgba(244, 88, 88, 0.5);
+  border-color: rgba(244, 88, 88, 0.55);
 }
 
 .card-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .dot {
@@ -142,28 +156,84 @@ body {
   white-space: nowrap;
 }
 
+.count,
 .age {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 10.5px;
+  color: var(--faint);
   font-variant-numeric: tabular-nums;
   flex: none;
 }
 
-.activity {
+.count {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.age {
+  margin-left: auto;
+}
+
+.close {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  line-height: 14px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+}
+
+/* The stable line: what this turn is about. Changes once per turn. */
+.headline {
   margin: 0;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 1.42;
+  font-size: 13px;
+  line-height: 1.36;
   overflow-wrap: anywhere;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
+/* The live line: subordinate on purpose, and rate-limited in JS. */
+.live {
+  margin: 3px 0 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.live-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.burst {
+  flex: none;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--faint);
+}
+
 .detail {
-  margin: 5px 0 0;
+  margin: 6px 0 0;
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--muted);
@@ -173,35 +243,12 @@ body {
   overflow: hidden;
 }
 
-/* --- expanded panel -------------------------------------------------- */
-.tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 8px 0 2px;
-}
-
-.tabs button {
-  font: 11px/1 system-ui, sans-serif;
-  padding: 4px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--edge);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.tabs button[aria-pressed="true"] {
-  color: var(--ink);
-  background: rgba(255, 255, 255, 0.14);
-}
-
 .log {
   list-style: none;
-  margin: 8px 0 0;
-  padding: 8px 0 0;
+  margin: 7px 0 0;
+  padding: 7px 0 0;
   border-top: 1px solid var(--edge);
-  max-height: 128px;
+  max-height: 116px;
   overflow-y: auto;
   font-family: var(--mono);
   font-size: 11px;
@@ -217,7 +264,7 @@ body {
 
 .log li span:first-child {
   flex: none;
-  width: 34px;
+  width: 32px;
   text-align: right;
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
@@ -233,37 +280,42 @@ body {
   border-radius: 3px;
 }
 
-.actions {
+/* --- collapsed projects ---------------------------------------------- */
+.chips {
   display: flex;
-  gap: 5px;
-  margin-top: 9px;
-  padding-top: 8px;
-  border-top: 1px solid var(--edge);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
 }
 
-.actions button,
-.menu button {
-  flex: 1;
+.chips button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font: 11px/1 system-ui, sans-serif;
-  padding: 6px 4px;
-  border-radius: 7px;
+  padding: 5px 8px;
+  border-radius: 999px;
   border: 1px solid var(--edge);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--ink);
+  background: var(--surface);
+  color: var(--muted);
   cursor: pointer;
 }
 
-.actions button:hover,
-.menu button:hover {
-  background: rgba(255, 255, 255, 0.14);
+.chips button:hover {
+  color: var(--ink);
 }
 
-/* --- right-click menu ------------------------------------------------ */
+.chips .dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* --- right-click menu ------------------------------------------------- */
 .menu {
   position: absolute;
   right: 10px;
-  bottom: 104px;
-  width: 190px;
+  bottom: 106px;
+  width: 200px;
   padding: 6px;
   display: flex;
   flex-direction: column;
@@ -278,13 +330,23 @@ body {
   font-size: 10px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--faint);
   padding: 4px 6px 2px;
 }
 
 .menu button {
   text-align: left;
   padding: 6px 8px;
+  font: 11.5px/1.2 system-ui, sans-serif;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.menu button:hover {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .menu button[aria-pressed="true"]::after {

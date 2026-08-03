@@ -42,7 +42,7 @@ pub fn run(fallback_event: Option<String>) {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
 
-    let Some((state, activity, detail)) = classify(&event, &payload) else {
+    let Some(update) = classify(&event, &payload) else {
         return;
     };
 
@@ -59,20 +59,43 @@ pub fn run(fallback_event: Option<String>) {
         session.tools += 1;
     }
     session.session_id = session_id;
-    session.state = state.to_string();
-    session.activity = activity.clone();
-    session.detail = detail;
+    session.state = update.state.to_string();
+    session.activity = update.activity.clone();
+    session.detail = update.detail;
+    if let Some(headline) = update.headline {
+        session.headline = headline;
+    }
     session.event = event;
     session.updated_ms = now_ms();
-    session.push_recent(state, &activity);
+    if !update.activity.is_empty() {
+        session.push_recent(update.state, &update.activity);
+    }
 
     if let Ok(bytes) = serde_json::to_vec(&session) {
         let _ = write_atomic(&path, &bytes);
     }
 }
 
+/// One state change. `headline` is `None` for the many events that should not
+/// disturb what the card says the turn is about.
+struct Update {
+    state: &'static str,
+    activity: String,
+    detail: String,
+    headline: Option<String>,
+}
+
+fn live(state: &'static str, activity: String) -> Update {
+    Update {
+        state,
+        activity,
+        detail: String::new(),
+        headline: None,
+    }
+}
+
 /// Returns `None` for events the pet deliberately ignores.
-fn classify(event: &str, payload: &Value) -> Option<(&'static str, String, String)> {
+fn classify(event: &str, payload: &Value) -> Option<Update> {
     let text = |key: &str| {
         payload
             .get(key)
@@ -84,79 +107,88 @@ fn classify(event: &str, payload: &Value) -> Option<(&'static str, String, Strin
     let input = payload.get("tool_input");
 
     Some(match event {
-        "SessionStart" => ("idle", "Session started".into(), String::new()),
-        "UserPromptSubmit" => (
-            "thinking",
-            "Thinking…".into(),
-            truncate(&text("prompt"), 400),
-        ),
-        "PreToolUse" => ("running", phrase(&tool, input).present, String::new()),
-        "PostToolUse" => ("running", phrase(&tool, input).past, String::new()),
-        "PostToolUseFailure" => (
-            "failed",
-            format!("{} failed", pretty_tool(&tool)),
-            truncate(&first_line(&text("error")), 400),
-        ),
-        "PermissionRequest" => (
+        "SessionStart" => Update {
+            state: "idle",
+            activity: String::new(),
+            detail: String::new(),
+            headline: Some("Session started".into()),
+        },
+        "UserPromptSubmit" => {
+            let prompt = text("prompt");
+            Update {
+                state: "thinking",
+                activity: "Thinking…".into(),
+                detail: truncate(&prompt, 400),
+                headline: Some(truncate(&first_line(&prompt), 110)),
+            }
+        }
+        "PreToolUse" => live("running", phrase(&tool, input).present),
+        "PostToolUse" => live("running", phrase(&tool, input).past),
+        "PostToolUseFailure" => Update {
+            state: "failed",
+            activity: format!("{} failed", pretty_tool(&tool)),
+            detail: truncate(&first_line(&text("error")), 400),
+            headline: None,
+        },
+        "PermissionRequest" => live(
             "waiting",
             format!("Needs permission to {}", phrase(&tool, input).infinitive),
-            String::new(),
         ),
-        "PermissionDenied" => (
+        "PermissionDenied" => live(
             "failed",
             format!("Not allowed to {}", phrase(&tool, input).infinitive),
-            String::new(),
         ),
         "Notification" => {
             let kind = text("notification_type");
             let message = truncate(&text("message"), 200);
             match kind.as_str() {
-                "permission_prompt" => (
+                "permission_prompt" => live(
                     "waiting",
                     if message.is_empty() {
                         "Needs your permission".into()
                     } else {
                         message
                     },
-                    String::new(),
                 ),
-                "idle_prompt" => ("waiting", "Waiting for you".into(), String::new()),
+                "idle_prompt" => live("waiting", "Waiting for you".into()),
                 _ => return None,
             }
         }
         "Stop" => {
             let message = text("last_assistant_message");
-            let headline = first_line(&message);
-            (
-                "done",
-                if headline.is_empty() {
+            let summary = first_line(&message);
+            Update {
+                state: "done",
+                // The turn is over: the live line would only show a stale tool.
+                activity: String::new(),
+                detail: truncate(&message, 600),
+                headline: Some(if summary.is_empty() {
                     "Finished".into()
                 } else {
-                    truncate(&headline, 120)
-                },
-                truncate(&message, 600),
-            )
+                    truncate(&summary, 140)
+                }),
+            }
         }
         "StopFailure" => {
             let kind = text("error_type");
-            (
-                "failed",
-                if kind.is_empty() {
+            Update {
+                state: "failed",
+                activity: String::new(),
+                detail: truncate(&first_line(&text("error")), 400),
+                headline: Some(if kind.is_empty() {
                     "Turn failed".into()
                 } else {
                     format!("Turn failed: {}", kind.replace('_', " "))
-                },
-                truncate(&first_line(&text("error")), 400),
-            )
+                }),
+            }
         }
-        "SubagentStart" => (
+        "SubagentStart" => live(
             "running",
             format!("Subagent: {}", short(&text("agent_type"), "agent")),
-            String::new(),
         ),
-        "SubagentStop" => ("running", "Subagent finished".into(), String::new()),
-        "PreCompact" => ("compacting", "Compacting context".into(), String::new()),
-        "PostCompact" => ("thinking", "Context compacted".into(), String::new()),
+        "SubagentStop" => live("running", "Subagent finished".into()),
+        "PreCompact" => live("compacting", "Compacting context".into()),
+        "PostCompact" => live("thinking", "Context compacted".into()),
         _ => return None,
     })
 }
@@ -315,7 +347,9 @@ mod tests {
     use serde_json::json;
 
     fn activity_of(event: &str, payload: serde_json::Value) -> String {
-        classify(event, &payload).expect("event should be classified").1
+        classify(event, &payload)
+            .expect("event should be classified")
+            .activity
     }
 
     #[test]
@@ -360,20 +394,45 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "rm -rf build" }
         });
-        let (state, activity, _) = classify("PermissionRequest", &payload).unwrap();
-        assert_eq!(state, "waiting");
-        assert_eq!(activity, "Needs permission to run: rm -rf build");
+        let update = classify("PermissionRequest", &payload).unwrap();
+        assert_eq!(update.state, "waiting");
+        assert_eq!(update.activity, "Needs permission to run: rm -rf build");
     }
 
     #[test]
-    fn stop_reports_the_first_line_of_the_answer() {
+    fn stop_reports_the_first_line_of_the_answer_as_the_headline() {
         let payload = json!({
             "last_assistant_message": "\n\nFixed the off-by-one.\nDetails follow."
         });
-        let (state, activity, detail) = classify("Stop", &payload).unwrap();
-        assert_eq!(state, "done");
-        assert_eq!(activity, "Fixed the off-by-one.");
-        assert!(detail.contains("Details follow."));
+        let update = classify("Stop", &payload).unwrap();
+        assert_eq!(update.state, "done");
+        assert_eq!(update.headline.as_deref(), Some("Fixed the off-by-one."));
+        // The turn is over, so the live line clears rather than showing a stale tool.
+        assert!(update.activity.is_empty());
+        assert!(update.detail.contains("Details follow."));
+    }
+
+    #[test]
+    fn tool_events_never_disturb_the_headline() {
+        let payload = json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": "/code/clock.js" }
+        });
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"] {
+            let update = classify(event, &payload).unwrap();
+            assert!(
+                update.headline.is_none(),
+                "{event} should leave the headline alone"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prompt_becomes_the_headline() {
+        let payload = json!({ "prompt": "Fix the flaky timezone test\n\nIt fails on CI only." });
+        let update = classify("UserPromptSubmit", &payload).unwrap();
+        assert_eq!(update.headline.as_deref(), Some("Fix the flaky timezone test"));
+        assert_eq!(update.activity, "Thinking…");
     }
 
     #[test]

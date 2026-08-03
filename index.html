@@ -7,31 +7,34 @@
   </head>
   <body>
     <main id="stage">
-      <section id="card" class="card" data-state="idle" hidden>
-        <header class="card-head">
-          <span class="dot" aria-hidden="true"></span>
-          <span id="project" class="project">Claude Code</span>
-          <span id="age" class="age"></span>
-        </header>
-        <p id="activity" class="activity">Waiting for a session…</p>
-        <p id="detail" class="detail" hidden></p>
-
-        <div id="expanded" hidden>
-          <div id="tabs" class="tabs" hidden></div>
-          <ol id="log" class="log"></ol>
-          <footer class="actions">
-            <button data-action="pets" type="button">Pets</button>
-            <button data-action="hooks" type="button">Reinstall hooks</button>
-            <button data-action="through" type="button">Click through</button>
-            <button data-action="quit" type="button">Quit</button>
-          </footer>
-        </div>
-      </section>
+      <!-- column-reverse: the first child renders closest to the pet -->
+      <div id="stack">
+        <div id="chips" class="chips" hidden></div>
+      </div>
 
       <div id="menu" class="menu" hidden></div>
 
-      <canvas id="pet" width="96" height="96" title="Pipsqueak — click for details, drag to move"></canvas>
+      <canvas id="pet" width="96" height="96" title="Pipsqueak — click to hide the cards, right-click for options, drag to move"></canvas>
     </main>
+
+    <template id="card-template">
+      <article class="card" data-state="idle">
+        <header class="card-head">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="project"></span>
+          <span class="count" hidden></span>
+          <span class="age"></span>
+          <button class="close" type="button" title="Collapse this project">×</button>
+        </header>
+        <p class="headline"></p>
+        <p class="live"><span class="live-text"></span><span class="burst" hidden></span></p>
+        <div class="more" hidden>
+          <p class="detail"></p>
+          <ol class="log"></ol>
+        </div>
+      </article>
+    </template>
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

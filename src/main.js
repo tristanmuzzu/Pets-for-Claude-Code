@@ -3,40 +3,67 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PetRenderer, GREETING_ROW } from './pet.js'
 
-const el = {
-  card: document.getElementById('card'),
-  project: document.getElementById('project'),
-  age: document.getElementById('age'),
-  activity: document.getElementById('activity'),
-  detail: document.getElementById('detail'),
-  expanded: document.getElementById('expanded'),
-  tabs: document.getElementById('tabs'),
-  log: document.getElementById('log'),
-  menu: document.getElementById('menu'),
-  pet: document.getElementById('pet')
-}
-
 /** `npm run dev` in a plain browser has no IPC; fall back to a demo loop. */
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
+/**
+ * How long a live line stays put before the next one may replace it. Tools can
+ * fire several times a second; without this the line is unreadable.
+ */
+const MIN_DWELL_MS = 2500
+/** States that jump the queue — you never want a blocked prompt held back. */
+const URGENT = new Set(['waiting', 'failed'])
+const MAX_CARDS = 3
+const STALE_MS = 45_000
+
+const el = {
+  stage: document.getElementById('stage'),
+  stack: document.getElementById('stack'),
+  chips: document.getElementById('chips'),
+  menu: document.getElementById('menu'),
+  pet: document.getElementById('pet'),
+  template: document.getElementById('card-template')
+}
 
 const appWindow = IS_TAURI ? getCurrentWindow() : null
 const renderer = new PetRenderer(el.pet)
 
-let config = { pet: 'pip', scale: 2, clickThrough: false, showBubble: true }
+let config = { pet: 'ember', scale: 2, clickThrough: false, showBubble: true }
 let sessions = []
-let pinnedSession = null
-let expanded = false
 let notice = null
 let noticeTimer = null
+let stackHidden = false
 let seenSessions = new Set()
 
-// --- state selection ---------------------------------------------------
-function activeSession() {
-  if (pinnedSession) {
-    const match = sessions.find((s) => s.session_id === pinnedSession)
-    if (match) return match
+/** project -> { shown, shownAt, pending, skipped, expanded } */
+const views = new Map()
+/** Projects the user collapsed; cleared automatically when one needs attention. */
+const collapsed = new Set()
+/** Last state seen per project, to detect transitions into an urgent state. */
+const lastStates = new Map()
+/** project -> card element, so updates don't rebuild (and re-animate) the DOM. */
+const cards = new Map()
+
+// --- data ---------------------------------------------------------------
+/**
+ * One card per project. Sessions arrive already ordered attention-first, so the
+ * first session seen for a project is the one worth showing.
+ */
+function groupByProject(list) {
+  const groups = []
+  const index = new Map()
+  for (const session of list) {
+    const key = session.project || session.session_id.slice(0, 8)
+    const existing = index.get(key)
+    if (existing) {
+      existing.count += 1
+      continue
+    }
+    const group = { key, session, count: 1 }
+    index.set(key, group)
+    groups.push(group)
   }
-  return sessions[0] ?? null
+  return groups
 }
 
 function relativeTime(ms) {
@@ -48,104 +75,183 @@ function relativeTime(ms) {
   return `${Math.floor(delta / 3_600_000)}h`
 }
 
-// --- rendering ---------------------------------------------------------
-function render() {
-  const session = activeSession()
-  renderer.setState(session ? session.state : 'idle')
-
-  if (notice) {
-    el.card.hidden = false
-    el.card.dataset.state = 'idle'
-    el.card.dataset.dim = 'false'
-    el.project.textContent = 'Pipsqueak'
-    el.age.textContent = ''
-    el.activity.textContent = notice
-    el.detail.hidden = true
-    el.expanded.hidden = !expanded
-    renderTabs()
-    renderLog(activeSession())
-    syncHitRects()
-    return
+function viewFor(key) {
+  let view = views.get(key)
+  if (!view) {
+    view = { shown: '', shownAt: 0, pending: '', skipped: 0, expanded: false }
+    views.set(key, view)
   }
-
-  if (!session) {
-    el.card.hidden = !expanded
-    if (expanded) {
-      el.card.dataset.state = 'idle'
-      el.project.textContent = 'Pipsqueak'
-      el.age.textContent = ''
-      el.activity.textContent = 'No Claude Code session is running.'
-      el.detail.hidden = true
-    }
-    el.expanded.hidden = !expanded
-    renderTabs()
-    renderLog(null)
-    syncHitRects()
-    return
-  }
-
-  const stale = Date.now() - session.updated_ms > 45_000
-  el.card.hidden = !config.showBubble && !expanded
-  el.card.dataset.state = session.state
-  el.card.dataset.dim = String(session.state === 'idle' && stale)
-  el.project.textContent = session.project || 'Claude Code'
-  el.age.textContent = relativeTime(session.updated_ms)
-  el.activity.textContent = session.activity || '…'
-
-  const showDetail = expanded && Boolean(session.detail)
-  el.detail.hidden = !showDetail
-  if (showDetail) el.detail.textContent = session.detail
-
-  el.expanded.hidden = !expanded
-  renderTabs()
-  renderLog(session)
-  syncHitRects()
+  return view
 }
 
-function renderTabs() {
-  if (!expanded || sessions.length < 2) {
-    el.tabs.hidden = true
-    el.tabs.replaceChildren()
-    return
+/**
+ * Rate-limits the live line. Urgent states are adopted immediately; everything
+ * else waits out the dwell, and anything that arrived meanwhile is counted so
+ * the card can show "+3" rather than silently dropping it.
+ */
+function pumpLiveLine(key, activity, state) {
+  const view = viewFor(key)
+  const now = Date.now()
+  if (activity !== view.pending) {
+    if (view.pending && view.pending !== view.shown) view.skipped += 1
+    view.pending = activity
   }
-  el.tabs.hidden = false
-  const current = activeSession()
-  el.tabs.replaceChildren(
-    ...sessions.map((session) => {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = session.project || session.session_id.slice(0, 6)
-      button.setAttribute('aria-pressed', String(session === current))
-      button.addEventListener('click', () => {
-        pinnedSession = session.session_id
+  const urgent = URGENT.has(state)
+  const settled = now - view.shownAt >= MIN_DWELL_MS
+  if (view.pending !== view.shown && (urgent || settled || !view.shown)) {
+    view.shown = view.pending
+    view.shownAt = now
+    view.skipped = 0
+  }
+  return view
+}
+
+// --- rendering ----------------------------------------------------------
+function buildCard(key) {
+  const node = el.template.content.firstElementChild.cloneNode(true)
+  node.querySelector('.close').addEventListener('click', (event) => {
+    event.stopPropagation()
+    collapsed.add(key)
+    render()
+  })
+  node.addEventListener('click', () => {
+    const view = viewFor(key)
+    view.expanded = !view.expanded
+    render()
+  })
+  return node
+}
+
+function paintCard(node, group) {
+  const { session, key, count } = group
+  const view = pumpLiveLine(key, session.activity || '', session.state)
+  const stale = Date.now() - session.updated_ms > STALE_MS
+
+  node.dataset.state = session.state || 'idle'
+  node.dataset.dim = String(session.state === 'idle' && stale)
+  node.querySelector('.project').textContent = key
+  node.querySelector('.age').textContent = relativeTime(session.updated_ms)
+
+  const countNode = node.querySelector('.count')
+  countNode.hidden = count < 2
+  countNode.textContent = `${count} sessions`
+
+  // Sessions that started before their first prompt have no headline yet.
+  const headline = session.headline || session.activity || 'Working…'
+  node.querySelector('.headline').textContent = headline
+
+  const live = node.querySelector('.live')
+  // Compare against what is actually on screen, or the fallback above shows the
+  // same sentence twice.
+  const liveText = view.shown && view.shown !== headline ? view.shown : ''
+  live.hidden = !liveText
+  node.querySelector('.live-text').textContent = liveText
+  const burst = node.querySelector('.burst')
+  burst.hidden = view.skipped < 1
+  burst.textContent = `+${view.skipped}`
+
+  const more = node.querySelector('.more')
+  more.hidden = !view.expanded
+  if (view.expanded) {
+    const detail = node.querySelector('.detail')
+    detail.hidden = !session.detail
+    detail.textContent = session.detail || ''
+    node.querySelector('.log').replaceChildren(
+      ...(session.recent ?? [])
+        .slice()
+        .reverse()
+        .map((entry) => {
+          const item = document.createElement('li')
+          item.dataset.state = entry.state
+          const when = document.createElement('span')
+          when.textContent = relativeTime(entry.ms)
+          const what = document.createElement('span')
+          what.textContent = entry.text
+          item.append(when, what)
+          return item
+        })
+    )
+  }
+}
+
+function buildChip(key, state, label, onClick) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  const dot = document.createElement('span')
+  dot.className = 'dot'
+  dot.style.background = `var(--${state in STATE_COLOURS ? state : 'idle'})`
+  const text = document.createElement('span')
+  text.textContent = label
+  button.append(dot, text)
+  button.addEventListener('click', onClick)
+  return button
+}
+
+const STATE_COLOURS = {
+  idle: 1, thinking: 1, running: 1, waiting: 1, failed: 1, done: 1, compacting: 1
+}
+
+function render() {
+  const groups = groupByProject(sessions)
+
+  // A project that starts needing attention un-collapses itself.
+  for (const group of groups) {
+    const previous = lastStates.get(group.key)
+    if (URGENT.has(group.session.state) && previous !== group.session.state) {
+      collapsed.delete(group.key)
+    }
+    lastStates.set(group.key, group.session.state)
+  }
+
+  const leader = groups[0]?.session
+  renderer.setState(notice ? 'idle' : leader ? leader.state : 'idle')
+
+  const visible = stackHidden
+    ? []
+    : groups.filter((group) => !collapsed.has(group.key)).slice(0, MAX_CARDS)
+  const visibleKeys = new Set(visible.map((group) => group.key))
+
+  for (const [key, node] of cards) {
+    if (!visibleKeys.has(key)) {
+      node.remove()
+      cards.delete(key)
+    }
+  }
+
+  // DOM order is bottom-up: #stack is column-reverse, so the first child sits
+  // closest to the pet and the chip row ends up on top of the stack.
+  let previous = null
+  for (const group of visible) {
+    let node = cards.get(group.key)
+    if (!node) {
+      node = buildCard(group.key)
+      cards.set(group.key, node)
+    }
+    paintCard(node, group)
+    if (previous) {
+      if (previous.nextElementSibling !== node) previous.after(node)
+    } else if (el.stack.firstElementChild !== node) {
+      el.stack.prepend(node)
+    }
+    previous = node
+  }
+  el.stack.append(el.chips)
+
+  const hiddenGroups = stackHidden
+    ? groups
+    : groups.filter((group) => collapsed.has(group.key) || !visibleKeys.has(group.key))
+  el.chips.hidden = hiddenGroups.length === 0
+  el.chips.replaceChildren(
+    ...hiddenGroups.map((group) =>
+      buildChip(group.key, group.session.state, group.key, () => {
+        stackHidden = false
+        collapsed.delete(group.key)
         render()
       })
-      return button
-    })
+    )
   )
-}
 
-function renderLog(session) {
-  if (!expanded) {
-    el.log.replaceChildren()
-    return
-  }
-  const entries = session?.recent ?? []
-  el.log.replaceChildren(
-    ...entries
-      .slice()
-      .reverse()
-      .map((entry) => {
-        const item = document.createElement('li')
-        item.dataset.state = entry.state
-        const when = document.createElement('span')
-        when.textContent = relativeTime(entry.ms)
-        const what = document.createElement('span')
-        what.textContent = entry.text
-        item.append(when, what)
-        return item
-      })
-  )
+  syncHitRects()
 }
 
 /**
@@ -161,8 +267,9 @@ function syncHitRects() {
     if (r.width && r.height) rects.push({ x: r.x, y: r.y, w: r.width, h: r.height })
   }
   add(el.pet)
-  add(el.card)
   add(el.menu)
+  if (!el.chips.hidden) add(el.chips)
+  for (const node of cards.values()) add(node)
   invoke('set_hit_rects', { rects }).catch(() => {})
 }
 
@@ -173,10 +280,23 @@ function showNotice(message) {
     notice = null
     render()
   }, 6000)
+  sessions = [
+    {
+      session_id: 'notice',
+      project: 'Pipsqueak',
+      state: 'idle',
+      headline: message,
+      activity: '',
+      detail: '',
+      updated_ms: Date.now(),
+      recent: []
+    },
+    ...sessions.filter((s) => s.session_id !== 'notice')
+  ]
   render()
 }
 
-// --- context menu ------------------------------------------------------
+// --- context menu -------------------------------------------------------
 async function openMenu() {
   const pets = await invoke('list_pets').catch(() => [])
   const installed = await invoke('hooks_installed').catch(() => false)
@@ -204,34 +324,45 @@ async function openMenu() {
   children.push(heading('Pet'))
   for (const pet of pets) {
     const label = pet.source === 'codex' ? `${pet.displayName} (Codex)` : pet.displayName
-    children.push(
-      button(label, () => selectPet(pet.id), pet.id === config.pet)
-    )
+    children.push(button(label, () => selectPet(pet.id), pet.id === config.pet))
   }
 
   children.push(heading('Size'))
   for (const [label, value] of [['Small', 1.5], ['Medium', 2], ['Large', 3]]) {
     children.push(
-      button(label, async () => {
-        config.scale = value
-        renderer.setScale(value)
-        await saveConfig()
-      }, config.scale === value)
+      button(
+        label,
+        async () => {
+          config.scale = value
+          renderer.setScale(value)
+          await saveConfig()
+        },
+        config.scale === value
+      )
     )
   }
 
-  children.push(heading('Window'))
+  children.push(heading('Cards'))
   children.push(
-    button('Click through the pet', async () => {
-      config.clickThrough = !config.clickThrough
-      await saveConfig()
-    }, config.clickThrough)
+    button('Show all projects', () => {
+      stackHidden = false
+      collapsed.clear()
+    })
   )
   children.push(
-    button('Show status bubble', async () => {
-      config.showBubble = !config.showBubble
-      await saveConfig()
-    }, config.showBubble)
+    button('Hide all cards', () => {
+      stackHidden = true
+    })
+  )
+  children.push(
+    button(
+      'Click through the pet',
+      async () => {
+        config.clickThrough = !config.clickThrough
+        await saveConfig()
+      },
+      config.clickThrough
+    )
   )
 
   children.push(heading('Setup'))
@@ -274,7 +405,7 @@ async function saveConfig() {
   }).catch(() => {})
 }
 
-// --- interaction -------------------------------------------------------
+// --- interaction --------------------------------------------------------
 function wireInteraction() {
   let origin = null
   let dragging = false
@@ -297,8 +428,8 @@ function wireInteraction() {
     if (origin && !dragging) {
       // A click outside the menu can't reach us — the window is click-through
       // there — so the pet itself is what dismisses it.
-      if (el.menu.hidden) expanded = !expanded
-      else el.menu.hidden = true
+      if (!el.menu.hidden) el.menu.hidden = true
+      else stackHidden = !stackHidden
       render()
     }
     origin = null
@@ -315,22 +446,6 @@ function wireInteraction() {
 
   document.addEventListener('contextmenu', (event) => event.preventDefault())
 
-  el.card.addEventListener('click', (event) => {
-    const action = event.target.closest('[data-action]')?.dataset.action
-    if (!action) return
-    if (action === 'pets') invoke('open_pets_dir').catch(() => {})
-    if (action === 'quit') invoke('quit')
-    if (action === 'hooks') {
-      invoke('install_hooks')
-        .then(showNotice)
-        .catch((error) => showNotice(String(error)))
-    }
-    if (action === 'through') {
-      config.clickThrough = !config.clickThrough
-      saveConfig().then(render)
-    }
-  })
-
   if (!appWindow) return
   appWindow.onMoved(({ payload }) => {
     config.x = payload.x
@@ -339,12 +454,12 @@ function wireInteraction() {
   })
 }
 
-// --- boot --------------------------------------------------------------
+// --- boot ---------------------------------------------------------------
 async function boot() {
   const stored = await invoke('get_config').catch(() => null)
   if (stored) {
     config = {
-      pet: stored.pet ?? 'pip',
+      pet: stored.pet ?? 'ember',
       scale: stored.scale ?? 2,
       clickThrough: Boolean(stored.click_through),
       showBubble: stored.show_bubble !== false,
@@ -354,11 +469,10 @@ async function boot() {
   }
 
   try {
-    const payload = config.pet === 'pip' ? null : await invoke('load_pet', { id: config.pet })
-    await renderer.load(config.pet, payload)
+    await renderer.load(config.pet, await loadPetPayload(config.pet))
   } catch {
-    await renderer.load('pip', null)
-    config.pet = 'pip'
+    config.pet = 'ember'
+    await renderer.load('ember', null)
   }
   renderer.setScale(config.scale)
   renderer.start()
@@ -384,53 +498,62 @@ async function boot() {
     }
     const live = new Set(incoming.map((s) => s.session_id))
     seenSessions = new Set([...seenSessions].filter((id) => live.has(id)))
-    if (pinnedSession && !live.has(pinnedSession)) pinnedSession = null
-    sessions = incoming
+    sessions = notice ? [sessions[0], ...incoming] : incoming
     render()
   })
 
   await listen('pipsqueak://notice', (event) => showNotice(String(event.payload)))
 
-  // Ages tick even when nothing changes, and layout can shift under us.
+  // Ages tick and the dwell timer expires even when no event arrives.
   setInterval(render, 1000)
 }
 
-/** Cycles the states in a browser tab so the UI can be designed without a build. */
+/** Built-in pets ship inside the frontend bundle; the rest come from disk. */
+async function loadPetPayload(id) {
+  if (id === 'ember' || id === 'pip') return null
+  return invoke('load_pet', { id })
+}
+
+/** Cycles states in a browser tab so the UI can be designed without a build. */
 function startBrowserDemo() {
-  const steps = [
-    ['thinking', 'Thinking…', ''],
-    ['running', 'Reading clock.test.js', ''],
-    ['running', 'Running: npm test -- --run', ''],
-    ['waiting', 'Needs permission: Running: rm -rf build', ''],
-    ['failed', 'Bash failed', 'clock.test.js > formats in UTC\n  expected 03:00 to be 02:00'],
-    ['done', 'Fixed: the formatter used local time.', 'All 42 tests pass.'],
-    ['idle', 'Session started', '']
-  ]
-  let index = 0
+  const scripts = {
+    pipsqueak: [
+      ['thinking', 'Fix the flaky timezone test', 'Thinking…'],
+      ['running', 'Fix the flaky timezone test', 'Reading clock.test.js'],
+      ['running', 'Fix the flaky timezone test', 'Running: npm test -- --run'],
+      ['waiting', 'Fix the flaky timezone test', 'Needs permission to run: rm -rf build'],
+      ['failed', 'Fix the flaky timezone test', 'Bash failed'],
+      ['done', 'Fixed: the formatter used local time.', '']
+    ],
+    orchestrator: [
+      ['running', 'Add tier C eval scenarios', 'Editing scenarios.json'],
+      ['running', 'Add tier C eval scenarios', 'Running: pytest -q'],
+      ['done', 'Added 12 scenarios and wired them into the suite.', '']
+    ]
+  }
+  let tick = 0
   const advance = () => {
-    const [state, activity, detail] = steps[index % steps.length]
     const now = Date.now()
-    const previous = sessions[0]?.recent ?? []
-    sessions = [
-      {
-        session_id: 'demo',
+    sessions = Object.entries(scripts).map(([project, steps], i) => {
+      const [state, headline, activity] = steps[(tick + i) % steps.length]
+      return {
+        session_id: project,
+        project,
         state,
+        headline,
         activity,
-        detail,
-        project: 'pipsqueak',
-        cwd: '/demo',
-        event: 'demo',
+        detail: state === 'failed' ? 'expected 03:00 to be 02:00' : '',
         updated_ms: now,
         started_ms: now - 60_000,
-        tools: index,
-        recent: [...previous, { ms: now, state, text: activity }].slice(-24)
+        tools: tick,
+        recent: [{ ms: now, state, text: activity || headline }]
       }
-    ]
-    index += 1
+    })
+    tick += 1
     render()
   }
   advance()
-  setInterval(advance, 2600)
+  setInterval(advance, 2000)
   setInterval(render, 1000)
 }
 

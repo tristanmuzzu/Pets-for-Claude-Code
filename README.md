@@ -7,7 +7,7 @@ Claude Code works, the pet mirrors its state: thinking, running a tool, blocked
 on a permission prompt, failed, or done. Watch a video, read a PR, do anything
 else, and still know at a glance whether the agent is busy, stuck, or finished.
 
-![Pipsqueak showing a blocked permission prompt](assets/screenshot-waiting.png)
+![Two projects stacked, one of them blocked on input](assets/screenshot-stack.png)
 
 ---
 
@@ -26,23 +26,40 @@ sits stalled for ten minutes while you're in another window.
 - **Transparent always-on-top overlay** — no taskbar entry, no window chrome.
 - **Click-through everywhere except the pet.** The overlay does not eat clicks
   meant for whatever is underneath it. Most pet overlays get this wrong.
-- **A glanceable status bubble** — the project name plus what's happening right
-  now: `Editing render.js`, `Running: npm test`, `Needs permission: Bash`.
-- **Multi-session aware.** Run Claude Code in three projects; the pet shows the
-  one that needs you, and click it to see and switch between all of them.
-- **An event log** — click the pet for the last two dozen things it did, with
-  relative timestamps.
-- **Bring your own pet.** Drop a sprite folder in and pick it from the menu.
+- **One card per project, stacked.** Run Claude Code in four repos and you get
+  four cards, not one bubble flickering between them. Press **×** to collapse a
+  project into a chip; it reopens itself if that project gets blocked or fails.
+- **Readable at speed.** Each card has a *headline* — what the turn is about —
+  that changes once per turn, and a dimmer live line for the current tool. The
+  live line has a floor on how often it may change, so nothing flashes past.
+- **An event log** — click a card for the last two dozen things that project
+  did, with relative timestamps.
+- **Two pets built in**, and you can drop your own sprite folder in.
 - **Codex pets work as-is.** Pipsqueak reads the same `pet.json` +
   spritesheet layout, including any pets already in `~/.codex/pets`.
 
+### Why it stays readable
+
+An agent can fire five tools in three seconds. Showing each one is unreadable;
+showing none of it is useless. Pipsqueak splits the difference:
+
+| Line | Source | Changes |
+| --- | --- | --- |
+| Headline | your prompt, then Claude's answer at the end of the turn | once per turn |
+| Live line | the current tool call | at most every 2.5s |
+
+If several tool calls are skipped while the live line is held, the card shows a
+small `+3` so you know things are moving fast. Anything that needs you —
+a permission prompt, a failure — bypasses the delay entirely.
+
 ## States
 
-![Pip idle, working, waiting, failed, reviewing, and mid-hop](assets/states.png)
+![Ember idle, working, waiting, failed, reviewing, and mid-hop](assets/states-ember.png)
 
-When something breaks, it looks like this:
+A single project, blocked and then broken:
 
-![Pipsqueak showing a failed tool call](assets/screenshot-failed.png)
+![A permission prompt waiting for an answer](assets/screenshot-waiting.png)
+![A failed tool call](assets/screenshot-failed.png)
 
 | Pet | State | Fires on |
 | --- | --- | --- |
@@ -111,7 +128,19 @@ timid:
 The hooks are `async`, so they never add latency to a turn, and they never write
 to stdout — nothing Pipsqueak does can alter what Claude Code decides.
 
-## Custom pets
+## Pets
+
+Two ship with the app, switchable from the right-click menu:
+
+| | | |
+| --- | --- | --- |
+| **Ember** (default) | a clay pebble with a spark for a status light | ![Ember](assets/states-ember.png) |
+| **Pip** | an ember-fox with a floating wisp | ![Pip](assets/states-pip.png) |
+
+Neither uses anyone's logo or branding. If you want a mascot that does, that is
+your call to make on your own machine — see below.
+
+### Custom pets
 
 A pet is a folder with two files:
 
@@ -156,9 +185,11 @@ including ones already installed in `~/.codex/pets`, which show up in the menu
 automatically. It works in the other direction too: copy `~/.pipsqueak/pets/*`
 into `~/.codex/pets/` and they run there.
 
-Pip, the default pet, is generated rather than drawn — see
-[`tools/gen-sprites.mjs`](tools/gen-sprites.mjs). `npm run sprites` rebuilds the
-atlas; it is a decent starting point for a palette-swapped variant.
+Both built-in pets are generated rather than drawn — see
+[`tools/pixel.mjs`](tools/pixel.mjs) for the shared toolkit and
+[`gen-ember.mjs`](tools/gen-ember.mjs) / [`gen-sprites.mjs`](tools/gen-sprites.mjs)
+for the characters. `npm run sprites` rebuilds both atlases, and either file is a
+short read if you want a palette-swapped variant.
 
 ## Configuration
 
@@ -167,7 +198,7 @@ right-click menu:
 
 | Key | Meaning |
 | --- | --- |
-| `pet` | id of the active pet |
+| `pet` | id of the active pet (`ember` by default) |
 | `scale` | `1.5`, `2`, or `3` |
 | `click_through` | make the pet itself non-interactive too |
 | `show_bubble` | hide the status bubble, keep the pet |

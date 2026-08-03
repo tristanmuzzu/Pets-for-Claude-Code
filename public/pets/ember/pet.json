@@ -1,7 +1,7 @@
 {
-  "id": "pip",
-  "displayName": "Pip",
-  "description": "An ember-fox with a status wisp.",
+  "id": "ember",
+  "displayName": "Ember",
+  "description": "A clay pebble with a spark for a status light. The default companion.",
   "spritesheetPath": "spritesheet.png",
   "frameWidth": 48,
   "frameHeight": 48,

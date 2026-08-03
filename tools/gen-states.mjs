@@ -7,8 +7,9 @@ import { encodePng } from './png.mjs'
 import { decodePng } from './pngdec.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const ATLAS = resolve(HERE, '..', 'public', 'pets', 'pip', 'spritesheet.png')
-const OUT = resolve(HERE, '..', 'assets', 'states.png')
+const pet = process.argv[2] ?? 'ember'
+const ATLAS = resolve(HERE, '..', 'public', 'pets', pet, 'spritesheet.png')
+const OUT = resolve(HERE, '..', 'assets', `states-${pet}.png`)
 
 const FRAME = 48
 const SCALE = 4
