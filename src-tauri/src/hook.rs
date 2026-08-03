@@ -90,12 +90,8 @@ fn classify(event: &str, payload: &Value) -> Option<(&'static str, String, Strin
             "Thinking…".into(),
             truncate(&text("prompt"), 400),
         ),
-        "PreToolUse" => ("running", describe_tool(&tool, input), String::new()),
-        "PostToolUse" => (
-            "running",
-            format!("Done: {}", describe_tool(&tool, input)),
-            String::new(),
-        ),
+        "PreToolUse" => ("running", phrase(&tool, input).present, String::new()),
+        "PostToolUse" => ("running", phrase(&tool, input).past, String::new()),
         "PostToolUseFailure" => (
             "failed",
             format!("{} failed", pretty_tool(&tool)),
@@ -103,12 +99,12 @@ fn classify(event: &str, payload: &Value) -> Option<(&'static str, String, Strin
         ),
         "PermissionRequest" => (
             "waiting",
-            format!("Needs permission: {}", describe_tool(&tool, input)),
+            format!("Needs permission to {}", phrase(&tool, input).infinitive),
             String::new(),
         ),
         "PermissionDenied" => (
             "failed",
-            format!("Denied: {}", pretty_tool(&tool)),
+            format!("Not allowed to {}", phrase(&tool, input).infinitive),
             String::new(),
         ),
         "Notification" => {
@@ -165,7 +161,31 @@ fn classify(event: &str, payload: &Value) -> Option<(&'static str, String, Strin
     })
 }
 
-fn describe_tool(tool: &str, input: Option<&Value>) -> String {
+/// One tool call, in the three tenses the bubble needs: "Editing clock.js",
+/// "Edited clock.js", "…permission to edit clock.js".
+struct Phrase {
+    present: String,
+    past: String,
+    infinitive: String,
+}
+
+fn forms(ing: &str, ed: &str, base: &str, object: &str) -> Phrase {
+    let object = object.trim();
+    let join = |verb: &str| {
+        if object.is_empty() {
+            verb.trim_end_matches(':').to_string()
+        } else {
+            format!("{verb} {object}")
+        }
+    };
+    Phrase {
+        present: join(ing),
+        past: join(ed),
+        infinitive: join(base),
+    }
+}
+
+fn phrase(tool: &str, input: Option<&Value>) -> Phrase {
     let field = |key: &str| {
         input
             .and_then(|v| v.get(key))
@@ -177,8 +197,8 @@ fn describe_tool(tool: &str, input: Option<&Value>) -> String {
     if let Some(rest) = tool.strip_prefix("mcp__") {
         let mut parts = rest.splitn(2, "__");
         let server = parts.next().unwrap_or("mcp");
-        let name = parts.next().unwrap_or("call");
-        return format!("{}: {}", server, name.replace('_', " "));
+        let name = parts.next().unwrap_or("call").replace('_', " ");
+        return forms("Calling", "Called", "call", &format!("{server}: {name}"));
     }
 
     match tool {
@@ -186,24 +206,47 @@ fn describe_tool(tool: &str, input: Option<&Value>) -> String {
             let description = field("description");
             let command = field("command");
             let shown = if description.is_empty() { command } else { description };
-            format!("Running: {}", truncate(&shown, 64))
+            forms("Running:", "Ran:", "run:", &truncate(&shown, 64))
         }
-        "Read" => format!("Reading {}", basename_or(&field("file_path"), "a file")),
-        "Edit" => format!("Editing {}", basename_or(&field("file_path"), "a file")),
-        "Write" => format!("Writing {}", basename_or(&field("file_path"), "a file")),
-        "NotebookEdit" => format!("Editing {}", basename_or(&field("notebook_path"), "a notebook")),
-        "Glob" => format!("Finding {}", short(&field("pattern"), "files")),
-        "Grep" => format!("Searching for {}", truncate(&field("pattern"), 40)),
-        "WebFetch" => format!("Fetching {}", host_of(&field("url"))),
-        "WebSearch" => format!("Searching the web for {}", truncate(&field("query"), 40)),
-        "Task" | "Agent" => format!(
-            "Delegating to {}",
-            short(&field("subagent_type"), "a subagent")
+        "Read" => forms("Reading", "Read", "read", &basename_or(&field("file_path"), "a file")),
+        "Edit" => forms("Editing", "Edited", "edit", &basename_or(&field("file_path"), "a file")),
+        "Write" => forms("Writing", "Wrote", "write", &basename_or(&field("file_path"), "a file")),
+        "NotebookEdit" => forms(
+            "Editing",
+            "Edited",
+            "edit",
+            &basename_or(&field("notebook_path"), "a notebook"),
         ),
-        "Skill" => format!("Running skill {}", short(&field("skill"), "")),
-        "TodoWrite" | "TaskCreate" | "TaskUpdate" => "Updating tasks".to_string(),
-        "" => "Working".to_string(),
-        other => pretty_tool(other),
+        "Glob" => forms("Finding", "Found", "find", &short(&field("pattern"), "files")),
+        "Grep" => forms(
+            "Searching for",
+            "Searched for",
+            "search for",
+            &truncate(&field("pattern"), 40),
+        ),
+        "WebFetch" => forms("Fetching", "Fetched", "fetch", &host_of(&field("url"))),
+        "WebSearch" => forms(
+            "Searching the web for",
+            "Searched the web for",
+            "search the web for",
+            &truncate(&field("query"), 40),
+        ),
+        "Task" | "Agent" => forms(
+            "Delegating to",
+            "Heard back from",
+            "delegate to",
+            &short(&field("subagent_type"), "a subagent"),
+        ),
+        "Skill" => forms("Running skill", "Ran skill", "run skill", &field("skill")),
+        "TodoWrite" | "TaskCreate" | "TaskUpdate" => {
+            forms("Updating", "Updated", "update", "tasks")
+        }
+        "" => forms("Working", "Worked", "work", ""),
+        other => Phrase {
+            present: other.to_string(),
+            past: format!("{other} finished"),
+            infinitive: format!("use {other}"),
+        },
     }
 }
 
@@ -294,9 +337,21 @@ mod tests {
     }
 
     #[test]
+    fn finished_tools_are_reported_in_the_past_tense() {
+        let payload = json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/code/render.js" }
+        });
+        assert_eq!(activity_of("PostToolUse", payload), "Edited render.js");
+    }
+
+    #[test]
     fn mcp_tools_are_split_into_server_and_call() {
         let payload = json!({ "tool_name": "mcp__github__create_issue" });
-        assert_eq!(activity_of("PreToolUse", payload), "github: create issue");
+        assert_eq!(
+            activity_of("PreToolUse", payload),
+            "Calling github: create issue"
+        );
     }
 
     #[test]
@@ -307,7 +362,7 @@ mod tests {
         });
         let (state, activity, _) = classify("PermissionRequest", &payload).unwrap();
         assert_eq!(state, "waiting");
-        assert!(activity.starts_with("Needs permission: Running: rm -rf build"));
+        assert_eq!(activity, "Needs permission to run: rm -rf build");
     }
 
     #[test]

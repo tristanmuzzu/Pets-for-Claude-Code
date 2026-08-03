@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -35,6 +36,10 @@ impl Rect {
 
 #[derive(Default)]
 struct Interactive(Mutex<Vec<Rect>>);
+
+/// Mirrors `config.click_through` so the hit-test loop never touches the disk.
+#[derive(Default)]
+struct ClickThrough(AtomicBool);
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +71,9 @@ fn get_config() -> Config {
 
 #[tauri::command]
 fn set_config(app: AppHandle, config: Config) -> Result<(), String> {
+    app.state::<ClickThrough>()
+        .0
+        .store(config.click_through, Ordering::Relaxed);
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         let _ = window.set_ignore_cursor_events(config.click_through);
     }
@@ -296,7 +304,7 @@ fn spawn_hit_test(app: AppHandle) {
             let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
                 continue;
             };
-            if load_config().click_through {
+            if app.state::<ClickThrough>().0.load(Ordering::Relaxed) {
                 if last != Some(true) {
                     let _ = window.set_ignore_cursor_events(true);
                     last = Some(true);
@@ -389,6 +397,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 let mut config = load_config();
                 config.click_through = !config.click_through;
                 let _ = state::save_config(&config);
+                app.state::<ClickThrough>()
+                    .0
+                    .store(config.click_through, Ordering::Relaxed);
                 if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
                     let _ = window.set_ignore_cursor_events(config.click_through);
                 }
@@ -431,6 +442,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(Interactive::default())
+        .manage(ClickThrough::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             get_config,
@@ -447,6 +459,10 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let config = load_config();
+            handle
+                .state::<ClickThrough>()
+                .0
+                .store(config.click_through, Ordering::Relaxed);
             place_window(&handle, &config);
             if let Some(window) = handle.get_webview_window(WINDOW_LABEL) {
                 let _ = window.set_ignore_cursor_events(true);

@@ -7,7 +7,7 @@ Claude Code works, the pet mirrors its state: thinking, running a tool, blocked
 on a permission prompt, failed, or done. Watch a video, read a PR, do anything
 else, and still know at a glance whether the agent is busy, stuck, or finished.
 
-![Pip in every state](assets/states.png)
+![Pipsqueak showing a blocked permission prompt](assets/screenshot-waiting.png)
 
 ---
 
@@ -38,6 +38,12 @@ sits stalled for ten minutes while you're in another window.
 
 ## States
 
+![Pip idle, working, waiting, failed, reviewing, and mid-hop](assets/states.png)
+
+When something breaks, it looks like this:
+
+![Pipsqueak showing a failed tool call](assets/screenshot-failed.png)
+
 | Pet | State | Fires on |
 | --- | --- | --- |
 | 💤 grey wisp | `idle` | session started, nothing running |
@@ -50,7 +56,7 @@ sits stalled for ten minutes while you're in another window.
 ## Install
 
 **Windows 10/11.** Download the installer from
-[Releases](https://github.com/tristanmuzzu/pipsqueak/releases) and run it.
+[Releases](https://github.com/ResolveZeticle/pipsqueak/releases) and run it.
 Requires the Microsoft Edge WebView2 runtime, which ships with Windows 11 and is
 installed automatically by the setup if missing.
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A tiny desktop pet that shows what Claude Code is doing, at a glance."
 authors = ["Tristan Rafe Muzzu"]
 license = "MIT"
-repository = "https://github.com/tristanmuzzu/pipsqueak"
+repository = "https://github.com/ResolveZeticle/pipsqueak"
 edition = "2021"
 rust-version = "1.77"
 
@@ -12,7 +12,9 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# macos-private-api pairs with `macOSPrivateApi` in tauri.conf.json; it is what
+# makes the window actually transparent on macOS and is inert elsewhere.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
