@@ -12,13 +12,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 const HIT_TEST_INTERVAL: Duration = Duration::from_millis(60);
+/// Often enough that a crashed session disappears while you are still looking
+/// at the card, rare enough that it costs nothing.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 const WINDOW_LABEL: &str = "pet";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -374,7 +377,15 @@ fn spawn_hit_test(app: AppHandle) {
 fn spawn_poller(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last = String::new();
+        let mut next_sweep = Instant::now();
         loop {
+            // Hooks can only ever say what happened; nothing writes a file to
+            // report that Claude Code died. The sweep is the only thing that
+            // can retire a session, so it has to run on a clock of its own.
+            if Instant::now() >= next_sweep {
+                state::sweep();
+                next_sweep = Instant::now() + SWEEP_INTERVAL;
+            }
             let sessions = read_sessions();
             let encoded = serde_json::to_string(&sessions).unwrap_or_default();
             if encoded != last {
@@ -524,7 +535,7 @@ pub fn run() {
     let _ = fs::create_dir_all(sessions_dir());
     let _ = fs::create_dir_all(pets_dir());
     let _ = fs::create_dir_all(root());
-    state::prune_stale();
+    state::sweep();
 
     tauri::Builder::default()
         .manage(Interactive::default())

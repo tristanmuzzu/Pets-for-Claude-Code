@@ -5,13 +5,22 @@
 //! directory. That keeps the hook a fire-and-forget process with no port to
 //! collide with and no daemon to be running first.
 
+use crate::process;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RECENT_LIMIT: usize = 24;
+
+/// A session nobody has touched in this long is gone, whatever it last claimed.
+/// Generous on purpose: a real prompt left waiting overnight is still true.
 const STALE_AFTER_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// Work that has produced no event in this long is not happening. Claude Code
+/// fires a hook for every tool call, so silence this long means the turn died
+/// without a `Stop` — the card must stop claiming otherwise.
+const WORKING_STALE_MS: u64 = 5 * 60 * 1000;
 
 pub fn home_dir() -> PathBuf {
     #[cfg(windows)]
@@ -84,11 +93,19 @@ pub struct Entry {
     pub text: String,
 }
 
+/// Durable states: what the session *is* doing.
+///
+/// Deliberately excludes "waiting", "done" and "failed". Those are answers to
+/// different questions — is a human blocking this, and how did the last turn
+/// end — and storing them here is what lets a card get stuck on an alert
+/// forever when the resolving event never arrives.
+pub const RUNNING_STATES: [&str; 3] = ["thinking", "running", "compacting"];
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct Session {
     pub session_id: String,
-    /// idle | thinking | running | waiting | failed | done | compacting
+    /// idle | thinking | running | compacting. Only forward progress moves it.
     pub state: String,
     /// What this turn is *about*. Set when the turn starts and replaced when it
     /// ends — never by tool events, so it stays readable while tools churn.
@@ -120,6 +137,35 @@ pub struct Session {
     pub turn_tools: u64,
     pub tools: u64,
     pub recent: Vec<Entry>,
+
+    /// How the last turn ended: "" | done | failed. Cleared the moment the
+    /// next turn starts, so it can never outlive the thing it describes.
+    pub outcome: String,
+    pub outcome_ms: u64,
+    /// A `done` is only real once the clock passes this. Claude Code sends
+    /// `Stop` while background tasks are still finishing, so an immediate
+    /// celebration is sometimes premature; holding it briefly lets the next
+    /// event cancel it instead.
+    pub settles_ms: u64,
+    /// Non-zero while Claude Code is genuinely blocked on a human. Cleared by
+    /// any forward progress.
+    pub waiting_since: u64,
+    pub waiting_reason: String,
+    /// Tool failures inside the current turn. A failed grep is not a failed
+    /// turn — Claude usually just tries something else — so this is a marker,
+    /// not a state.
+    pub hiccups: u64,
+    /// Subagents started but not yet finished.
+    pub subagents: u64,
+
+    /// The agent process that owns this session, as `(pid, creation time)`.
+    /// The creation time is what makes it safe: pids get reused, and a reused
+    /// pid would otherwise report a dead session as alive.
+    pub agent_pid: u32,
+    pub agent_created: u64,
+    /// Timestamp of the event this file describes. Claude Code runs matching
+    /// hooks in parallel, so two writers can race; the older one must lose.
+    pub event_ms: u64,
 }
 
 impl Session {
@@ -138,6 +184,20 @@ impl Session {
         if overflow > 0 {
             self.recent.drain(0..overflow);
         }
+    }
+
+    pub fn is_running(&self) -> bool {
+        RUNNING_STATES.contains(&self.state.as_str())
+    }
+
+    /// Forward progress: whatever the session was blocked on or had finished
+    /// is no longer true.
+    pub fn clear_pending(&mut self) {
+        self.outcome.clear();
+        self.outcome_ms = 0;
+        self.settles_ms = 0;
+        self.waiting_since = 0;
+        self.waiting_reason.clear();
     }
 }
 
@@ -204,6 +264,63 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// Held for the read-modify-write of one session file.
+///
+/// Claude Code runs every matching hook for an event in parallel, so two
+/// `pipsqueak hook` processes routinely touch the same file at the same
+/// moment. Without this, both read the same "before", and whichever renames
+/// last silently discards the other's event.
+pub struct FileLock {
+    path: PathBuf,
+    held: bool,
+}
+
+impl FileLock {
+    /// Waits up to ~200ms, then proceeds anyway.
+    ///
+    /// Losing an event is worse than an interleaved write: hooks are the only
+    /// source of truth here, and a hook that gives up writes nothing at all.
+    pub fn acquire(target: &Path) -> Self {
+        let path = target.with_extension("json.lock");
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        for attempt in 0..40 {
+            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => return Self { path, held: true },
+                Err(_) => {
+                    // A hook killed mid-write would otherwise block every later
+                    // event for this session forever.
+                    if attempt == 0 {
+                        if let Ok(meta) = fs::metadata(&path) {
+                            let expired = meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.elapsed().ok())
+                                .map(|age| age.as_secs() >= 2)
+                                .unwrap_or(true);
+                            if expired {
+                                let _ = fs::remove_file(&path);
+                                continue;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        Self { path, held: false }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub fn read_sessions() -> Vec<Session> {
     let mut out: Vec<Session> = Vec::new();
     let Ok(entries) = fs::read_dir(sessions_dir()) else {
@@ -223,39 +340,80 @@ pub fn read_sessions() -> Vec<Session> {
     }
     // Anything needing a human wins, then most recently active.
     out.sort_by(|a, b| {
-        attention_rank(&b.state)
-            .cmp(&attention_rank(&a.state))
-            .then(b.updated_ms.cmp(&a.updated_ms))
+        attention_rank(b).cmp(&attention_rank(a)).then(b.updated_ms.cmp(&a.updated_ms))
     });
     out
 }
 
-fn attention_rank(state: &str) -> u8 {
-    match state {
-        "waiting" => 3,
-        "failed" => 2,
-        _ => 0,
+fn attention_rank(session: &Session) -> u8 {
+    if session.waiting_since > 0 {
+        3
+    } else if session.outcome == "failed" {
+        2
+    } else {
+        0
     }
 }
 
-/// Drop session files left behind by crashed or force-quit sessions.
-pub fn prune_stale() {
+/// Retires sessions that are no longer telling the truth.
+///
+/// Three rules, in order of how confident each is:
+///
+/// 1. The agent process is gone. Certain, so delete the session outright.
+/// 2. Nothing has happened for [`WORKING_STALE_MS`] while the card claims work
+///    is in progress. Claude Code fires a hook per tool call, so that silence
+///    means the turn died without a `Stop`. Downgrade rather than delete —
+///    the session may still be resumed. A session genuinely *waiting* on a
+///    human is left alone: that claim stays true no matter how long it takes.
+/// 3. Nothing at all for [`STALE_AFTER_MS`]. Delete.
+///
+/// Returns the number of files it changed, so callers can skip a redraw.
+pub fn sweep() -> usize {
     let now = now_ms();
     let Ok(entries) = fs::read_dir(sessions_dir()) else {
-        return;
+        return 0;
     };
+    let mut changed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let stale = fs::read_to_string(&path)
+        let Some(mut session) = fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<Session>(&raw).ok())
-            .map(|s| now.saturating_sub(s.updated_ms) > STALE_AFTER_MS)
-            .unwrap_or(true);
-        if stale {
+        else {
+            // Unreadable or from an incompatible build: it can only mislead.
             let _ = fs::remove_file(&path);
+            changed += 1;
+            continue;
+        };
+
+        let age = now.saturating_sub(session.updated_ms);
+
+        if session.agent_pid != 0 && !process::is_alive(session.agent_pid, session.agent_created) {
+            let _ = fs::remove_file(&path);
+            changed += 1;
+            continue;
+        }
+        if age > STALE_AFTER_MS {
+            let _ = fs::remove_file(&path);
+            changed += 1;
+            continue;
+        }
+        if age > WORKING_STALE_MS && session.is_running() {
+            session.state = "idle".to_string();
+            session.kind = "Idle".to_string();
+            session.activity.clear();
+            session.subagents = 0;
+            // Not a completion. Saying "Done" here would be the same lie in a
+            // friendlier voice.
+            session.headline = "Stopped responding".to_string();
+            if let Ok(bytes) = serde_json::to_vec(&session) {
+                let _ = write_atomic(&path, &bytes);
+                changed += 1;
+            }
         }
     }
+    changed
 }

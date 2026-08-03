@@ -180,6 +180,29 @@ pub fn uninstall() -> Result<String, String> {
     ))
 }
 
+pub fn installed() -> bool {
+    let Ok((root, _, _)) = read_settings() else {
+        return false;
+    };
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    hooks.values().any(|groups| {
+        groups
+            .as_array()
+            .map(|list| {
+                list.iter().any(|group| {
+                    group
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .map(|entries| entries.iter().any(is_ours))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,27 +240,4 @@ mod tests {
         groups.push(our_group("pipsqueak.exe", "Stop"));
         assert_eq!(groups.len(), 1);
     }
-}
-
-pub fn installed() -> bool {
-    let Ok((root, _, _)) = read_settings() else {
-        return false;
-    };
-    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
-        return false;
-    };
-    hooks.values().any(|groups| {
-        groups
-            .as_array()
-            .map(|list| {
-                list.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(Value::as_array)
-                        .map(|entries| entries.iter().any(is_ours))
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false)
-    })
 }

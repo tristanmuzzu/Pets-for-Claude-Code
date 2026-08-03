@@ -5,6 +5,7 @@ mod control;
 mod desktop;
 mod hook;
 mod install;
+mod process;
 mod project;
 mod state;
 

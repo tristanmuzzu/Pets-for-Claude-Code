@@ -15,8 +15,33 @@ const SLOT_LIMIT = 3
 const WAITING_DEBOUNCE_MS = 800
 /** How long a finished project keeps its card before collapsing to a chip. */
 const DONE_LINGER_MS = 30_000
+/** A failed turn is something you need to see, so it waits around longer. */
+const FAILED_LINGER_MS = 5 * 60_000
 const URGENT = new Set(['waiting', 'failed'])
 const ACTIVE = new Set(['thinking', 'running', 'waiting', 'failed', 'compacting', 'done'])
+/** The durable states a session file can report. */
+const RUNNING = new Set(['thinking', 'running', 'compacting'])
+
+/**
+ * Which state wins when a project has several, and how long each one holds the
+ * card once shown.
+ *
+ * The hold is what makes the stack readable. Hook events arrive in bursts, and
+ * without a floor the card can flick through three states faster than you can
+ * read one — and "needs you" can vanish under a later "running" before you
+ * ever look up.
+ */
+const DISPLAY = {
+  waiting: { rank: 5, hold: 2500 },
+  failed: { rank: 4, hold: 4000 },
+  done: { rank: 3, hold: 2500 },
+  compacting: { rank: 2, hold: 1500 },
+  running: { rank: 2, hold: 900 },
+  thinking: { rank: 2, hold: 900 },
+  idle: { rank: 0, hold: 0 }
+}
+
+const priority = (state) => DISPLAY[state]?.rank ?? 1
 
 const el = {
   stack: document.getElementById('stack'),
@@ -58,7 +83,14 @@ const chipNodes = new Map()
 function viewFor(key) {
   let view = views.get(key)
   if (!view) {
-    view = { expanded: false, waitingSince: 0, lastStable: 'running', wasUrgent: false }
+    view = {
+      expanded: false,
+      lastStable: 'running',
+      wasUrgent: false,
+      // The state currently on screen, and the earliest it may be replaced.
+      heldState: '',
+      heldUntil: 0
+    }
     views.set(key, view)
   }
   return view
@@ -77,7 +109,7 @@ function groupByProject(list) {
     const existing = index.get(key)
     if (existing) {
       existing.count += 1
-      if (rank(session.state) > rank(existing.session.state)) existing.session = session
+      if (rank(session) > rank(existing.session)) existing.session = session
       continue
     }
     const group = { key, session, count: 1 }
@@ -91,28 +123,61 @@ function groupByProject(list) {
   return groups
 }
 
-function rank(state) {
-  if (state === 'waiting') return 3
-  if (state === 'failed') return 2
-  if (state === 'idle') return 0
-  return 1
+/** Which of a project's sessions gets to speak for it. */
+function rank(session) {
+  if (session.waiting_since) return 4
+  if (session.outcome === 'failed') return 3
+  if (RUNNING.has(session.state)) return 2
+  if (session.outcome === 'done') return 1
+  return 0
+}
+
+/**
+ * Turn a session file into the one word the card shows.
+ *
+ * The file answers three separate questions — what is it doing, how did the
+ * last turn end, is a human blocking it — and this is where they collapse into
+ * a single state, in that order of urgency.
+ */
+function displayState(session) {
+  const now = Date.now()
+
+  if (session.waiting_since) {
+    // Held back briefly: auto-mode answers most permission prompts in a couple
+    // of hundred milliseconds, and a card that flashes "Needs you" for one
+    // frame teaches you to distrust it.
+    return now - session.waiting_since >= WAITING_DEBOUNCE_MS ? 'waiting' : ''
+  }
+
+  const outcome = session.outcome || ''
+  if (outcome === 'done') {
+    // Claude Code sends Stop while background work is still finishing. Until
+    // the result settles it is still a running turn.
+    if (now < (session.settles_ms || 0)) return session.state || 'running'
+    return now - (session.outcome_ms || 0) > DONE_LINGER_MS ? 'idle' : 'done'
+  }
+  if (outcome === 'failed') {
+    return now - (session.outcome_ms || 0) > FAILED_LINGER_MS ? 'idle' : 'failed'
+  }
+  return session.state || 'idle'
 }
 
 function effectiveState(key, session) {
   const view = viewFor(key)
   const now = Date.now()
-  const raw = session.state || 'idle'
 
-  if (raw === 'waiting') {
-    if (!view.waitingSince) view.waitingSince = now
-    // Hold the previous state until the wait proves real.
-    if (now - view.waitingSince < WAITING_DEBOUNCE_MS) return view.lastStable
-    return 'waiting'
+  const raw = displayState(session) || view.lastStable
+  view.lastStable = RUNNING.has(raw) || raw === 'idle' ? raw : view.lastStable
+
+  // A state that has not been up long enough only gives way to something more
+  // urgent than itself.
+  if (view.heldState && now < view.heldUntil && priority(raw) <= priority(view.heldState)) {
+    return view.heldState
   }
-  view.waitingSince = 0
-
-  if (raw === 'done' && now - session.updated_ms > DONE_LINGER_MS) return 'idle'
-  view.lastStable = raw
+  if (raw !== view.heldState) {
+    view.heldState = raw
+    view.heldUntil = now + (DISPLAY[raw]?.hold ?? 0)
+  }
   return raw
 }
 
@@ -356,7 +421,11 @@ function showNotice(message) {
     {
       session_id: 'notice',
       project: 'Pipsqueak',
-      state: 'done',
+      state: 'idle',
+      outcome: 'done',
+      outcome_ms: Date.now(),
+      settles_ms: 0,
+      waiting_since: 0,
       headline: message,
       kind: 'Notice',
       activity: '',
@@ -663,22 +732,36 @@ function startBrowserDemo() {
   const advance = () => {
     const now = Date.now()
     sessions = Object.entries(scripts).map(([project, steps], i) => {
-      const [state, kind, headline] = steps[(tick + i) % steps.length]
+      const [want, kind, headline] = steps[(tick + i) % steps.length]
+      // The demo speaks in display states; the real files speak in the three
+      // separate fields, so translate rather than special-case the renderer.
+      const outcome = want === 'done' || want === 'failed' ? want : ''
+      let durable = want
+      if (outcome) durable = 'idle'
+      // Being blocked does not change what the session was doing.
+      else if (want === 'waiting') durable = 'running'
       return {
         session_id: project,
         project,
         workspace: i === 1 ? 'feature-x' : '',
         scratch: false,
-        state,
+        state: durable,
+        outcome,
+        outcome_ms: outcome ? now : 0,
+        settles_ms: 0,
+        waiting_since: want === 'waiting' ? now - WAITING_DEBOUNCE_MS : 0,
+        waiting_reason: want === 'waiting' ? 'Waiting for permission' : '',
+        hiccups: 0,
+        subagents: 0,
         kind,
         headline,
         activity: `${kind} something`,
-        detail: state === 'failed' ? 'expected 03:00 to be 02:00' : '',
+        detail: want === 'failed' ? 'expected 03:00 to be 02:00' : '',
         updated_ms: now,
         started_ms: started,
         turn_started_ms: started,
         turn_tools: 12 + tick * 3,
-        recent: [{ ms: now, state, text: `${kind} something` }]
+        recent: [{ ms: now, state: want, text: `${kind} something` }]
       }
     })
     tick += 1

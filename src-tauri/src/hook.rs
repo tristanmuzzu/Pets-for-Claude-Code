@@ -5,13 +5,26 @@
 //! cheap, silent, and incapable of failing loudly — anything printed to stdout
 //! would be parsed by Claude Code as hook output.
 
+use crate::process;
 use crate::project;
-use crate::state::{
-    now_ms, prune_stale, sanitize, sessions_dir, write_atomic, Session,
-};
+use crate::state::{now_ms, sanitize, sessions_dir, write_atomic, FileLock, Session};
 use serde_json::Value;
 use std::fs;
 use std::io::Read;
+
+/// Events that mean the session moved forward, and so cannot still be blocked
+/// on a human or finished.
+const PROGRESS_EVENTS: [&str; 9] = [
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionDenied",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+];
 
 pub fn run(fallback_event: Option<String>) {
     let mut raw = String::new();
@@ -34,9 +47,14 @@ pub fn run(fallback_event: Option<String>) {
 
     if event == "SessionEnd" {
         let _ = fs::remove_file(&path);
-        prune_stale();
+        let _ = fs::remove_file(path.with_extension("json.lock"));
         return;
     }
+
+    // Held across the read and the write. Claude Code runs the hooks matching
+    // one event in parallel, and without this two of them read the same
+    // "before" and whichever renames last discards the other's event.
+    let _lock = FileLock::acquire(&path);
 
     let mut session: Session = fs::read_to_string(&path)
         .ok()
@@ -47,8 +65,17 @@ pub fn run(fallback_event: Option<String>) {
         return;
     };
 
+    let now = now_ms();
     if session.started_ms == 0 {
-        session.started_ms = now_ms();
+        session.started_ms = now;
+    }
+    if session.agent_pid == 0 {
+        // Once per session: walking the process table is not free, and the
+        // answer cannot change while the session lives.
+        if let Some((pid, created)) = process::owner() {
+            session.agent_pid = pid;
+            session.agent_created = created;
+        }
     }
     if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
         // Resolving walks the filesystem, so only redo it when the session
@@ -67,11 +94,41 @@ pub fn run(fallback_event: Option<String>) {
         session.turn_tools += 1;
     }
     if event == "UserPromptSubmit" {
-        session.turn_started_ms = now_ms();
+        session.turn_started_ms = now;
         session.turn_tools = 0;
+        session.hiccups = 0;
+        session.subagents = 0;
     }
+
+    if PROGRESS_EVENTS.contains(&event.as_str()) {
+        session.clear_pending();
+    }
+    if !update.state.is_empty() {
+        session.state = update.state.to_string();
+    }
+    if !update.outcome.is_empty() {
+        session.outcome = update.outcome.to_string();
+        session.outcome_ms = now;
+        session.settles_ms = now + update.settle_ms;
+        session.subagents = 0;
+    }
+    if !update.waiting.is_empty() {
+        // Keep the first timestamp. A second Notification about the same
+        // prompt must not restart the debounce and hide the card again.
+        if session.waiting_since == 0 {
+            session.waiting_since = now;
+        }
+        session.waiting_reason = update.waiting.clone();
+    }
+    if update.hiccup {
+        session.hiccups += 1;
+    }
+    session.subagents = session
+        .subagents
+        .saturating_add_signed(update.subagents)
+        .min(64);
+
     session.session_id = session_id;
-    session.state = update.state.to_string();
     session.kind = update.kind;
     session.activity = update.activity.clone();
     session.detail = update.detail;
@@ -79,9 +136,21 @@ pub fn run(fallback_event: Option<String>) {
         session.headline = headline;
     }
     session.event = event;
-    session.updated_ms = now_ms();
+    session.event_ms = now;
+    session.updated_ms = now;
     if !update.activity.is_empty() {
-        session.push_recent(update.state, &update.activity);
+        let tag = if !update.outcome.is_empty() {
+            update.outcome
+        } else if !update.waiting.is_empty() {
+            "waiting"
+        } else if update.hiccup {
+            "failed"
+        } else if update.state.is_empty() {
+            "running"
+        } else {
+            update.state
+        };
+        session.push_recent(tag, &update.activity);
     }
 
     if let Ok(bytes) = serde_json::to_vec(&session) {
@@ -89,15 +158,33 @@ pub fn run(fallback_event: Option<String>) {
     }
 }
 
-/// One state change. `headline` is `None` for the many events that should not
-/// disturb what the card says the turn is about.
+/// One state change.
+///
+/// Every field is optional on purpose. Most events answer only one of "what is
+/// it doing", "how did the turn end", and "is a human blocking it" — and an
+/// event that is silent on a question must leave the existing answer alone.
+/// Collapsing all three into a single `state` field is what let a card get
+/// stuck on an alert that nothing ever cleared.
+#[derive(Default)]
 struct Update {
+    /// New durable state. Empty leaves it unchanged.
     state: &'static str,
     /// The word on the status line. Deliberately coarse.
     kind: String,
     activity: String,
     detail: String,
+    /// `None` for the many events that should not disturb what the card says
+    /// the turn is about.
     headline: Option<String>,
+    /// How the turn ended, and how long to treat that as provisional.
+    outcome: &'static str,
+    settle_ms: u64,
+    /// Why a human is blocking. Empty means "not waiting".
+    waiting: String,
+    /// Change to the live subagent count.
+    subagents: i64,
+    /// A tool failed mid-turn. Not a failed turn.
+    hiccup: bool,
 }
 
 fn live(state: &'static str, kind: &str, activity: String) -> Update {
@@ -105,8 +192,7 @@ fn live(state: &'static str, kind: &str, activity: String) -> Update {
         state,
         kind: kind.to_string(),
         activity,
-        detail: String::new(),
-        headline: None,
+        ..Default::default()
     }
 }
 
@@ -126,9 +212,8 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
         "SessionStart" => Update {
             state: "idle",
             kind: "Idle".into(),
-            activity: String::new(),
-            detail: String::new(),
             headline: Some("Session started".into()),
+            ..Default::default()
         },
         "UserPromptSubmit" => {
             let prompt = text("prompt");
@@ -138,16 +223,32 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 activity: "Thinking…".into(),
                 detail: truncate(&prompt, 400),
                 headline: Some(truncate(&first_line(&prompt), 90)),
+                ..Default::default()
             }
         }
+        // A Task call *is* a subagent launch, and is often the only signal one
+        // happened — Claude Code does not always send a matching SubagentStart.
+        "PreToolUse" if tool == "Task" || tool == "Agent" => Update {
+            state: "running",
+            kind: "Delegating".into(),
+            activity: phrase(&tool, input).present,
+            subagents: 1,
+            ..Default::default()
+        },
         "PreToolUse" => live("running", &kind_of(&tool), phrase(&tool, input).present),
+        // The matching PostToolUse is deliberately *not* a subagent stop: the
+        // dedicated SubagentStop event owns that, and counting both would
+        // decrement twice.
         "PostToolUse" => live("running", &kind_of(&tool), phrase(&tool, input).past),
+        // One tool failing is not the turn failing — Claude nearly always
+        // tries something else. Recorded as a mark on the turn, not a state.
         "PostToolUseFailure" => Update {
-            state: "failed",
-            kind: "Failed".into(),
+            state: "running",
+            kind: "Recovering".into(),
             activity: format!("{} failed", pretty_tool(&tool)),
             detail: truncate(&first_line(&text("error")), 400),
-            headline: None,
+            hiccup: true,
+            ..Default::default()
         },
         // PermissionRequest fires *before* anyone is asked — auto-mode and
         // permission hooks resolve most of them in milliseconds. Treating it as
@@ -163,63 +264,145 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
         "Notification" => {
             let notification = text("notification_type");
             let message = truncate(&text("message"), 200);
+            // `state` stays empty: being blocked does not change what the
+            // session was doing, and overwriting it here is what used to leave
+            // a card stuck on "Needs you" when the answer arrived elsewhere.
+            let waiting = |reason: &str| Update {
+                kind: "Needs you".into(),
+                activity: reason.to_string(),
+                waiting: reason.to_string(),
+                ..Default::default()
+            };
             match notification.as_str() {
-                "permission_prompt" => live(
-                    "waiting",
-                    "Needs you",
-                    if message.is_empty() {
-                        "Waiting for permission".into()
-                    } else {
-                        message
-                    },
-                ),
-                "idle_prompt" => live("waiting", "Needs you", "Waiting for your reply".into()),
-                "agent_needs_input" => {
-                    live("waiting", "Needs you", "A teammate needs input".into())
-                }
+                "permission_prompt" => waiting(if message.is_empty() {
+                    "Waiting for permission"
+                } else {
+                    &message
+                }),
+                "idle_prompt" => waiting("Waiting for your reply"),
+                "agent_needs_input" => waiting("A teammate needs input"),
                 _ => return None,
             }
         }
         "Stop" => {
             let message = text("last_assistant_message");
             let summary = first_line(&message);
-            Update {
-                state: "done",
-                kind: "Done".into(),
-                // The turn is over: the live line would only show a stale tool.
-                activity: String::new(),
-                detail: truncate(&message, 600),
-                headline: Some(if summary.is_empty() {
-                    "Finished".into()
-                } else {
-                    truncate(&summary, 140)
-                }),
+            match stop_disposition(payload, &message) {
+                // Claude is not finished; it is about to carry on. Announcing
+                // "Done" here is the single easiest way for the pet to lie,
+                // and the 30s the card lingers makes the lie outlast the turn.
+                Stop::KeepWorking(reason) => Update {
+                    state: "running",
+                    kind: "Working".into(),
+                    activity: reason.to_string(),
+                    ..Default::default()
+                },
+                Stop::Finished { settle_ms } => Update {
+                    kind: "Done".into(),
+                    // The turn is over: a live line would only show a stale
+                    // tool call.
+                    detail: truncate(&message, 600),
+                    headline: Some(if summary.is_empty() {
+                        "Finished".into()
+                    } else {
+                        truncate(&summary, 140)
+                    }),
+                    outcome: "done",
+                    settle_ms,
+                    ..Default::default()
+                },
             }
         }
         "StopFailure" => {
             let error_kind = text("error_type");
             Update {
-                state: "failed",
+                state: "idle",
                 kind: "Failed".into(),
-                activity: String::new(),
                 detail: truncate(&first_line(&text("error")), 400),
                 headline: Some(if error_kind.is_empty() {
                     "Turn failed".into()
                 } else {
                     format!("Turn failed: {}", error_kind.replace('_', " "))
                 }),
+                outcome: "failed",
+                ..Default::default()
             }
         }
-        "SubagentStart" => live(
-            "running",
-            "Delegating",
-            format!("Subagent: {}", short(&text("agent_type"), "agent")),
-        ),
-        "SubagentStop" => live("running", "Delegating", "Subagent finished".into()),
+        "SubagentStart" => Update {
+            state: "running",
+            kind: "Delegating".into(),
+            activity: format!("Subagent: {}", short(&text("agent_type"), "agent")),
+            subagents: 1,
+            ..Default::default()
+        },
+        "SubagentStop" => Update {
+            state: "running",
+            kind: "Delegating".into(),
+            activity: "Subagent finished".into(),
+            subagents: -1,
+            ..Default::default()
+        },
         "PreCompact" => live("compacting", "Compacting", "Compacting context".into()),
-        "PostCompact" => live("thinking", "Thinking", "Context compacted".into()),
+        // Compaction finishing is not the *turn* finishing. An automatic
+        // compact happens mid-turn and work resumes straight after; only a
+        // manual one leaves the session genuinely idle.
+        "PostCompact" => {
+            if text("trigger") == "manual" {
+                live("idle", "Idle", "Context compacted".into())
+            } else {
+                live("thinking", "Thinking", "Context compacted".into())
+            }
+        }
         _ => return None,
     })
+}
+
+/// What a `Stop` event actually means.
+enum Stop {
+    /// Claude will keep going. There is nothing to celebrate yet.
+    KeepWorking(&'static str),
+    /// The turn is over. `settle_ms` holds the result provisional for a
+    /// moment so a follow-up event can cancel it.
+    Finished { settle_ms: u64 },
+}
+
+/// `Stop` does not reliably mean "turn finished".
+///
+/// Claude Code fires it whenever the assistant yields the floor, which
+/// includes cases where it is about to immediately continue. Three payload
+/// fields say so, and taking them at face value is the difference between a
+/// pet that reports completions and a pet that guesses at them.
+fn stop_disposition(payload: &Value, last_message: &str) -> Stop {
+    let non_empty_list = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+    };
+
+    if non_empty_list("session_crons") {
+        return Stop::KeepWorking("Scheduled work still running");
+    }
+    // Set when Claude is continuing *because* a stop hook asked it to, so a
+    // further Stop is already on its way.
+    if payload
+        .get("stop_hook_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Stop::KeepWorking("A stop hook is still working");
+    }
+    if non_empty_list("background_tasks") {
+        return if last_message.trim().is_empty() {
+            Stop::KeepWorking("Background tasks still running")
+        } else {
+            // It said its piece, but something is still finishing behind it.
+            // Hold the result briefly rather than suppress it.
+            Stop::Finished { settle_ms: 2_000 }
+        };
+    }
+    Stop::Finished { settle_ms: 0 }
 }
 
 /// The coarse category behind the status line. Several different tools map to
@@ -458,8 +641,12 @@ mod tests {
             &json!({ "notification_type": "permission_prompt", "message": "Allow Bash?" }),
         )
         .unwrap();
-        assert_eq!(update.state, "waiting");
+        assert_eq!(update.waiting, "Allow Bash?");
         assert_eq!(update.kind, "Needs you");
+        // Being blocked says nothing about what the session was doing, so the
+        // durable state is left alone. Overwriting it here is what used to
+        // strand a card on "Needs you" when the prompt was answered elsewhere.
+        assert!(update.state.is_empty());
     }
 
     #[test]
@@ -490,11 +677,94 @@ mod tests {
             "last_assistant_message": "\n\nFixed the off-by-one.\nDetails follow."
         });
         let update = classify("Stop", &payload).unwrap();
-        assert_eq!(update.state, "done");
+        assert_eq!(update.outcome, "done");
+        assert_eq!(update.settle_ms, 0);
         assert_eq!(update.headline.as_deref(), Some("Fixed the off-by-one."));
         // The turn is over, so the live line clears rather than showing a stale tool.
         assert!(update.activity.is_empty());
         assert!(update.detail.contains("Details follow."));
+    }
+
+    /// The three ways `Stop` arrives while Claude is about to carry on. Each
+    /// one used to produce a "Done" card that then sat there for 30 seconds
+    /// being wrong.
+    #[test]
+    fn stop_while_still_working_is_not_a_completion() {
+        let cases = [
+            json!({ "session_crons": [{ "id": "nightly" }] }),
+            json!({ "stop_hook_active": true }),
+            json!({ "background_tasks": [{ "id": "build" }] }),
+        ];
+        for payload in cases {
+            let update = classify("Stop", &payload).unwrap();
+            assert!(
+                update.outcome.is_empty(),
+                "{payload} should not report a completion"
+            );
+            assert_eq!(update.state, "running");
+        }
+    }
+
+    /// Claude said its piece but something is still finishing behind it. That
+    /// is a real completion — just one worth holding briefly in case a follow
+    /// up event cancels it.
+    #[test]
+    fn stop_with_background_work_and_an_answer_settles_late() {
+        let update = classify(
+            "Stop",
+            &json!({
+                "background_tasks": [{ "id": "build" }],
+                "last_assistant_message": "Kicked off the build."
+            }),
+        )
+        .unwrap();
+        assert_eq!(update.outcome, "done");
+        assert_eq!(update.settle_ms, 2_000);
+    }
+
+    /// An automatic compaction happens *inside* a turn; work resumes straight
+    /// after. Reporting it as a finished turn is a false completion.
+    #[test]
+    fn compaction_finishing_is_not_the_turn_finishing() {
+        let auto = classify("PostCompact", &json!({ "trigger": "auto" })).unwrap();
+        assert_eq!(auto.state, "thinking");
+        assert!(auto.outcome.is_empty());
+
+        let manual = classify("PostCompact", &json!({ "trigger": "manual" })).unwrap();
+        assert_eq!(manual.state, "idle");
+        assert!(manual.outcome.is_empty());
+    }
+
+    /// Claude Code reports many subagent launches only as a `Task` tool call,
+    /// so counting `SubagentStart` alone undercounts them.
+    #[test]
+    fn a_task_call_counts_as_a_subagent() {
+        let update = classify(
+            "PreToolUse",
+            &json!({ "tool_name": "Task", "tool_input": { "subagent_type": "explore" } }),
+        )
+        .unwrap();
+        assert_eq!(update.subagents, 1);
+        assert_eq!(update.kind, "Delegating");
+
+        // The paired PostToolUse must not decrement: SubagentStop owns that,
+        // and counting both would take the same subagent away twice.
+        let done = classify("PostToolUse", &json!({ "tool_name": "Task" })).unwrap();
+        assert_eq!(done.subagents, 0);
+    }
+
+    /// One tool failing is not the turn failing. Claude nearly always tries
+    /// something else, and a red card for a failed grep is noise.
+    #[test]
+    fn a_failed_tool_marks_the_turn_without_failing_it() {
+        let update = classify(
+            "PostToolUseFailure",
+            &json!({ "tool_name": "Grep", "error": "no matches" }),
+        )
+        .unwrap();
+        assert!(update.hiccup);
+        assert!(update.outcome.is_empty());
+        assert_eq!(update.state, "running");
     }
 
     #[test]
