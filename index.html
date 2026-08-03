@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Pipsqueak</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main id="stage">
+      <section id="card" class="card" data-state="idle" hidden>
+        <header class="card-head">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="project" class="project">Claude Code</span>
+          <span id="age" class="age"></span>
+        </header>
+        <p id="activity" class="activity">Waiting for a session…</p>
+        <p id="detail" class="detail" hidden></p>
+
+        <div id="expanded" hidden>
+          <div id="tabs" class="tabs" hidden></div>
+          <ol id="log" class="log"></ol>
+          <footer class="actions">
+            <button data-action="pets" type="button">Pets</button>
+            <button data-action="hooks" type="button">Reinstall hooks</button>
+            <button data-action="through" type="button">Click through</button>
+            <button data-action="quit" type="button">Quit</button>
+          </footer>
+        </div>
+      </section>
+
+      <div id="menu" class="menu" hidden></div>
+
+      <canvas id="pet" width="96" height="96" title="Pipsqueak — click for details, drag to move"></canvas>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

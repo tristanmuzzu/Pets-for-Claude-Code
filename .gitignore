@@ -1,0 +1,12 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+# `tauri icon` also emits mobile assets this project has no use for.
+src-tauri/icons/android/
+src-tauri/icons/ios/
+assets/atlas-preview.png
+assets/row-check.png
+*.local
+.DS_Store
+Thumbs.db

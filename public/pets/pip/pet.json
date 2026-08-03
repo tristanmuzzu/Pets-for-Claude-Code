@@ -1,0 +1,24 @@
+{
+  "id": "pip",
+  "displayName": "Pip",
+  "description": "An ember-fox with a status wisp. The default Pipsqueak companion.",
+  "spritesheetPath": "spritesheet.png",
+  "frameWidth": 48,
+  "frameHeight": 48,
+  "columns": 8,
+  "rows": 9,
+  "frameCounts": [
+    6,
+    8,
+    8,
+    4,
+    5,
+    8,
+    6,
+    6,
+    6
+  ],
+  "fps": 8,
+  "author": "Pipsqueak",
+  "license": "MIT"
+}
