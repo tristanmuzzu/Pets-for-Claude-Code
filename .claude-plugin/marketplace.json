@@ -1,0 +1,15 @@
+{
+  "name": "pipsqueak",
+  "owner": {
+    "name": "Tristan Rafe Muzzu",
+    "url": "https://github.com/tristanmuzzu"
+  },
+  "plugins": [
+    {
+      "name": "pipsqueak",
+      "source": "./claude-plugin",
+      "description": "Turn the Pipsqueak desktop pet on and off, and switch pets, without leaving Claude Code.",
+      "category": "productivity"
+    }
+  ]
+}

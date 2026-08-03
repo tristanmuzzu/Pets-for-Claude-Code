@@ -30,7 +30,7 @@ const appWindow = IS_TAURI ? getCurrentWindow() : null
 const renderer = new PetRenderer(el.pet)
 
 let config = {
-  pet: 'pip',
+  pet: 'byte',
   scale: 2,
   clickThrough: false,
   showBubble: true,
@@ -569,7 +569,7 @@ async function boot() {
   const stored = await invoke('get_config').catch(() => null)
   if (stored) {
     config = {
-      pet: stored.pet ?? 'pip',
+      pet: stored.pet ?? 'byte',
       scale: stored.scale ?? 2,
       clickThrough: Boolean(stored.click_through),
       showBubble: stored.show_bubble !== false,
@@ -617,13 +617,26 @@ async function boot() {
 
   await listen('pipsqueak://notice', (event) => showNotice(String(event.payload)))
 
+  // `pipsqueak control <pet>` changes the config from outside the window.
+  await listen('pipsqueak://pet', async (event) => {
+    const id = String(event.payload)
+    try {
+      await renderer.load(id, await loadPetPayload(id))
+      renderer.setScale(config.scale)
+      config.pet = id
+      await saveConfig()
+    } catch (error) {
+      showNotice(String(error))
+    }
+  })
+
   // Ages and elapsed timers tick even when no event arrives.
   setInterval(render, 1000)
 }
 
 /** Built-in pets ship inside the frontend bundle; the rest come from disk. */
 async function loadPetPayload(id) {
-  if (id === 'ember' || id === 'pip') return null
+  if (id === 'byte' || id === 'ember' || id === 'pip') return null
   return invoke('load_pet', { id })
 }
 

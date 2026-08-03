@@ -1,0 +1,11 @@
+{
+  "name": "pipsqueak",
+  "description": "Turn the Pipsqueak desktop pet on and off, and switch pets, without leaving Claude Code.",
+  "version": "0.4.0",
+  "author": {
+    "name": "Tristan Rafe Muzzu"
+  },
+  "homepage": "https://github.com/tristanmuzzu/pipsqueak",
+  "repository": "https://github.com/tristanmuzzu/pipsqueak",
+  "license": "MIT"
+}

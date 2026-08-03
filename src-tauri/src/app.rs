@@ -267,24 +267,17 @@ fn find_pet_folder(id: &str) -> Option<PathBuf> {
 
 fn open_path(path: &PathBuf) -> Result<(), String> {
     #[cfg(windows)]
-    let mut command = {
-        let mut c = std::process::Command::new("explorer");
-        c.arg(path);
-        c
-    };
+    let opener = "explorer";
     #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = std::process::Command::new("open");
-        c.arg(path);
-        c
-    };
+    let opener = "open";
     #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path);
-        c
-    };
-    command.spawn().map(|_| ()).map_err(|e| e.to_string())
+    let opener = "xdg-open";
+
+    desktop::quiet_command(opener)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -322,12 +315,17 @@ fn place_window(app: &AppHandle, config: &Config) {
         let _ = window.set_position(PhysicalPosition::new(x, y));
         return;
     }
-    // Default: bottom-right, clear of the Windows taskbar.
+    // Default: bottom-right, clear of the Windows taskbar. Persist it, or the
+    // position stays null until the pet is dragged for the first time.
     if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.outer_size()) {
         let area = monitor.size();
         let x = area.width.saturating_sub(size.width + 24) as i32;
         let y = area.height.saturating_sub(size.height + 72) as i32;
         let _ = window.set_position(PhysicalPosition::new(x, y));
+        let mut stored = config.clone();
+        stored.x = Some(x);
+        stored.y = Some(y);
+        let _ = state::save_config(&stored);
     }
 }
 
@@ -383,9 +381,58 @@ fn spawn_poller(app: AppHandle) {
                 last = encoded;
                 let _ = app.emit("pipsqueak://sessions", &sessions);
             }
+            beat();
+            drain_commands(&app);
             std::thread::sleep(POLL_INTERVAL);
         }
     });
+}
+
+/// Tells other invocations of the binary that an overlay is already up.
+fn beat() {
+    let payload = serde_json::json!({ "ms": state::now_ms(), "pid": std::process::id() });
+    let _ = state::write_atomic(
+        &state::heartbeat_path(),
+        serde_json::to_vec(&payload).unwrap_or_default().as_slice(),
+    );
+}
+
+/// Applies whatever `pipsqueak control …` left for us, then clears it.
+fn drain_commands(app: &AppHandle) {
+    let path = state::command_path();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return;
+    };
+    let _ = fs::remove_file(&path);
+    let Some(action) = serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("action").and_then(Value::as_str).map(String::from))
+    else {
+        return;
+    };
+
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    match action.as_str() {
+        "show" => {
+            let _ = window.show();
+        }
+        "hide" => {
+            let _ = window.hide();
+        }
+        "toggle" => toggle_window(app),
+        "quit" => app.exit(0),
+        other => {
+            if let Some(pet) = other.strip_prefix("pet:") {
+                let _ = window.show();
+                // The frontend owns both sprite loading and the config file —
+                // writing it from here would race its copy and lose the window
+                // position.
+                let _ = app.emit("pipsqueak://pet", pet.to_string());
+            }
+        }
+    }
 }
 
 fn toggle_window(app: &AppHandle) {

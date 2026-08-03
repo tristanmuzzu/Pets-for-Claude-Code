@@ -41,6 +41,16 @@ pub fn config_path() -> PathBuf {
     root().join("config.json")
 }
 
+/// One-shot instruction for a running overlay, written by `pipsqueak control`.
+pub fn command_path() -> PathBuf {
+    root().join("command.json")
+}
+
+/// Touched by the running overlay so other invocations can tell it is alive.
+pub fn heartbeat_path() -> PathBuf {
+    root().join("running.json")
+}
+
 pub fn claude_settings_path() -> PathBuf {
     home_dir().join(".claude").join("settings.json")
 }
@@ -150,7 +160,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            pet: "pip".to_string(),
+            pet: "byte".to_string(),
             scale: 2.0,
             click_through: false,
             show_bubble: true,

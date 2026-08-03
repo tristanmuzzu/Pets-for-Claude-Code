@@ -4,6 +4,22 @@
 //! Deliberately dependency-free — a handful of `user32` calls and the `reg`
 //! command are cheaper than pulling a Windows crate graph into an 8 MB app.
 
+/// Builds a `Command` that never flashes a console window.
+///
+/// Without this, every `reg`/`explorer` call from the tray menu pops a black
+/// rectangle on screen for a frame — which is exactly the thing a quiet desktop
+/// overlay must not do.
+pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// Focuses the first visible window whose title contains one of `fragments`
 /// (matched case-insensitively, in order of preference).
 ///
@@ -32,7 +48,7 @@ pub fn alert() {
 pub fn autostart_enabled() -> bool {
     #[cfg(windows)]
     {
-        std::process::Command::new("reg")
+        quiet_command("reg")
             .args(["query", RUN_KEY, "/v", "Pipsqueak"])
             .output()
             .map(|out| out.status.success())
@@ -52,13 +68,13 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
             .to_string_lossy()
             .to_string();
         let status = if enabled {
-            std::process::Command::new("reg")
+            quiet_command("reg")
                 .args([
                     "add", RUN_KEY, "/v", "Pipsqueak", "/t", "REG_SZ", "/d", &exe, "/f",
                 ])
                 .status()
         } else {
-            std::process::Command::new("reg")
+            quiet_command("reg")
                 .args(["delete", RUN_KEY, "/v", "Pipsqueak", "/f"])
                 .status()
         };

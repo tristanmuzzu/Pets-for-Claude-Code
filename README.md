@@ -118,6 +118,39 @@ full below.
 
 Then start a Claude Code session. The pet reacts within about a third of a second.
 
+### Control it from inside Claude Code
+
+There is a small plugin so you never have to open a terminal to turn the pet on
+or off:
+
+```bash
+/plugin marketplace add tristanmuzzu/pipsqueak
+```
+
+```bash
+/plugin install pipsqueak@pipsqueak
+```
+
+Then, in any session:
+
+| Command | Effect |
+| --- | --- |
+| `/pipsqueak:pet` | toggle the pet |
+| `/pipsqueak:pet on` | show it, starting Pipsqueak if it isn't running |
+| `/pipsqueak:pet off` | hide it |
+| `/pipsqueak:pet byte` | switch pet |
+| `/pipsqueak:pet status` | is it running? |
+| `/pipsqueak:pet quit` | close it entirely |
+
+The command runs while the skill expands, so it takes effect immediately
+without spending a turn and without a console window appearing. Under the hood
+it is `pipsqueak control <action>`, which writes a one-line instruction to
+`~/.pipsqueak/command.json` for the running overlay to pick up — and starts the
+overlay first if it isn't up.
+
+Prefer it to start with the machine? **Start with Windows** is in the pet's
+right-click menu, off by default.
+
 > macOS and Linux are not tested. The code is portable and the Tauri bundle
 > targets exist; if you build it there, a report either way is welcome.
 
@@ -251,10 +284,12 @@ right-click menu:
 ## CLI
 
 ```bash
-pipsqueak              # run the overlay
-pipsqueak install      # register the Claude Code hooks
-pipsqueak uninstall    # remove them (backs up settings.json first)
-pipsqueak hook <Event> # internal: consume one hook payload from stdin
+pipsqueak                 # run the overlay
+pipsqueak control on      # show it, starting it if needed (also: off, toggle, quit, status)
+pipsqueak control byte    # switch pet
+pipsqueak install         # register the Claude Code hooks
+pipsqueak uninstall       # remove them (backs up settings.json first)
+pipsqueak hook <Event>    # internal: consume one hook payload from stdin
 ```
 
 On Windows the binary is a GUI-subsystem app, so CLI output is also written to
