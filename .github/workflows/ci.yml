@@ -26,6 +26,10 @@ jobs:
 
       - run: npm ci
 
+      # Before anything touches cargo: `tauri::generate_context!` embeds the
+      # frontend at compile time, so even `cargo test` needs dist/ to exist.
+      - run: npm run build
+
       - run: npm test
 
       - run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -40,5 +44,3 @@ jobs:
         run: |
           npm run sprites
           git diff --exit-code public/pets
-
-      - run: npm run build

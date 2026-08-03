@@ -40,6 +40,11 @@ jobs:
 
       - run: npm ci
 
+      # `tauri::generate_context!` embeds the frontend at compile time, so the
+      # cargo steps below need dist/ to exist. tauri-action would build it, but
+      # not until after these run.
+      - run: npm run build
+
       - run: npm test
 
       - run: cargo test --manifest-path src-tauri/Cargo.toml
