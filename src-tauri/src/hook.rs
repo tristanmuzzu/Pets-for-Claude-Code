@@ -103,16 +103,20 @@ pub fn run(fallback_event: Option<String>) {
     if PROGRESS_EVENTS.contains(&event.as_str()) {
         session.clear_pending();
     }
-    // Anything other than the prompt itself means the prompt is over — except
-    // a `PreToolUse` for the very tool being asked about. Claude Code has not
-    // committed to an order between those two, and clearing on the wrong one
-    // would either strand the prompt or hide it instantly.
-    if !session.pending_tool.is_empty()
-        && event != "PermissionRequest"
-        && event != "Notification"
-        && !(event == "PreToolUse"
-            && payload.get("tool_name").and_then(Value::as_str) == Some(&session.pending_tool))
-    {
+    // Anything other than the prompt itself means the prompt is over.
+    //
+    // Including a `PreToolUse` for the very tool being asked about, which took
+    // a wrong turn to arrive at. Claude Code runs `PreToolUse` first — it may
+    // answer the permission itself — and only then raises
+    // `PermissionRequest`, so a `PreToolUse` *after* a pending prompt means
+    // the tool is running and the prompt was answered. Trying to protect the
+    // pending state from it instead left the card saying "needs you" about a
+    // command that had already been approved and run.
+    //
+    // It is also the rule that survives being wrong about that order: if
+    // `PermissionRequest` ever came first, the `PreToolUse` would clear it and
+    // the next `PermissionRequest` would simply set it again.
+    if !session.pending_tool.is_empty() && event != "PermissionRequest" && event != "Notification" {
         session.clear_permission();
     }
     if !update.permission.is_empty() && session.pending_tool != update.permission {

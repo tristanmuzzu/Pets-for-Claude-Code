@@ -18,6 +18,23 @@ npm run app:build
 in for real sessions. `?panel=welcome` and `?panel=doctor` render those panels
 so they can be worked on without a build or a broken machine to point them at.
 
+## The README animation
+
+```bash
+npm run demo
+```
+
+Paints a flat backdrop over the screen, runs the release build against an
+isolated profile driven by `tools/simulate.mjs`, captures frames, and crops to
+the pixels that actually changed — so re-recording it needs no judgement about
+what happens to be on your desktop, and nothing of yours ends up in a public
+README. Windows only; the capture is a `CopyFromScreen` through PowerShell.
+
+`--frames`, `--interval`, `--lead` and `--backdrop` control it. The output is an
+animated PNG rather than a GIF: 256 colours band the backdrop badly, and the
+encoder is a few chunks on top of the PNG writer the sprite pipeline already
+has.
+
 ## Tests
 
 ```bash

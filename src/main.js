@@ -180,7 +180,13 @@ function paintCard(node, group) {
   // What it is blocked on, in its own row. This is the only text on the card
   // that is worth interrupting something else to read.
   const ask = node.querySelector('.ask')
-  const reason = state === 'waiting' ? blockedOn(session) : ''
+  // The reason is sticky for as long as the card reads "needs you". The
+  // minimum-display hold can keep that state up for a couple of seconds after
+  // the prompt is answered, and "Needs you" with nothing underneath it is a
+  // question the card has stopped being able to answer.
+  const live = blockedOn(session)
+  if (live) view.lastReason = live
+  const reason = state === 'waiting' ? live || view.lastReason || '' : ''
   const risk = node.querySelector('.risk')
   ask.hidden = !reason
   node.querySelector('.ask-what').textContent = reason

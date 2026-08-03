@@ -7,7 +7,10 @@ Claude Code works, the pet mirrors its state: thinking, running a tool, blocked
 on a permission prompt, failed, or done. Watch a video, read a PR, do anything
 else, and still know at a glance whether the agent is busy, stuck, or finished.
 
-![Two projects stacked, one of them blocked on input](assets/screenshot-stack.png)
+![Three Claude Code projects stacked in the corner of a desktop. Two are working — one calling a Vercel MCP tool, one running an eval suite — while the third has turned orange and says "Needs you · Allow Bash(npm test)?". The pet below them shows an exclamation mark on its screen.](assets/demo.png)
+
+<sub>Recorded by `npm run demo`, which paints its own backdrop and drives the app
+with simulated sessions — so it is reproducible and contains nobody's desktop.</sub>
 
 ---
 

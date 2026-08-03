@@ -65,10 +65,13 @@ const PROJECTS = [
       [300, 'PostToolUse', file('Read', 'C:/code/clockwork/src/clock.js')],
       [400, 'PreToolUse', file('Edit', 'C:/code/clockwork/src/clock.js')],
       [400, 'PostToolUse', file('Edit', 'C:/code/clockwork/src/clock.js')],
-      // PermissionRequest alone is ignored by design — auto-mode answers most
-      // of them. This pair is the "resolved instantly, never bothered you" case.
+      // Claude Code runs PreToolUse first (it may answer the permission
+      // itself) and only then raises PermissionRequest. This pair is the
+      // "auto-mode answered it, you were never bothered" case, which the pet
+      // must not report: the prompt is resolved well inside the debounce.
+      [400, 'PreToolUse', bash('npm run lint', 'Lint the project')],
       [120, 'PermissionRequest', bash('npm run lint')],
-      [1500, 'PreToolUse', bash('npm run lint', 'Lint the project')],
+      [300, 'PostToolUse', bash('npm run lint', 'Lint the project')],
       // And this is a prompt a human actually saw.
       [1500, 'Notification', { notification_type: 'permission_prompt', message: 'Allow Bash(npm test)?' }],
       [2500, 'PreToolUse', bash('npm test -- --run', 'Run the test suite')],

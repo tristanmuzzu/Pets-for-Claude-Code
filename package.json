@@ -15,7 +15,8 @@
     "app:dev": "tauri dev",
     "app:build": "tauri build",
     "test": "node test/run-tests.js",
-    "verify:release": "node scripts/verify-release.mjs"
+    "verify:release": "node scripts/verify-release.mjs",
+    "demo": "node tools/record-demo.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1"
