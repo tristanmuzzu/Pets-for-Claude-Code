@@ -70,7 +70,15 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
         let status = if enabled {
             quiet_command("reg")
                 .args([
-                    "add", RUN_KEY, "/v", "Pipsqueak", "/t", "REG_SZ", "/d", &exe, "/f",
+                    "add",
+                    RUN_KEY,
+                    "/v",
+                    "Pipsqueak",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &exe,
+                    "/f",
                 ])
                 .status()
         } else {

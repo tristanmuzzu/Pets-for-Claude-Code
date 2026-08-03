@@ -528,19 +528,43 @@ fn phrase(tool: &str, input: Option<&Value>) -> Phrase {
         "Bash" | "PowerShell" => {
             let description = field("description");
             let command = field("command");
-            let shown = if description.is_empty() { command } else { description };
+            let shown = if description.is_empty() {
+                command
+            } else {
+                description
+            };
             forms("Running:", "Ran:", "run:", &truncate(&shown, 64))
         }
-        "Read" => forms("Reading", "Read", "read", &basename_or(&field("file_path"), "a file")),
-        "Edit" => forms("Editing", "Edited", "edit", &basename_or(&field("file_path"), "a file")),
-        "Write" => forms("Writing", "Wrote", "write", &basename_or(&field("file_path"), "a file")),
+        "Read" => forms(
+            "Reading",
+            "Read",
+            "read",
+            &basename_or(&field("file_path"), "a file"),
+        ),
+        "Edit" => forms(
+            "Editing",
+            "Edited",
+            "edit",
+            &basename_or(&field("file_path"), "a file"),
+        ),
+        "Write" => forms(
+            "Writing",
+            "Wrote",
+            "write",
+            &basename_or(&field("file_path"), "a file"),
+        ),
         "NotebookEdit" => forms(
             "Editing",
             "Edited",
             "edit",
             &basename_or(&field("notebook_path"), "a notebook"),
         ),
-        "Glob" => forms("Finding", "Found", "find", &short(&field("pattern"), "files")),
+        "Glob" => forms(
+            "Finding",
+            "Found",
+            "find",
+            &short(&field("pattern"), "files"),
+        ),
         "Grep" => forms(
             "Searching for",
             "Searched for",
@@ -649,7 +673,10 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "npm test -- --run", "description": "Run unit tests" }
         });
-        assert_eq!(activity_of("PreToolUse", payload), "Running: Run unit tests");
+        assert_eq!(
+            activity_of("PreToolUse", payload),
+            "Running: Run unit tests"
+        );
     }
 
     #[test]
@@ -847,7 +874,12 @@ mod tests {
             "tool_name": "Read",
             "tool_input": { "file_path": "/code/clock.js" }
         });
-        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
+        for event in [
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PermissionDenied",
+        ] {
             let update = classify(event, &payload).unwrap();
             assert!(
                 update.headline.is_none(),
@@ -860,7 +892,10 @@ mod tests {
     fn the_prompt_becomes_the_headline() {
         let payload = json!({ "prompt": "Fix the flaky timezone test\n\nIt fails on CI only." });
         let update = classify("UserPromptSubmit", &payload).unwrap();
-        assert_eq!(update.headline.as_deref(), Some("Fix the flaky timezone test"));
+        assert_eq!(
+            update.headline.as_deref(),
+            Some("Fix the flaky timezone test")
+        );
         assert_eq!(update.activity, "Thinking…");
     }
 

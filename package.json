@@ -1,7 +1,7 @@
 {
   "name": "pipsqueak",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "A tiny desktop pet that shows what Claude Code is doing, at a glance.",
   "scripts": {
@@ -13,7 +13,9 @@
     "simulate": "node tools/simulate.mjs",
     "tauri": "tauri",
     "app:dev": "tauri dev",
-    "app:build": "tauri build"
+    "app:build": "tauri build",
+    "test": "node test/run-tests.js",
+    "verify:release": "node scripts/verify-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1"

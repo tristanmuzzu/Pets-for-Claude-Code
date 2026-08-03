@@ -186,15 +186,8 @@ mod windows_impl {
         let mut exit = FileTime::default();
         let mut kernel = FileTime::default();
         let mut user = FileTime::default();
-        let ok = unsafe {
-            GetProcessTimes(
-                handle,
-                &mut creation,
-                &mut exit,
-                &mut kernel,
-                &mut user,
-            )
-        };
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
         unsafe { CloseHandle(handle) };
         if ok == 0 {
             None
@@ -241,15 +234,9 @@ mod windows_impl {
         let mut exit = FileTime::default();
         let mut kernel = FileTime::default();
         let mut user = FileTime::default();
-        let timed = unsafe {
-            GetProcessTimes(
-                handle,
-                &mut creation,
-                &mut exit,
-                &mut kernel,
-                &mut user,
-            )
-        } != 0;
+        let timed =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }
+                != 0;
         unsafe { CloseHandle(handle) };
 
         if !running {

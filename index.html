@@ -14,6 +14,16 @@
 
       <div id="menu" class="menu" hidden></div>
 
+      <!-- One panel, two jobs: the first-run welcome and the setup check.
+           Both are rare, modal-ish, and want the same box. -->
+      <section id="panel" class="panel" hidden>
+        <header class="panel-head">
+          <h1 id="panel-title"></h1>
+          <button id="panel-close" class="icon close" type="button" title="Close">×</button>
+        </header>
+        <div id="panel-body"></div>
+      </section>
+
       <canvas id="pet" width="96" height="96" title="Pipsqueak — click to hide the cards, right-click for options, drag to move"></canvas>
     </main>
 

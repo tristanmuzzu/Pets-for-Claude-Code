@@ -224,6 +224,12 @@ impl Session {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
+    /// Which build's idea of this file it is. See [`CONFIG_VERSION`].
+    pub version: u32,
+    /// False until the first run has been acknowledged. Deliberately *not*
+    /// backfilled for existing installs — an upgrade should get the welcome
+    /// once too, since it is the only place the setup is explained.
+    pub welcomed: bool,
     pub pet: String,
     pub scale: f64,
     pub click_through: bool,
@@ -238,13 +244,39 @@ pub struct Config {
     pub flash_on_finish: bool,
     /// Do not disturb: no sound, no tray flash. The pet still updates.
     pub quiet: bool,
+    /// Ask GitHub whether there is a newer release.
+    ///
+    /// Off until asked for. This is the only thing in the app that talks to
+    /// the network at all, and a status overlay reaching out on its own
+    /// without being asked is a surprise nobody signed up for.
+    pub update_check: bool,
+    /// A version the user has already been told about and did not want.
+    pub update_dismissed: String,
     pub x: Option<i32>,
     pub y: Option<i32>,
+}
+
+impl Config {
+    /// Pulls any out-of-range value back to something usable.
+    ///
+    /// Per field rather than all-or-nothing: one bad number in a hand-edited
+    /// file should cost that one setting, not every other one alongside it.
+    fn clamp(&mut self) {
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            self.scale = 2.0;
+        }
+        self.scale = self.scale.clamp(1.0, 6.0);
+        if self.pet.trim().is_empty() {
+            self.pet = "byte".to_string();
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: CONFIG_VERSION,
+            welcomed: false,
             pet: "byte".to_string(),
             scale: 2.0,
             click_through: false,
@@ -253,21 +285,83 @@ impl Default for Config {
             alert_on_waiting: false,
             flash_on_finish: true,
             quiet: false,
+            update_check: false,
+            update_dismissed: String::new(),
             x: None,
             y: None,
         }
     }
 }
 
+/// The shape this build understands. Bumped when a field changes meaning —
+/// not when one is merely added, which `serde(default)` already handles.
+///
+/// 2: the window grew to fit the setup panel. The saved position is the
+///    window's top-left, but the pet sits at the *bottom* of it, so a taller
+///    window with the same origin would have pushed the pet down behind the
+///    taskbar.
+pub const CONFIG_VERSION: u32 = 2;
+
+/// How much taller the window became in version 2.
+const V2_WINDOW_GROWTH: i32 = 200;
+
+/// Reads the config, surviving anything that might have happened to the file.
+///
+/// It is a plain JSON file in the user's home directory, which means it gets
+/// hand-edited, half-written by a crash, and occasionally written by a newer
+/// build than this one. None of those may lose the whole config or, worse,
+/// silently overwrite a newer file with older defaults.
 pub fn load_config() -> Config {
-    fs::read_to_string(config_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    let path = config_path();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        // No file yet: a first run, not a problem.
+        return Config::default();
+    };
+    match serde_json::from_str::<Config>(&raw) {
+        Ok(mut config) => {
+            migrate(&mut config);
+            config.clamp();
+            config
+        }
+        Err(_) => {
+            // Keep whatever they had. Overwriting an unparseable config with
+            // defaults destroys the only copy of a setting they may have been
+            // hand-editing when something went wrong.
+            let _ = fs::rename(&path, path.with_extension("json.bak"));
+            Config::default()
+        }
+    }
+}
+
+/// Brings a config written by an older build up to date.
+///
+/// Each step moves one version forward and nothing else, so a config that has
+/// been sitting on disk through several releases arrives correct rather than
+/// having the newest step applied to the oldest shape.
+fn migrate(config: &mut Config) {
+    if config.version < 2 {
+        // The pet is drawn at the bottom of the window, so a window that grew
+        // downward from the same saved origin would take the pet with it.
+        if let Some(y) = config.y {
+            config.y = Some(y - V2_WINDOW_GROWTH);
+        }
+        config.version = 2;
+    }
 }
 
 pub fn save_config(config: &Config) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(config).unwrap_or_else(|_| b"{}".to_vec());
+    if config.version > CONFIG_VERSION {
+        // Written by a newer build. Rolling it back to fields this one happens
+        // to know about would quietly delete their settings.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "config.json was written by a newer version of Pipsqueak",
+        ));
+    }
+    let mut stored = config.clone();
+    stored.clamp();
+    stored.version = CONFIG_VERSION;
+    let bytes = serde_json::to_vec_pretty(&stored).unwrap_or_else(|_| b"{}".to_vec());
     write_atomic(&config_path(), &bytes)
 }
 
@@ -313,7 +407,11 @@ impl FileLock {
             let _ = fs::create_dir_all(dir);
         }
         for attempt in 0..40 {
-            match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
                 Ok(_) => return Self { path, held: true },
                 Err(_) => {
                     // A hook killed mid-write would otherwise block every later
@@ -367,7 +465,9 @@ pub fn read_sessions() -> Vec<Session> {
     }
     // Anything needing a human wins, then most recently active.
     out.sort_by(|a, b| {
-        attention_rank(b).cmp(&attention_rank(a)).then(b.updated_ms.cmp(&a.updated_ms))
+        attention_rank(b)
+            .cmp(&attention_rank(a))
+            .then(b.updated_ms.cmp(&a.updated_ms))
     });
     out
 }
@@ -443,4 +543,60 @@ pub fn sweep() -> usize {
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_taller_window_keeps_the_pet_where_it_was() {
+        let mut config = Config {
+            version: 1,
+            y: Some(900),
+            ..Config::default()
+        };
+        migrate(&mut config);
+        assert_eq!(config.version, 2);
+        assert_eq!(
+            config.y,
+            Some(700),
+            "the pet is bottom-anchored, so the origin moves up"
+        );
+    }
+
+    #[test]
+    fn migration_runs_once() {
+        let mut config = Config {
+            version: 1,
+            y: Some(900),
+            ..Config::default()
+        };
+        migrate(&mut config);
+        migrate(&mut config);
+        assert_eq!(config.y, Some(700));
+    }
+
+    #[test]
+    fn a_hand_edited_value_costs_only_itself() {
+        let mut config = Config {
+            scale: -12.0,
+            pet: "  ".into(),
+            show_scratch: true,
+            ..Config::default()
+        };
+        config.clamp();
+        assert_eq!(config.scale, 2.0);
+        assert_eq!(config.pet, "byte");
+        assert!(config.show_scratch, "an unrelated setting must survive");
+    }
+
+    #[test]
+    fn a_newer_config_is_never_written_over() {
+        let config = Config {
+            version: CONFIG_VERSION + 1,
+            ..Config::default()
+        };
+        assert!(save_config(&config).is_err());
+    }
 }

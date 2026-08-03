@@ -2,53 +2,39 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PetRenderer, GREETING_ROW } from './pet.js'
+import {
+  ACTIVE,
+  DONE_LINGER_MS,
+  RUNNING,
+  SLEEP_AFTER_MS,
+  URGENT,
+  WAITING_DEBOUNCE_MS,
+  blockedOn,
+  displayState,
+  duration,
+  holdState,
+  isNewer,
+  rank,
+  relativeTime
+} from './derive.js'
 
 /** `npm run dev` in a plain browser has no IPC; fall back to a demo loop. */
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
+/** Replaced at build time from package.json. See vite.config.js. */
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
+
+/** How many project cards are shown at once before the rest become chips. */
 const SLOT_LIMIT = 3
-/**
- * A turn can enter and leave `waiting` in a few hundred milliseconds when a
- * hook or auto-mode answers the permission prompt. Only a state that persists
- * is worth telling anyone about.
- */
-const WAITING_DEBOUNCE_MS = 800
-/** How long a finished project keeps its card before collapsing to a chip. */
-const DONE_LINGER_MS = 30_000
-/** A failed turn is something you need to see, so it waits around longer. */
-const FAILED_LINGER_MS = 5 * 60_000
-/** Quiet for this long and the pet visibly dozes off. */
-const SLEEP_AFTER_MS = 60_000
-const URGENT = new Set(['waiting', 'failed'])
-const ACTIVE = new Set(['thinking', 'running', 'waiting', 'failed', 'compacting', 'done'])
-/** The durable states a session file can report. */
-const RUNNING = new Set(['thinking', 'running', 'compacting'])
-
-/**
- * Which state wins when a project has several, and how long each one holds the
- * card once shown.
- *
- * The hold is what makes the stack readable. Hook events arrive in bursts, and
- * without a floor the card can flick through three states faster than you can
- * read one — and "needs you" can vanish under a later "running" before you
- * ever look up.
- */
-const DISPLAY = {
-  waiting: { rank: 5, hold: 2500 },
-  failed: { rank: 4, hold: 4000 },
-  done: { rank: 3, hold: 2500 },
-  compacting: { rank: 2, hold: 1500 },
-  running: { rank: 2, hold: 900 },
-  thinking: { rank: 2, hold: 900 },
-  idle: { rank: 0, hold: 0 }
-}
-
-const priority = (state) => DISPLAY[state]?.rank ?? 1
 
 const el = {
   stack: document.getElementById('stack'),
   chips: document.getElementById('chips'),
   menu: document.getElementById('menu'),
+  panel: document.getElementById('panel'),
+  panelTitle: document.getElementById('panel-title'),
+  panelBody: document.getElementById('panel-body'),
+  panelClose: document.getElementById('panel-close'),
   pet: document.getElementById('pet'),
   template: document.getElementById('card-template')
 }
@@ -64,7 +50,10 @@ let config = {
   showScratch: false,
   alertOnWaiting: false,
   flashOnFinish: true,
-  quiet: false
+  quiet: false,
+  welcomed: false,
+  updateCheck: false,
+  updateDismissed: ''
 }
 let sessions = []
 /** When any project was last doing something, for the doze. */
@@ -132,106 +121,12 @@ function groupByProject(list) {
   return groups
 }
 
-/** Which of a project's sessions gets to speak for it. */
-function rank(session) {
-  if (session.waiting_since || session.pending_since) return 4
-  if (session.outcome === 'failed') return 3
-  if (RUNNING.has(session.state)) return 2
-  if (session.outcome === 'done') return 1
-  return 0
-}
-
-/**
- * What the session is blocked on, once it has been blocked long enough to be
- * worth saying. Empty while the prompt is still inside the debounce.
- */
-function blockedOn(session) {
-  const now = Date.now()
-  if (session.waiting_since && now - session.waiting_since >= WAITING_DEBOUNCE_MS) {
-    return session.waiting_reason || 'Waiting for you'
-  }
-  // A permission prompt Claude Code raised and nothing has resolved. Most are
-  // answered by auto-mode within a few hundred milliseconds and never reach
-  // a human, which is exactly what the debounce is filtering out.
-  if (session.pending_since && now - session.pending_since >= WAITING_DEBOUNCE_MS) {
-    return session.pending_detail || `Permission for ${session.pending_tool}`
-  }
-  return ''
-}
-
-/**
- * Turn a session file into the one word the card shows.
- *
- * The file answers three separate questions — what is it doing, how did the
- * last turn end, is a human blocking it — and this is where they collapse into
- * a single state, in that order of urgency.
- */
-function displayState(session) {
-  const now = Date.now()
-
-  if (blockedOn(session)) return 'waiting'
-  // Inside the debounce, hold whatever was on screen rather than committing to
-  // a "needs you" that auto-mode is about to answer.
-  if (session.waiting_since || session.pending_since) return ''
-
-  const outcome = session.outcome || ''
-  if (outcome === 'done') {
-    // Claude Code sends Stop while background work is still finishing. Until
-    // the result settles it is still a running turn.
-    if (now < (session.settles_ms || 0)) return session.state || 'running'
-    return now - (session.outcome_ms || 0) > DONE_LINGER_MS ? 'idle' : 'done'
-  }
-  if (outcome === 'failed') {
-    return now - (session.outcome_ms || 0) > FAILED_LINGER_MS ? 'idle' : 'failed'
-  }
-  return session.state || 'idle'
-}
 
 function effectiveState(key, session) {
   const view = viewFor(key)
-  const now = Date.now()
-
   const raw = displayState(session) || view.lastStable
   view.lastStable = RUNNING.has(raw) || raw === 'idle' ? raw : view.lastStable
-
-  // The hold exists to stop the colour flickering between two states that are
-  // really the same moment. It must not survive the card's *text* changing:
-  // holding "failed" over a headline that already says the turn succeeded is a
-  // worse lie than the flicker it was preventing.
-  const subject = session.headline || ''
-  if (view.heldSubject !== subject) {
-    view.heldSubject = subject
-    view.heldState = ''
-    view.heldUntil = 0
-  }
-
-  // Otherwise a state that has not been up long enough only gives way to
-  // something more urgent than itself.
-  if (view.heldState && now < view.heldUntil && priority(raw) <= priority(view.heldState)) {
-    return view.heldState
-  }
-  if (raw !== view.heldState) {
-    view.heldState = raw
-    view.heldUntil = now + (DISPLAY[raw]?.hold ?? 0)
-  }
-  return raw
-}
-
-function relativeTime(ms) {
-  if (!ms) return ''
-  const delta = Math.max(0, Date.now() - ms)
-  if (delta < 1000) return 'now'
-  if (delta < 60_000) return `${Math.floor(delta / 1000)}s`
-  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`
-  return `${Math.floor(delta / 3_600_000)}h`
-}
-
-function duration(ms) {
-  if (!ms) return '0s'
-  const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000))
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
-  return `${Math.floor(seconds / 3600)}h`
+  return holdState(view, session, raw)
 }
 
 // --- rendering ----------------------------------------------------------
@@ -490,6 +385,7 @@ function syncHitRects() {
   }
   add(el.pet)
   add(el.menu)
+  add(el.panel)
   if (!el.chips.hidden) add(el.chips)
   for (const node of cards.values()) add(node)
   invoke('set_hit_rects', { rects }).catch(() => {})
@@ -524,6 +420,214 @@ function showNotice(message) {
     ...sessions.filter((s) => s.session_id !== 'notice')
   ]
   render()
+}
+
+// --- updates -------------------------------------------------------------
+const RELEASES_API = 'https://api.github.com/repos/tristanmuzzu/pipsqueak/releases/latest'
+const RELEASES_PAGE = 'https://github.com/tristanmuzzu/pipsqueak/releases'
+/** Never at launch, and never at the same moment on every machine. */
+const FIRST_CHECK_MS = 2 * 60_000
+const FIRST_CHECK_JITTER_MS = 3 * 60_000
+const CHECK_EVERY_MS = 12 * 60 * 60_000
+
+/**
+ * Asks GitHub whether there is a newer release, and says so once.
+ *
+ * Nothing is downloaded and nothing is installed. A desktop pet that can
+ * replace its own binary is a much larger promise than this one wants to make,
+ * and the release page is one click away.
+ */
+async function checkForUpdate(manual) {
+  try {
+    const response = await fetch(RELEASES_API, { headers: { Accept: 'application/vnd.github+json' } })
+    if (!response.ok) throw new Error(`GitHub returned ${response.status}`)
+    const latest = String((await response.json()).tag_name ?? '')
+    if (!isNewer(latest, APP_VERSION)) {
+      // Silent unless they asked. A scheduled check that announces "nothing to
+      // report" twice a day is just noise.
+      if (manual) showNotice(`Pipsqueak ${APP_VERSION} is the latest version.`)
+      return
+    }
+    if (!manual && config.updateDismissed === latest) return
+    showNotice(`Pipsqueak ${latest} is available — ${RELEASES_PAGE}`)
+    if (!manual) {
+      // Told once. Saying it again every twelve hours is how an update prompt
+      // becomes something people learn to ignore.
+      config.updateDismissed = latest
+      await saveConfig()
+    }
+  } catch (error) {
+    // A scheduled check that cannot reach the network is not news.
+    if (manual) showNotice(`Could not check for updates: ${error.message}`)
+  }
+}
+
+function scheduleUpdateChecks() {
+  if (!config.updateCheck) return
+  const first = FIRST_CHECK_MS + Math.random() * FIRST_CHECK_JITTER_MS
+  setTimeout(() => {
+    checkForUpdate(false)
+    setInterval(() => checkForUpdate(false), CHECK_EVERY_MS)
+  }, first)
+}
+
+// --- welcome and setup check --------------------------------------------
+/**
+ * How long the connection test watches for hook traffic.
+ *
+ * Long enough to type something into Claude Code and hit enter, short enough
+ * that nobody wanders off mid-test.
+ */
+const WATCH_MS = 10_000
+
+function openPanel(title, build) {
+  el.panelTitle.textContent = title
+  el.panelBody.replaceChildren(...build())
+  el.panel.hidden = false
+  el.menu.hidden = true
+  syncHitRects()
+}
+
+function closePanel() {
+  el.panel.hidden = true
+  syncHitRects()
+}
+
+function para(text, className) {
+  const node = document.createElement('p')
+  node.textContent = text
+  if (className) node.className = className
+  return node
+}
+
+function action(label, onClick, primary) {
+  const node = document.createElement('button')
+  node.type = 'button'
+  node.className = primary ? 'action primary' : 'action'
+  node.textContent = label
+  node.addEventListener('click', () => onClick(node))
+  return node
+}
+
+/**
+ * Shown once, on the first run that has not been acknowledged.
+ *
+ * The hooks are the whole product and they do not install themselves, so
+ * historically the first thing a new user had to do was find a tray menu and
+ * guess what "install hooks" meant. This says what it edits, in the same
+ * breath as asking to do it.
+ */
+function showWelcome() {
+  openPanel('Pipsqueak', () => {
+    const nodes = [
+      para('This shows what Claude Code is doing, per project, while you get on with something else.'),
+      para(
+        'It needs to register hooks in ~/.claude/settings.json. That file is backed up first, and only entries Pipsqueak added are ever removed.',
+        'tight'
+      ),
+      action('Install Claude Code hooks', async (button) => {
+        button.disabled = true
+        button.textContent = 'Installing…'
+        const message = await invoke('install_hooks').catch((e) => String(e))
+        button.textContent = message
+      }, true),
+      action('Start Pipsqueak with Windows', async (button) => {
+        const enabled = await invoke('autostart_enabled').catch(() => false)
+        const result = await invoke('set_autostart', { enabled: !enabled }).catch((e) => String(e))
+        button.textContent =
+          typeof result === 'string' ? result : enabled ? 'Will not start with Windows' : 'Will start with Windows'
+      }),
+      action('Check GitHub for updates occasionally', async (button) => {
+        config.updateCheck = !config.updateCheck
+        await saveConfig()
+        button.textContent = config.updateCheck
+          ? 'Will check for updates — nothing is ever downloaded'
+          : 'Will not check for updates'
+      }),
+      para('Then start a session. Restart Claude Code first — it reads its hooks at startup.'),
+      action('Done', () => {
+        closePanel()
+      })
+    ]
+    return nodes
+  })
+}
+
+/**
+ * The setup check.
+ *
+ * The static checks answer "is it configured"; the connection test answers "is
+ * it working", which is a different question and the only one worth asking
+ * when someone says nothing is happening.
+ */
+async function showDoctor() {
+  const report = await invoke('run_doctor').catch(() => null)
+  openPanel('Setup check', () => {
+    if (!report) return [para('Could not run the check.')]
+    const nodes = []
+    for (const check of report.checks) {
+      const row = document.createElement('div')
+      row.className = 'check'
+      row.dataset.status = check.status
+      const dot = document.createElement('span')
+      dot.className = 'dot'
+      const text = document.createElement('span')
+      text.className = 'check-text'
+      const label = document.createElement('strong')
+      label.className = 'check-label'
+      label.textContent = check.label
+      const detail = document.createElement('span')
+      detail.className = 'check-detail'
+      detail.textContent = check.detail
+      text.append(label, detail)
+      row.append(dot, text)
+      if (check.fix === 'install') {
+        const fix = document.createElement('button')
+        fix.type = 'button'
+        fix.className = 'fix'
+        fix.textContent = 'Fix'
+        fix.addEventListener('click', async () => {
+          fix.disabled = true
+          await invoke('install_hooks').catch(() => {})
+          showDoctor()
+        })
+        row.append(fix)
+      }
+      nodes.push(row)
+    }
+
+    const status = para('')
+    nodes.push(
+      action('Test the connection', async (button) => {
+        button.disabled = true
+        const since = await invoke('watch_start').catch(() => Date.now())
+        const deadline = Date.now() + WATCH_MS
+        status.textContent = 'Go and run anything in Claude Code now…'
+        const tick = setInterval(() => {
+          const left = Math.ceil((deadline - Date.now()) / 1000)
+          if (left > 0) status.textContent = `Go and run anything in Claude Code now… ${left}s`
+        }, 250)
+        setTimeout(async () => {
+          clearInterval(tick)
+          const [, detail] = await invoke('watch_result', { since }).catch(() => ['none', 'Check failed.'])
+          status.textContent = detail
+          button.disabled = false
+          button.textContent = 'Test again'
+        }, WATCH_MS)
+      }),
+      status,
+      action('Copy report', async (button) => {
+        const text = await invoke('doctor_report').catch(() => '')
+        try {
+          await navigator.clipboard.writeText(text)
+          button.textContent = 'Copied — paste it into an issue'
+        } catch {
+          button.textContent = 'Could not reach the clipboard'
+        }
+      })
+    )
+    return nodes
+  })
 }
 
 // --- context menu -------------------------------------------------------
@@ -638,6 +742,19 @@ async function openMenu() {
   )
 
   children.push(heading('Setup'))
+  children.push(button('Check my setup…', () => showDoctor()))
+  children.push(button('Check for updates', () => checkForUpdate(true)))
+  children.push(
+    button(
+      'Check for updates automatically',
+      async () => {
+        config.updateCheck = !config.updateCheck
+        await saveConfig()
+        if (config.updateCheck) checkForUpdate(true)
+      },
+      config.updateCheck
+    )
+  )
   children.push(
     button(
       'Start with Windows',
@@ -687,6 +804,9 @@ async function saveConfig() {
       alert_on_waiting: config.alertOnWaiting,
       flash_on_finish: config.flashOnFinish,
       quiet: config.quiet,
+      welcomed: config.welcomed,
+      update_check: config.updateCheck,
+      update_dismissed: config.updateDismissed,
       x: config.x ?? null,
       y: config.y ?? null
     }
@@ -757,6 +877,9 @@ async function boot() {
       alertOnWaiting: Boolean(stored.alert_on_waiting),
       flashOnFinish: stored.flash_on_finish !== false,
       quiet: Boolean(stored.quiet),
+      welcomed: Boolean(stored.welcomed),
+      updateCheck: Boolean(stored.update_check),
+      updateDismissed: stored.update_dismissed ?? '',
       x: stored.x,
       y: stored.y
     }
@@ -772,10 +895,20 @@ async function boot() {
   renderer.start()
 
   wireInteraction()
+  el.panelClose.addEventListener('click', closePanel)
 
   if (!IS_TAURI) {
     startBrowserDemo()
     return
+  }
+
+  // Any dismissal counts as acknowledged — Done, the close button, or simply
+  // never opening it again. A welcome that keeps coming back is worse than one
+  // that is missed.
+  if (!config.welcomed) {
+    config.welcomed = true
+    await saveConfig()
+    showWelcome()
   }
 
   sessions = await invoke('get_sessions').catch(() => [])
@@ -811,6 +944,8 @@ async function boot() {
       showNotice(String(error))
     }
   })
+
+  scheduleUpdateChecks()
 
   // Ages and elapsed timers tick even when no event arrives.
   setInterval(render, 1000)
@@ -889,6 +1024,41 @@ function startBrowserDemo() {
   advance()
   setInterval(advance, 2600)
   setInterval(render, 1000)
+
+  // `?panel=welcome` / `?panel=doctor` so both can be designed in a browser
+  // without a build, a real install, or a broken machine to point them at.
+  const wanted = new URLSearchParams(location.search).get('panel')
+  if (wanted === 'welcome') showWelcome()
+  if (wanted === 'doctor') {
+    openPanel('Setup check', () => [
+      para('Rendering with sample results — the real check needs the app.'),
+      ...[
+        ['ok', 'Claude Code hooks', 'All 15 events registered.'],
+        ['fail', 'Hook program', 'The hooks point at a copy that no longer exists.'],
+        ['ok', 'Session folder', '~/.pipsqueak/sessions is writable.'],
+        ['warn', 'Recent activity', 'No sessions recorded yet.']
+      ].map(([status, label, detail]) => {
+        const row = document.createElement('div')
+        row.className = 'check'
+        row.dataset.status = status
+        const dot = document.createElement('span')
+        dot.className = 'dot'
+        const text = document.createElement('span')
+        text.className = 'check-text'
+        const strong = document.createElement('strong')
+        strong.className = 'check-label'
+        strong.textContent = label
+        const span = document.createElement('span')
+        span.className = 'check-detail'
+        span.textContent = detail
+        text.append(strong, span)
+        row.append(dot, text)
+        return row
+      }),
+      action('Test the connection', () => {}),
+      action('Copy report', () => {})
+    ])
+  }
 }
 
 boot()

@@ -41,12 +41,17 @@ fn read_settings() -> Result<(Value, bool, String), String> {
     if !path.exists() {
         return Ok((json!({}), false, String::new()));
     }
-    let raw = fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok((json!({}), true, raw));
     }
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("{} is not valid JSON ({e}) — refusing to touch it", path.display()))?;
+    let parsed: Value = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "{} is not valid JSON ({e}) — refusing to touch it",
+            path.display()
+        )
+    })?;
     if !parsed.is_object() {
         return Err(format!("{} is not a JSON object", path.display()));
     }
@@ -66,6 +71,60 @@ fn is_ours(entry: &Value) -> bool {
         .and_then(Value::as_str)
         .map(|c| c.to_ascii_lowercase().contains(MARKER))
         .unwrap_or(false)
+}
+
+/// Events we expect to own but no longer do.
+///
+/// A partial answer is the interesting one: it means something else rewrote
+/// `settings.json` and kept only some of our entries, which from the outside
+/// looks exactly like working software that has quietly gone half-deaf.
+pub fn missing_events() -> Vec<&'static str> {
+    let Ok((root, _, _)) = read_settings() else {
+        return EVENTS.to_vec();
+    };
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return EVENTS.to_vec();
+    };
+    EVENTS
+        .iter()
+        .filter(|event| !event_is_ours(hooks, event))
+        .copied()
+        .collect()
+}
+
+fn event_is_ours(hooks: &Map<String, Value>, event: &str) -> bool {
+    hooks
+        .get(event)
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups.iter().any(|group| {
+                group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .map(|entries| entries.iter().any(is_ours))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The program path the registered hooks actually run, if any.
+///
+/// Worth checking separately from "are they registered": an entry left over
+/// from an install that has since been moved or uninstalled is present, valid
+/// looking, and completely inert.
+pub fn registered_command() -> Option<String> {
+    let (root, _, _) = read_settings().ok()?;
+    let hooks = root.get("hooks")?.as_object()?;
+    hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .find(|entry| is_ours(entry))
+        .and_then(|entry| entry.get("command").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 /// Remove only our own command hooks, leaving every other hook untouched.
@@ -108,7 +167,9 @@ fn write_settings(root: &Value) -> Result<(), String> {
 }
 
 fn hooks_map(root: &mut Value) -> Result<&mut Map<String, Value>, String> {
-    let object = root.as_object_mut().ok_or("settings root is not an object")?;
+    let object = root
+        .as_object_mut()
+        .ok_or("settings root is not an object")?;
     let hooks = object.entry("hooks").or_insert_with(|| json!({}));
     hooks
         .as_object_mut()

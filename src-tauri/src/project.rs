@@ -96,7 +96,9 @@ mod tests {
             "C:\\Users\\me\\AppData\\Local\\Temp\\harness-ablation\\runs\\design-quality__r3"
         )));
         assert!(is_scratch(Path::new("/tmp/scratch/run-4")));
-        assert!(!is_scratch(Path::new("C:\\Users\\me\\Documents\\real-project")));
+        assert!(!is_scratch(Path::new(
+            "C:\\Users\\me\\Documents\\real-project"
+        )));
     }
 
     #[test]

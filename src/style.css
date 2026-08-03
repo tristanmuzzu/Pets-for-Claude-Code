@@ -505,6 +505,128 @@ body {
   height: 6px;
 }
 
+/* --- welcome / setup check ------------------------------------------- */
+.panel {
+  position: absolute;
+  right: 10px;
+  bottom: 106px;
+  width: 322px;
+  /* Fits inside the window above the pet, with room for the arrow. */
+  max-height: 480px;
+  overflow-y: auto;
+  padding: 12px 13px 13px;
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 14px 34px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  animation: rise 160ms ease-out;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.panel h1 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.panel p {
+  margin: 0 0 9px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.panel p.tight {
+  margin-bottom: 5px;
+}
+
+.panel .action {
+  display: block;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--edge);
+  background: var(--raised);
+  color: var(--ink);
+  font: 12px/1.3 system-ui, sans-serif;
+  text-align: left;
+  cursor: pointer;
+}
+
+.panel .action:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.panel .action.primary {
+  border-color: rgba(86, 156, 250, 0.5);
+  background: rgba(86, 156, 250, 0.16);
+}
+
+.panel .action[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* One row per check. The dot carries the verdict so the list scans without
+   being read. */
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 0;
+  border-top: 1px solid var(--edge);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.check:first-of-type {
+  border-top: none;
+}
+
+.check .dot {
+  margin-top: 4px;
+}
+
+.check[data-status="ok"] .dot { background: var(--done); }
+.check[data-status="warn"] .dot { background: var(--waiting); }
+.check[data-status="fail"] .dot { background: var(--failed); }
+
+.check-text {
+  flex: 1;
+}
+
+.check-label {
+  color: var(--ink);
+  display: block;
+}
+
+.check-detail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.check .fix {
+  flex: none;
+  font: 10.5px/1 system-ui, sans-serif;
+  padding: 4px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--edge);
+  background: var(--raised);
+  color: var(--ink);
+  cursor: pointer;
+}
+
 /* --- right-click menu ------------------------------------------------- */
 .menu {
   position: absolute;

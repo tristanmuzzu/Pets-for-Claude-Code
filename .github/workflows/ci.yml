@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      # The atlases are generated, so a hand-edited PNG would silently diverge
+      # from the code that is supposed to produce it.
+      - name: Sprites are reproducible
+        run: |
+          npm run sprites
+          git diff --exit-code public/pets
+
+      - run: npm run build

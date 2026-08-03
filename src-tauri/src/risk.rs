@@ -112,11 +112,14 @@ fn classify_segment(segment: &str) -> Option<&'static str> {
         .to_string();
     let rest: Vec<String> = words[1..].iter().map(|w| w.to_lowercase()).collect();
     let has = |flag: &str| rest.iter().any(|w| w == flag);
-    let starts = |sub: &[&str]| rest.iter().zip(sub).all(|(w, s)| w == s) && rest.len() >= sub.len();
+    let starts =
+        |sub: &[&str]| rest.iter().zip(sub).all(|(w, s)| w == s) && rest.len() >= sub.len();
 
     match program.as_str() {
         "rm" => {
-            let recursive = rest.iter().any(|w| is_short_flag(w, 'r') || w == "--recursive");
+            let recursive = rest
+                .iter()
+                .any(|w| is_short_flag(w, 'r') || w == "--recursive");
             let forced = rest.iter().any(|w| is_short_flag(w, 'f') || w == "--force");
             (recursive && forced).then_some("Deletes a directory tree")
         }
@@ -180,9 +183,7 @@ fn git(rest: &[String]) -> Option<&'static str> {
 
 /// True for a clustered short flag containing `letter`, e.g. `-rf` for `r`.
 fn is_short_flag(word: &str, letter: char) -> bool {
-    word.starts_with('-')
-        && !word.starts_with("--")
-        && word.chars().skip(1).any(|c| c == letter)
+    word.starts_with('-') && !word.starts_with("--") && word.chars().skip(1).any(|c| c == letter)
 }
 
 #[cfg(test)]

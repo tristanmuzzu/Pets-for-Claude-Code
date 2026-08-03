@@ -3,6 +3,7 @@
 
 use crate::attention::{self, Attention};
 use crate::desktop;
+use crate::doctor;
 use crate::install;
 use crate::state::{
     self, codex_pets_dir, load_config, pets_dir, read_sessions, root, sessions_dir, Config, Session,
@@ -253,6 +254,29 @@ fn alert() {
     desktop::alert();
 }
 
+#[tauri::command]
+fn run_doctor() -> doctor::Report {
+    doctor::run()
+}
+
+/// Marks the start of the live connection test. The frontend tells the user to
+/// go and run something, then asks what arrived.
+#[tauri::command]
+fn watch_start() -> u64 {
+    doctor::watch_start()
+}
+
+#[tauri::command]
+fn watch_result(since: u64) -> (String, String) {
+    let (status, detail) = doctor::watch_result(since);
+    (status.to_string(), detail)
+}
+
+#[tauri::command]
+fn doctor_report() -> String {
+    doctor::markdown(&doctor::run())
+}
+
 /// Blink the tray icon: a project finished while you were looking elsewhere.
 #[tauri::command]
 fn flash_tray(app: AppHandle) {
@@ -320,8 +344,7 @@ fn open_path(path: &PathBuf) -> Result<(), String> {
 }
 
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -534,10 +557,12 @@ fn drain_commands(app: &AppHandle) {
         return;
     };
     let _ = fs::remove_file(&path);
-    let Some(action) = serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|value| value.get("action").and_then(Value::as_str).map(String::from))
-    else {
+    let Some(action) = serde_json::from_str::<Value>(&raw).ok().and_then(|value| {
+        value
+            .get("action")
+            .and_then(Value::as_str)
+            .map(String::from)
+    }) else {
         return;
     };
 
@@ -596,7 +621,13 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let pets = MenuItem::with_id(app, "pets", "Open pets folder", true, None::<&str>)?;
-    let hooks = MenuItem::with_id(app, "hooks", "Reinstall Claude Code hooks", true, None::<&str>)?;
+    let hooks = MenuItem::with_id(
+        app,
+        "hooks",
+        "Reinstall Claude Code hooks",
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Pipsqueak", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
@@ -695,6 +726,10 @@ pub fn run() {
             focus_project,
             alert,
             flash_tray,
+            run_doctor,
+            watch_start,
+            watch_result,
+            doctor_report,
             clear_attention,
             autostart_enabled,
             set_autostart,

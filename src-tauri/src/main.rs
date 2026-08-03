@@ -4,6 +4,7 @@ mod app;
 mod attention;
 mod control;
 mod desktop;
+mod doctor;
 mod hook;
 mod install;
 mod process;
