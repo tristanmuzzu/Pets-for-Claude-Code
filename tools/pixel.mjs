@@ -12,6 +12,35 @@ export const COLS = 8
 export const ROWS = 9
 /** Matches the Codex pet contract exactly, so pets are interchangeable. */
 export const FRAME_COUNTS = [6, 8, 8, 4, 5, 8, 6, 6, 6]
+
+/**
+ * How long each frame is held, in milliseconds.
+ *
+ * Even timing is what makes a six-frame loop read as a metronome. Holding the
+ * frames where the pet is at rest and snapping through the middle is what makes
+ * the same six frames read as breathing, which matters here, because the pet
+ * spends most of its life on one of these loops in the corner of someone's eye.
+ *
+ * Rows follow ROW_NAMES below.
+ */
+export const FRAME_DURATIONS = [
+  // Idle: a long settle, then a quick blink and back.
+  [520, 120, 90, 90, 120, 420],
+  // Walking is a gait: even, or it limps.
+  [110, 110, 110, 110, 110, 110, 110, 110],
+  [110, 110, 110, 110, 110, 110, 110, 110],
+  // A wave lands on the up-beat and holds there.
+  [110, 90, 260, 110],
+  // Anticipate, launch, hang, land.
+  [150, 80, 90, 260, 200],
+  // A stumble: fast, then a long recovery.
+  [90, 90, 90, 90, 110, 140, 200, 380],
+  // Waiting has to stay legible from across the room, so it stays slow.
+  [300, 220, 300, 220, 300, 380],
+  // Working: busy, with one held frame so it does not blur into itself.
+  [110, 110, 110, 200, 110, 110],
+  [180, 140, 140, 260, 140, 180]
+]
 export const ROW_NAMES = [
   'idle', 'running-right', 'running-left', 'waving', 'jumping',
   'failed', 'waiting', 'running', 'review'
@@ -51,7 +80,7 @@ export class Layer {
     this.d[i + 3] = c[3] === undefined ? 255 : c[3]
   }
 
-  /** Alpha-blend rather than replace — used for glows. */
+  /** Alpha-blend rather than replace. Used for glows. */
   blend(x, y, c) {
     x = Math.round(x)
     y = Math.round(y)
@@ -89,7 +118,7 @@ export class Layer {
     }
   }
 
-  /** Rounded rectangle — the base shape for blockier characters. */
+  /** Rounded rectangle: the base shape for blockier characters. */
   roundRect(x, y, w, h, r, c) {
     for (let yy = 0; yy < h; yy++) {
       for (let xx = 0; xx < w; xx++) {
@@ -225,7 +254,7 @@ export function drawEyes(layer, cx, cy, kind, palette) {
   }
 }
 
-/** Radial falloff, white-hot core — a hard-edged disc reads as a UI chip. */
+/** Radial falloff, white-hot core. A hard-edged disc reads as a UI chip. */
 export function drawWisp(layer, x, y, colour, intensity = 1) {
   const R = 4.8
   for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++) {
@@ -317,6 +346,8 @@ export function writePet({ dir, id, displayName, description, drawFrame, iconPat
         columns: COLS,
         rows: ROWS,
         frameCounts: FRAME_COUNTS,
+        frameDurations: FRAME_DURATIONS,
+        /** The fallback for any row a pet does not time explicitly. */
         fps: 8,
         author: 'Pipsqueak',
         license: 'MIT'

@@ -1,7 +1,7 @@
 // Ember: the default Pipsqueak companion.
 //
-// A soft clay pebble with a spark that floats beside it. Deliberately flat,
-// rounded and minimal so it sits next to Claude Code without clashing — an
+// A soft clay pebble with a spark that floats beside it. Flat and
+// rounded and minimal so it sits next to Claude Code without clashing. An
 // original character, not anyone's logo.
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'

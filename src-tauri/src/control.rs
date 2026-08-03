@@ -1,4 +1,4 @@
-//! `pipsqueak control <action>` — the entry point used by the Claude Code
+//! `pipsqueak control <action>`, the entry point used by the Claude Code
 //! `/pet` command and anything else that wants to drive a running overlay.
 //!
 //! Commands are handed over through a file rather than a socket, for the same
@@ -13,7 +13,9 @@ use std::fs;
 const HEARTBEAT_TIMEOUT_MS: u64 = 6_000;
 
 pub fn run(action: Option<String>) -> Result<String, String> {
-    let action = action.unwrap_or_else(|| "toggle".to_string()).to_lowercase();
+    let action = action
+        .unwrap_or_else(|| "toggle".to_string())
+        .to_lowercase();
     let running = is_running();
 
     match action.as_str() {

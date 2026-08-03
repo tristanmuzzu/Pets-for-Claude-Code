@@ -14,7 +14,7 @@ const OUT = resolve(HERE, '..', 'assets', `states-${pet}.png`)
 const FRAME = 48
 const SCALE = 4
 const GAP = 6
-// [row, frame] — idle, running, waiting, failed, review, jumping.
+// [row, frame]: idle, running, waiting, failed, review, jumping.
 const PICKS = [
   [0, 0],
   [7, 2],

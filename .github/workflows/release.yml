@@ -9,7 +9,20 @@ permissions:
   contents: write
 
 jobs:
+  # Everything here fails in seconds. Doing it before the build means a
+  # mismatched version number costs a coffee rather than a full toolchain run.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Versions agree, and the release has notes
+        run: node scripts/verify-release.mjs
+
   build:
+    needs: check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +40,15 @@ jobs:
 
       - run: npm ci
 
+      # `tauri::generate_context!` embeds the frontend at compile time, so the
+      # cargo steps below need dist/ to exist. tauri-action would build it, but
+      # not until after these run.
+      - run: npm run build
+
+      - run: npm test
+
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Verify the sprite atlases are in sync with their generators
         run: |
           npm run sprites
@@ -39,4 +61,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Pipsqueak ${{ github.ref_name }}
           releaseDraft: true
+          releaseBody: See docs/releases/${{ github.ref_name }}.md
           args: --bundles nsis,msi

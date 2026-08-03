@@ -1,13 +1,13 @@
 //! Small platform integrations: bring another window forward, make a sound,
 //! and start with the machine.
 //!
-//! Deliberately dependency-free — a handful of `user32` calls and the `reg`
+//! Dependency-free on purpose: a handful of `user32` calls and the `reg`
 //! command are cheaper than pulling a Windows crate graph into an 8 MB app.
 
 /// Builds a `Command` that never flashes a console window.
 ///
 /// Without this, every `reg`/`explorer` call from the tray menu pops a black
-/// rectangle on screen for a frame — which is exactly the thing a quiet desktop
+/// rectangle on screen for a frame, which is the one thing a quiet desktop
 /// overlay must not do.
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
@@ -40,7 +40,7 @@ pub fn focus_window_titled(fragments: &[String]) -> bool {
 pub fn alert() {
     #[cfg(windows)]
     unsafe {
-        // MB_ICONASTERISK — the quiet "something happened" sound.
+        // MB_ICONASTERISK: the quiet "something happened" sound.
         windows_impl::MessageBeep(0x00000040);
     }
 }
@@ -70,7 +70,15 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
         let status = if enabled {
             quiet_command("reg")
                 .args([
-                    "add", RUN_KEY, "/v", "Pipsqueak", "/t", "REG_SZ", "/d", &exe, "/f",
+                    "add",
+                    RUN_KEY,
+                    "/v",
+                    "Pipsqueak",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &exe,
+                    "/f",
                 ])
                 .status()
         } else {

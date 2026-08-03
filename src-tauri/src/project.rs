@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
-    /// Display name — the basename of the root.
+    /// Display name: the basename of the root.
     pub name: String,
     pub root: PathBuf,
     /// Set when the session is not sitting at the project root.
@@ -51,7 +51,7 @@ fn basename(path: &Path) -> String {
 }
 
 /// Walks up looking for `.git`, following the worktree pointer file back to the
-/// repository that owns it. Pure filesystem — a hook fires often enough that
+/// repository that owns it. Pure filesystem, because a hook fires often enough that
 /// shelling out to git on every event would be wasteful.
 fn git_root(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
@@ -96,7 +96,9 @@ mod tests {
             "C:\\Users\\me\\AppData\\Local\\Temp\\harness-ablation\\runs\\design-quality__r3"
         )));
         assert!(is_scratch(Path::new("/tmp/scratch/run-4")));
-        assert!(!is_scratch(Path::new("C:\\Users\\me\\Documents\\real-project")));
+        assert!(!is_scratch(Path::new(
+            "C:\\Users\\me\\Documents\\real-project"
+        )));
     }
 
     #[test]

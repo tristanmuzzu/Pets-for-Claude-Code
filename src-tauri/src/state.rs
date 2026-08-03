@@ -5,13 +5,22 @@
 //! directory. That keeps the hook a fire-and-forget process with no port to
 //! collide with and no daemon to be running first.
 
+use crate::process;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RECENT_LIMIT: usize = 24;
+
+/// A session nobody has touched in this long is gone, whatever it last claimed.
+/// Generous on purpose: a real prompt left waiting overnight is still true.
 const STALE_AFTER_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// Work that has produced no event in this long is not happening. Claude Code
+/// fires a hook for every tool call, so silence this long means the turn died
+/// without a `Stop`, and the card must stop claiming otherwise.
+const WORKING_STALE_MS: u64 = 5 * 60 * 1000;
 
 pub fn home_dir() -> PathBuf {
     #[cfg(windows)]
@@ -84,14 +93,22 @@ pub struct Entry {
     pub text: String,
 }
 
+/// Durable states: what the session *is* doing.
+///
+/// Excludes "waiting", "done" and "failed". Those answer different questions
+/// (is a human blocking this, and how did the last turn end), and storing them
+/// here is what lets a card get stuck on an alert forever when the resolving
+/// event never arrives.
+pub const RUNNING_STATES: [&str; 3] = ["thinking", "running", "compacting"];
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct Session {
     pub session_id: String,
-    /// idle | thinking | running | waiting | failed | done | compacting
+    /// idle | thinking | running | compacting. Only forward progress moves it.
     pub state: String,
     /// What this turn is *about*. Set when the turn starts and replaced when it
-    /// ends — never by tool events, so it stays readable while tools churn.
+    /// ends, never by tool events, so it stays readable while tools churn.
     pub headline: String,
     /// The live line: "Editing render.js", "Running: npm test".
     pub activity: String,
@@ -100,14 +117,14 @@ pub struct Session {
     pub kind: String,
     /// Longer text for the expanded panel (assistant summary, error body).
     pub detail: String,
-    /// Display name of the owning project — the git repository, not the folder
+    /// Display name of the owning project: the git repository, not the folder
     /// the session happens to be sitting in.
     pub project: String,
     /// Set only when the session runs somewhere other than the project root
     /// (a worktree, a subdirectory), for a secondary label.
     pub workspace: String,
     pub project_root: String,
-    /// True when the project root is a temp directory — throwaway sessions
+    /// True when the project root is a temp directory: throwaway sessions
     /// from scripted runs, which should not compete with real work.
     pub scratch: bool,
     pub cwd: String,
@@ -120,6 +137,48 @@ pub struct Session {
     pub turn_tools: u64,
     pub tools: u64,
     pub recent: Vec<Entry>,
+
+    /// How the last turn ended: "" | done | failed. Cleared the moment the
+    /// next turn starts, so it can never outlive the thing it describes.
+    pub outcome: String,
+    pub outcome_ms: u64,
+    /// A `done` is only real once the clock passes this. Claude Code sends
+    /// `Stop` while background tasks are still finishing, so an immediate
+    /// celebration is sometimes premature; holding it briefly lets the next
+    /// event cancel it instead.
+    pub settles_ms: u64,
+    /// Non-zero while Claude Code is genuinely blocked on a human. Cleared by
+    /// any forward progress.
+    pub waiting_since: u64,
+    pub waiting_reason: String,
+
+    /// A permission prompt Claude Code raised and has not resolved.
+    ///
+    /// Recorded rather than believed. Auto-mode and permission hooks settle
+    /// most of these in a couple of hundred milliseconds without anyone being
+    /// asked, so this only becomes a visible "needs you" once it outlives the
+    /// debounce in the frontend.
+    pub pending_tool: String,
+    pub pending_detail: String,
+    pub pending_since: u64,
+    /// Why the pending command looks irreversible. A hint for the card only.
+    /// Nothing here approves, denies, or blocks anything.
+    pub pending_risk: String,
+    /// Tool failures inside the current turn. A failed grep is not a failed
+    /// turn, since Claude usually just tries something else, so this is a
+    /// marker rather than a state.
+    pub hiccups: u64,
+    /// Subagents started but not yet finished.
+    pub subagents: u64,
+
+    /// The agent process that owns this session, as `(pid, creation time)`.
+    /// The creation time is what makes it safe: pids get reused, and a reused
+    /// pid would otherwise report a dead session as alive.
+    pub agent_pid: u32,
+    pub agent_created: u64,
+    /// Timestamp of the event this file describes. Claude Code runs matching
+    /// hooks in parallel, so two writers can race; the older one must lose.
+    pub event_ms: u64,
 }
 
 impl Session {
@@ -139,48 +198,175 @@ impl Session {
             self.recent.drain(0..overflow);
         }
     }
+
+    pub fn is_running(&self) -> bool {
+        RUNNING_STATES.contains(&self.state.as_str())
+    }
+
+    /// Forward progress: whatever the session was blocked on or had finished
+    /// is no longer true.
+    pub fn clear_pending(&mut self) {
+        self.outcome.clear();
+        self.outcome_ms = 0;
+        self.settles_ms = 0;
+        self.waiting_since = 0;
+        self.waiting_reason.clear();
+    }
+
+    pub fn clear_permission(&mut self) {
+        self.pending_tool.clear();
+        self.pending_detail.clear();
+        self.pending_risk.clear();
+        self.pending_since = 0;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
+    /// Which build's idea of this file it is. See [`CONFIG_VERSION`].
+    pub version: u32,
+    /// False until the first run has been acknowledged. *Not* backfilled for
+    /// existing installs, because an upgrade should get the welcome
+    /// once too, since it is the only place the setup is explained.
+    pub welcomed: bool,
     pub pet: String,
     pub scale: f64,
     pub click_through: bool,
     pub show_bubble: bool,
-    /// Sessions rooted in a temp directory — scripted runs, evals — are hidden
+    /// Sessions rooted in a temp directory (scripted runs, evals) are hidden
     /// unless asked for. They are not projects and drown out real work.
     pub show_scratch: bool,
     /// Beep when a project starts waiting on you.
     pub alert_on_waiting: bool,
+    /// Blink the tray icon when a project finishes. The only channel that
+    /// reaches you when the overlay is behind a fullscreen window.
+    pub flash_on_finish: bool,
+    /// Do not disturb: no sound, no tray flash. The pet still updates.
+    pub quiet: bool,
+    /// The chord that shows and hides the pet, e.g. "Ctrl+Alt+P". "off"
+    /// disables it. If the chord is already claimed by something else,
+    /// Pipsqueak falls back to the next one it can get and says which.
+    pub hotkey: String,
+    /// Ask GitHub whether there is a newer release.
+    ///
+    /// Off until asked for. This is the only thing in the app that talks to
+    /// the network at all, and a status overlay reaching out on its own
+    /// without being asked is a surprise nobody signed up for.
+    pub update_check: bool,
+    /// A version the user has already been told about and did not want.
+    pub update_dismissed: String,
     pub x: Option<i32>,
     pub y: Option<i32>,
+}
+
+impl Config {
+    /// Pulls any out-of-range value back to something usable.
+    ///
+    /// Per field rather than all-or-nothing: one bad number in a hand-edited
+    /// file should cost that one setting, not every other one alongside it.
+    fn clamp(&mut self) {
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            self.scale = 2.0;
+        }
+        self.scale = self.scale.clamp(1.0, 6.0);
+        if self.pet.trim().is_empty() {
+            self.pet = "byte".to_string();
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: CONFIG_VERSION,
+            welcomed: false,
             pet: "byte".to_string(),
             scale: 2.0,
             click_through: false,
             show_bubble: true,
             show_scratch: false,
             alert_on_waiting: false,
+            flash_on_finish: true,
+            quiet: false,
+            hotkey: "Ctrl+Alt+P".to_string(),
+            update_check: false,
+            update_dismissed: String::new(),
             x: None,
             y: None,
         }
     }
 }
 
+/// The shape this build understands. Bumped when a field changes meaning,
+/// not when one is merely added, which `serde(default)` already handles.
+///
+/// 2: the window grew to fit the setup panel. The saved position is the
+///    window's top-left, but the pet sits at the *bottom* of it, so a taller
+///    window with the same origin would have pushed the pet down behind the
+///    taskbar.
+pub const CONFIG_VERSION: u32 = 2;
+
+/// How much taller the window became in version 2.
+const V2_WINDOW_GROWTH: i32 = 200;
+
+/// Reads the config, surviving anything that might have happened to the file.
+///
+/// It is a plain JSON file in the user's home directory, which means it gets
+/// hand-edited, half-written by a crash, and occasionally written by a newer
+/// build than this one. None of those may lose the whole config or, worse,
+/// silently overwrite a newer file with older defaults.
 pub fn load_config() -> Config {
-    fs::read_to_string(config_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+    let path = config_path();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        // No file yet: a first run, not a problem.
+        return Config::default();
+    };
+    match serde_json::from_str::<Config>(&raw) {
+        Ok(mut config) => {
+            migrate(&mut config);
+            config.clamp();
+            config
+        }
+        Err(_) => {
+            // Keep whatever they had. Overwriting an unparseable config with
+            // defaults destroys the only copy of a setting they may have been
+            // hand-editing when something went wrong.
+            let _ = fs::rename(&path, path.with_extension("json.bak"));
+            Config::default()
+        }
+    }
+}
+
+/// Brings a config written by an older build up to date.
+///
+/// Each step moves one version forward and nothing else, so a config that has
+/// been sitting on disk through several releases arrives correct rather than
+/// having the newest step applied to the oldest shape.
+fn migrate(config: &mut Config) {
+    if config.version < 2 {
+        // The pet is drawn at the bottom of the window, so a window that grew
+        // downward from the same saved origin would take the pet with it.
+        if let Some(y) = config.y {
+            config.y = Some(y - V2_WINDOW_GROWTH);
+        }
+        config.version = 2;
+    }
 }
 
 pub fn save_config(config: &Config) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(config).unwrap_or_else(|_| b"{}".to_vec());
+    if config.version > CONFIG_VERSION {
+        // Written by a newer build. Rolling it back to fields this one happens
+        // to know about would quietly delete their settings.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "config.json was written by a newer version of Pipsqueak",
+        ));
+    }
+    let mut stored = config.clone();
+    stored.clamp();
+    stored.version = CONFIG_VERSION;
+    let bytes = serde_json::to_vec_pretty(&stored).unwrap_or_else(|_| b"{}".to_vec());
     write_atomic(&config_path(), &bytes)
 }
 
@@ -204,6 +390,67 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// Held for the read-modify-write of one session file.
+///
+/// Claude Code runs every matching hook for an event in parallel, so two
+/// `pipsqueak hook` processes routinely touch the same file at the same
+/// moment. Without this, both read the same "before", and whichever renames
+/// last silently discards the other's event.
+pub struct FileLock {
+    path: PathBuf,
+    held: bool,
+}
+
+impl FileLock {
+    /// Waits up to ~200ms, then proceeds anyway.
+    ///
+    /// Losing an event is worse than an interleaved write: hooks are the only
+    /// source of truth here, and a hook that gives up writes nothing at all.
+    pub fn acquire(target: &Path) -> Self {
+        let path = target.with_extension("json.lock");
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        for attempt in 0..40 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Self { path, held: true },
+                Err(_) => {
+                    // A hook killed mid-write would otherwise block every later
+                    // event for this session forever.
+                    if attempt == 0 {
+                        if let Ok(meta) = fs::metadata(&path) {
+                            let expired = meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.elapsed().ok())
+                                .map(|age| age.as_secs() >= 2)
+                                .unwrap_or(true);
+                            if expired {
+                                let _ = fs::remove_file(&path);
+                                continue;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+        Self { path, held: false }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub fn read_sessions() -> Vec<Session> {
     let mut out: Vec<Session> = Vec::new();
     let Ok(entries) = fs::read_dir(sessions_dir()) else {
@@ -223,39 +470,140 @@ pub fn read_sessions() -> Vec<Session> {
     }
     // Anything needing a human wins, then most recently active.
     out.sort_by(|a, b| {
-        attention_rank(&b.state)
-            .cmp(&attention_rank(&a.state))
+        attention_rank(b)
+            .cmp(&attention_rank(a))
             .then(b.updated_ms.cmp(&a.updated_ms))
     });
     out
 }
 
-fn attention_rank(state: &str) -> u8 {
-    match state {
-        "waiting" => 3,
-        "failed" => 2,
-        _ => 0,
+fn attention_rank(session: &Session) -> u8 {
+    if session.waiting_since > 0 {
+        3
+    } else if session.outcome == "failed" {
+        2
+    } else {
+        0
     }
 }
 
-/// Drop session files left behind by crashed or force-quit sessions.
-pub fn prune_stale() {
+/// Retires sessions that are no longer telling the truth.
+///
+/// Three rules, in order of how confident each is:
+///
+/// 1. The agent process is gone. Certain, so delete the session outright.
+/// 2. Nothing has happened for [`WORKING_STALE_MS`] while the card claims work
+///    is in progress. Claude Code fires a hook per tool call, so that silence
+///    means the turn died without a `Stop`. Downgrade rather than delete, since
+///    the session may still be resumed. A session genuinely *waiting* on a
+///    human is left alone: that claim stays true no matter how long it takes.
+/// 3. Nothing at all for [`STALE_AFTER_MS`]. Delete.
+///
+/// Returns the number of files it changed, so callers can skip a redraw.
+pub fn sweep() -> usize {
     let now = now_ms();
     let Ok(entries) = fs::read_dir(sessions_dir()) else {
-        return;
+        return 0;
     };
+    let mut changed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let stale = fs::read_to_string(&path)
+        let Some(mut session) = fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<Session>(&raw).ok())
-            .map(|s| now.saturating_sub(s.updated_ms) > STALE_AFTER_MS)
-            .unwrap_or(true);
-        if stale {
+        else {
+            // Unreadable or from an incompatible build: it can only mislead.
             let _ = fs::remove_file(&path);
+            changed += 1;
+            continue;
+        };
+
+        let age = now.saturating_sub(session.updated_ms);
+
+        if session.agent_pid != 0 && !process::is_alive(session.agent_pid, session.agent_created) {
+            let _ = fs::remove_file(&path);
+            changed += 1;
+            continue;
         }
+        if age > STALE_AFTER_MS {
+            let _ = fs::remove_file(&path);
+            changed += 1;
+            continue;
+        }
+        // A session that reported how its turn ended is not silently stuck,
+        // however long ago that was.
+        if age > WORKING_STALE_MS && session.is_running() && session.outcome.is_empty() {
+            session.state = "idle".to_string();
+            session.kind = "Idle".to_string();
+            session.activity.clear();
+            session.subagents = 0;
+            // Not a completion. Saying "Done" here would be the same lie in a
+            // friendlier voice.
+            session.headline = "Stopped responding".to_string();
+            if let Ok(bytes) = serde_json::to_vec(&session) {
+                let _ = write_atomic(&path, &bytes);
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_taller_window_keeps_the_pet_where_it_was() {
+        let mut config = Config {
+            version: 1,
+            y: Some(900),
+            ..Config::default()
+        };
+        migrate(&mut config);
+        assert_eq!(config.version, 2);
+        assert_eq!(
+            config.y,
+            Some(700),
+            "the pet is bottom-anchored, so the origin moves up"
+        );
+    }
+
+    #[test]
+    fn migration_runs_once() {
+        let mut config = Config {
+            version: 1,
+            y: Some(900),
+            ..Config::default()
+        };
+        migrate(&mut config);
+        migrate(&mut config);
+        assert_eq!(config.y, Some(700));
+    }
+
+    #[test]
+    fn a_hand_edited_value_costs_only_itself() {
+        let mut config = Config {
+            scale: -12.0,
+            pet: "  ".into(),
+            show_scratch: true,
+            ..Config::default()
+        };
+        config.clamp();
+        assert_eq!(config.scale, 2.0);
+        assert_eq!(config.pet, "byte");
+        assert!(config.show_scratch, "an unrelated setting must survive");
+    }
+
+    #[test]
+    fn a_newer_config_is_never_written_over() {
+        let config = Config {
+            version: CONFIG_VERSION + 1,
+            ..Config::default()
+        };
+        assert!(save_config(&config).is_err());
     }
 }

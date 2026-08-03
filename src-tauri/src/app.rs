@@ -1,7 +1,10 @@
 //! The overlay: a transparent, always-on-top window that polls session state
 //! and animates the pet.
 
+use crate::attention::{self, Attention};
 use crate::desktop;
+use crate::doctor;
+use crate::hotkey::{self, Binding};
 use crate::install;
 use crate::state::{
     self, codex_pets_dir, load_config, pets_dir, read_sessions, root, sessions_dir, Config, Session,
@@ -12,13 +15,26 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
-const HIT_TEST_INTERVAL: Duration = Duration::from_millis(60);
+/// Hit-test rates, by how close the cursor is to something interactive. Only
+/// the first one has to be quick, and only while the cursor is right there.
+/// Polling this fast all the time would keep a core busy for an overlay you
+/// are not even pointing at.
+const HIT_TEST_NEAR: Duration = Duration::from_millis(12);
+const HIT_TEST_APPROACHING: Duration = Duration::from_millis(50);
+const HIT_TEST_FAR: Duration = Duration::from_millis(220);
+/// Roughly a card's own height: far enough out that a fast flick is caught
+/// before it lands.
+const NEAR_PX: f64 = 90.0;
+const APPROACHING_PX: f64 = 320.0;
+/// Often enough that a crashed session disappears while you are still looking
+/// at the card, rare enough that it costs nothing.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 const WINDOW_LABEL: &str = "pet";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -32,6 +48,13 @@ pub struct Rect {
 impl Rect {
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
+    }
+
+    /// Distance from the point to the nearest edge; zero inside.
+    fn distance_to(&self, x: f64, y: f64) -> f64 {
+        let dx = (self.x - x).max(0.0).max(x - (self.x + self.w));
+        let dy = (self.y - y).max(0.0).max(y - (self.y + self.h));
+        (dx * dx + dy * dy).sqrt()
     }
 }
 
@@ -223,7 +246,58 @@ fn focus_project(project: String, workspace: String) -> bool {
 
 #[tauri::command]
 fn alert() {
+    // Do Not Disturb has to be checked here rather than in the frontend: the
+    // frontend's copy of the config can be a moment stale, and a beep that
+    // escapes a quiet mode is the one failure nobody forgives.
+    if load_config().quiet {
+        return;
+    }
     desktop::alert();
+}
+
+#[tauri::command]
+fn run_doctor(app: AppHandle) -> doctor::Report {
+    doctor::run(&hotkey_binding(app))
+}
+
+/// Marks the start of the live connection test. The frontend tells the user to
+/// go and run something, then asks what arrived.
+#[tauri::command]
+fn watch_start() -> u64 {
+    doctor::watch_start()
+}
+
+#[tauri::command]
+fn watch_result(since: u64) -> (String, String) {
+    let (status, detail) = doctor::watch_result(since);
+    (status.to_string(), detail)
+}
+
+#[tauri::command]
+fn doctor_report(app: AppHandle) -> String {
+    doctor::markdown(&doctor::run(&hotkey_binding(app)))
+}
+
+/// Blink the tray icon: a project finished while you were looking elsewhere.
+#[tauri::command]
+fn flash_tray(app: AppHandle) {
+    attention::flash(&app);
+}
+
+/// The chord that shows and hides the pet, for the menu to display.
+#[tauri::command]
+fn hotkey_binding(app: AppHandle) -> String {
+    app.state::<Binding>()
+        .0
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default()
+}
+
+/// You have seen it. Stop blinking.
+#[tauri::command]
+fn clear_attention(app: AppHandle) {
+    attention::clear(&app);
 }
 
 #[tauri::command]
@@ -281,8 +355,7 @@ fn open_path(path: &PathBuf) -> Result<(), String> {
 }
 
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
@@ -312,15 +385,22 @@ fn place_window(app: &AppHandle, config: &Config) {
         return;
     };
     if let (Some(x), Some(y)) = (config.x, config.y) {
-        let _ = window.set_position(PhysicalPosition::new(x, y));
-        return;
+        if visible_somewhere(&window, x, y) {
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+            return;
+        }
+        // The display it was parked on is gone: a laptop undocked, a monitor
+        // unplugged. Restoring the saved position would leave the overlay
+        // stranded in space with no way to drag it back, so fall through and
+        // re-place it.
     }
     // Default: bottom-right, clear of the Windows taskbar. Persist it, or the
     // position stays null until the pet is dragged for the first time.
     if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.outer_size()) {
         let area = monitor.size();
-        let x = area.width.saturating_sub(size.width + 24) as i32;
-        let y = area.height.saturating_sub(size.height + 72) as i32;
+        let origin = monitor.position();
+        let x = origin.x + area.width.saturating_sub(size.width + 24) as i32;
+        let y = origin.y + area.height.saturating_sub(size.height + 72) as i32;
         let _ = window.set_position(PhysicalPosition::new(x, y));
         let mut stored = config.clone();
         stored.x = Some(x);
@@ -329,15 +409,71 @@ fn place_window(app: &AppHandle, config: &Config) {
     }
 }
 
-/// Keeps the window click-through except over the pet and its bubble.
+/// True when the window's midpoint falls inside some display.
+///
+/// The midpoint rather than the corner: a window whose top-left is just off the
+/// left edge of a screen is still perfectly usable, while one that only
+/// overlaps by a pixel is not.
+fn visible_somewhere(window: &tauri::WebviewWindow, x: i32, y: i32) -> bool {
+    let Ok(monitors) = window.available_monitors() else {
+        // No way to tell. Trusting the saved position is the safer error: it
+        // is at worst where the user last put it.
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+    let size = window.outer_size().unwrap_or_default();
+    let mid_x = x + size.width as i32 / 2;
+    let mid_y = y + size.height as i32 / 2;
+    monitors.iter().any(|monitor| {
+        let origin = monitor.position();
+        let area = monitor.size();
+        mid_x >= origin.x
+            && mid_y >= origin.y
+            && mid_x < origin.x + area.width as i32
+            && mid_y < origin.y + area.height as i32
+    })
+}
+
+/// Rescues the overlay when the display it was on disappears while running.
+fn ensure_on_screen(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    if visible_somewhere(&window, position.x, position.y) {
+        return;
+    }
+    let mut config = load_config();
+    config.x = None;
+    config.y = None;
+    place_window(app, &config);
+}
+
+/// Keeps the window click-through except over the pet and its cards.
 ///
 /// A transparent overlay otherwise swallows every click inside its rectangle,
 /// which would make the pet actively hostile to the thing it sits on top of.
+///
+/// This has to be a poll rather than ordinary pointer events, because a window
+/// that is ignoring the cursor receives no events to tell it the cursor has
+/// arrived. The cost of polling is the gap: a click landing inside it goes to
+/// the wrong window. So the rate follows the cursor: fast when it is near
+/// something interactive, idle when it is nowhere near the overlay.
+///
+/// (The alternative is a second, always-interactive window shaped to the hit
+/// area. That works for a single small sprite; here the interactive area is a
+/// stack of separate cards, and one window covering their union would swallow
+/// clicks in the gaps between them.)
 fn spawn_hit_test(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
+        let mut interval = HIT_TEST_FAR;
         loop {
-            std::thread::sleep(HIT_TEST_INTERVAL);
+            std::thread::sleep(interval);
             let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
                 continue;
             };
@@ -346,6 +482,7 @@ fn spawn_hit_test(app: AppHandle) {
                     let _ = window.set_ignore_cursor_events(true);
                     last = Some(true);
                 }
+                interval = HIT_TEST_FAR;
                 continue;
             }
             let (Ok(cursor), Ok(origin), Ok(scale)) = (
@@ -357,12 +494,28 @@ fn spawn_hit_test(app: AppHandle) {
             };
             let local_x = (cursor.x - origin.x as f64) / scale;
             let local_y = (cursor.y - origin.y as f64) / scale;
-            let over = app
+            let (over, distance) = app
                 .state::<Interactive>()
                 .0
                 .lock()
-                .map(|rects| rects.iter().any(|r| r.contains(local_x, local_y)))
-                .unwrap_or(false);
+                .map(|rects| {
+                    let over = rects.iter().any(|r| r.contains(local_x, local_y));
+                    let distance = rects
+                        .iter()
+                        .map(|r| r.distance_to(local_x, local_y))
+                        .fold(f64::INFINITY, f64::min);
+                    (over, distance)
+                })
+                .unwrap_or((false, f64::INFINITY));
+            // Approaching a card, or just left one: this is the window in which
+            // being wrong costs a misdirected click.
+            interval = if distance <= NEAR_PX {
+                HIT_TEST_NEAR
+            } else if distance <= APPROACHING_PX {
+                HIT_TEST_APPROACHING
+            } else {
+                HIT_TEST_FAR
+            };
             if last != Some(!over) {
                 let _ = window.set_ignore_cursor_events(!over);
                 last = Some(!over);
@@ -374,7 +527,18 @@ fn spawn_hit_test(app: AppHandle) {
 fn spawn_poller(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last = String::new();
+        let mut next_sweep = Instant::now();
         loop {
+            // Hooks can only ever say what happened; nothing writes a file to
+            // report that Claude Code died. The sweep is the only thing that
+            // can retire a session, so it has to run on a clock of its own.
+            if Instant::now() >= next_sweep {
+                state::sweep();
+                // Same cadence, different job: catch an undock or an unplugged
+                // monitor that left the overlay somewhere you cannot reach it.
+                ensure_on_screen(&app);
+                next_sweep = Instant::now() + SWEEP_INTERVAL;
+            }
             let sessions = read_sessions();
             let encoded = serde_json::to_string(&sessions).unwrap_or_default();
             if encoded != last {
@@ -404,10 +568,12 @@ fn drain_commands(app: &AppHandle) {
         return;
     };
     let _ = fs::remove_file(&path);
-    let Some(action) = serde_json::from_str::<Value>(&raw)
-        .ok()
-        .and_then(|value| value.get("action").and_then(Value::as_str).map(String::from))
-    else {
+    let Some(action) = serde_json::from_str::<Value>(&raw).ok().and_then(|value| {
+        value
+            .get("action")
+            .and_then(Value::as_str)
+            .map(String::from)
+    }) else {
         return;
     };
 
@@ -426,7 +592,7 @@ fn drain_commands(app: &AppHandle) {
         other => {
             if let Some(pet) = other.strip_prefix("pet:") {
                 let _ = window.show();
-                // The frontend owns both sprite loading and the config file —
+                // The frontend owns both sprite loading and the config file, and
                 // writing it from here would race its copy and lose the window
                 // position.
                 let _ = app.emit("pipsqueak://pet", pet.to_string());
@@ -457,14 +623,29 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         config.click_through,
         None::<&str>,
     )?;
+    let quiet = CheckMenuItem::with_id(
+        app,
+        "quiet",
+        "Do not disturb",
+        true,
+        config.quiet,
+        None::<&str>,
+    )?;
     let pets = MenuItem::with_id(app, "pets", "Open pets folder", true, None::<&str>)?;
-    let hooks = MenuItem::with_id(app, "hooks", "Reinstall Claude Code hooks", true, None::<&str>)?;
+    let hooks = MenuItem::with_id(
+        app,
+        "hooks",
+        "Reinstall Claude Code hooks",
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Pipsqueak", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
             &toggle,
             &click_through,
+            &quiet,
             &PredefinedMenuItem::separator(app)?,
             &pets,
             &hooks,
@@ -490,6 +671,15 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = window.set_ignore_cursor_events(config.click_through);
                 }
             }
+            "quiet" => {
+                let mut config = load_config();
+                config.quiet = !config.quiet;
+                let _ = state::save_config(&config);
+                if config.quiet {
+                    attention::clear(app);
+                }
+                let _ = app.emit("pipsqueak://config", ());
+            }
             "pets" => {
                 let _ = open_pets_dir();
             }
@@ -510,6 +700,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
+                // Clicking the tray is the user noticing it. Whatever the
+                // blink was for, they have seen it.
+                attention::clear(tray.app_handle());
                 toggle_window(tray.app_handle());
             }
         });
@@ -524,10 +717,12 @@ pub fn run() {
     let _ = fs::create_dir_all(sessions_dir());
     let _ = fs::create_dir_all(pets_dir());
     let _ = fs::create_dir_all(root());
-    state::prune_stale();
+    state::sweep();
 
     tauri::Builder::default()
         .manage(Interactive::default())
+        .manage(Attention::default())
+        .manage(Binding::default())
         .manage(ClickThrough::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
@@ -542,6 +737,13 @@ pub fn run() {
             open_pets_dir,
             focus_project,
             alert,
+            flash_tray,
+            run_doctor,
+            watch_start,
+            watch_result,
+            doctor_report,
+            clear_attention,
+            hotkey_binding,
             autostart_enabled,
             set_autostart,
             quit
@@ -559,6 +761,17 @@ pub fn run() {
                 let _ = window.show();
             }
             build_tray(&handle)?;
+            // Whatever chord we actually got, so the menu can show it rather
+            // than the one that was asked for.
+            match hotkey::start(handle.clone()) {
+                Ok(chord) => {
+                    if let Ok(mut held) = handle.state::<Binding>().0.lock() {
+                        *held = chord;
+                    }
+                }
+                Err(reason) => eprintln!("no global hotkey: {reason}"),
+            }
+
             spawn_poller(handle.clone());
             spawn_hit_test(handle);
             Ok(())
