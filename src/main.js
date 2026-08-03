@@ -948,7 +948,22 @@ async function boot() {
   if (!config.welcomed) {
     config.welcomed = true
     await saveConfig()
-    showWelcome()
+    // An existing install has no `welcomed` flag either, so it would get the
+    // panel on its first update. Offering to install hooks that are already
+    // registered reads as "something is wrong with your setup", and it
+    // interrupts whatever you were doing to say it. If the hooks are there,
+    // the only thing worth mentioning is the new shortcut, and a notice card
+    // says that without taking over the screen.
+    if (await invoke('hooks_installed').catch(() => false)) {
+      const chord = await invoke('hotkey_binding').catch(() => '')
+      showNotice(
+        chord
+          ? `Updated to ${APP_VERSION}. Press ${chord} to show or hide the pet.`
+          : `Updated to ${APP_VERSION}.`
+      )
+    } else {
+      showWelcome()
+    }
   }
 
   sessions = await invoke('get_sessions').catch(() => [])

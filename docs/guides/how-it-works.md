@@ -109,7 +109,7 @@ stays true no matter how long you take.
 
 ## When it isn't working
 
-Right-click the pet → **Check my setup**. It verifies that the hooks are
+Right-click the pet, then **Check my setup**. It verifies that the hooks are
 registered, that they point at a program that still exists, and that the session
 folder is writable, then watches for ten seconds while you go and run
 something, which is the only way to tell "nothing happened" apart from "the
