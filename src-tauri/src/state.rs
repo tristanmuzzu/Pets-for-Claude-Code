@@ -19,7 +19,7 @@ const STALE_AFTER_MS: u64 = 12 * 60 * 60 * 1000;
 
 /// Work that has produced no event in this long is not happening. Claude Code
 /// fires a hook for every tool call, so silence this long means the turn died
-/// without a `Stop` — the card must stop claiming otherwise.
+/// without a `Stop`, and the card must stop claiming otherwise.
 const WORKING_STALE_MS: u64 = 5 * 60 * 1000;
 
 pub fn home_dir() -> PathBuf {
@@ -95,10 +95,10 @@ pub struct Entry {
 
 /// Durable states: what the session *is* doing.
 ///
-/// Deliberately excludes "waiting", "done" and "failed". Those are answers to
-/// different questions — is a human blocking this, and how did the last turn
-/// end — and storing them here is what lets a card get stuck on an alert
-/// forever when the resolving event never arrives.
+/// Excludes "waiting", "done" and "failed". Those answer different questions
+/// (is a human blocking this, and how did the last turn end), and storing them
+/// here is what lets a card get stuck on an alert forever when the resolving
+/// event never arrives.
 pub const RUNNING_STATES: [&str; 3] = ["thinking", "running", "compacting"];
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -108,7 +108,7 @@ pub struct Session {
     /// idle | thinking | running | compacting. Only forward progress moves it.
     pub state: String,
     /// What this turn is *about*. Set when the turn starts and replaced when it
-    /// ends — never by tool events, so it stays readable while tools churn.
+    /// ends, never by tool events, so it stays readable while tools churn.
     pub headline: String,
     /// The live line: "Editing render.js", "Running: npm test".
     pub activity: String,
@@ -117,14 +117,14 @@ pub struct Session {
     pub kind: String,
     /// Longer text for the expanded panel (assistant summary, error body).
     pub detail: String,
-    /// Display name of the owning project — the git repository, not the folder
+    /// Display name of the owning project: the git repository, not the folder
     /// the session happens to be sitting in.
     pub project: String,
     /// Set only when the session runs somewhere other than the project root
     /// (a worktree, a subdirectory), for a secondary label.
     pub workspace: String,
     pub project_root: String,
-    /// True when the project root is a temp directory — throwaway sessions
+    /// True when the project root is a temp directory: throwaway sessions
     /// from scripted runs, which should not compete with real work.
     pub scratch: bool,
     pub cwd: String,
@@ -161,12 +161,12 @@ pub struct Session {
     pub pending_tool: String,
     pub pending_detail: String,
     pub pending_since: u64,
-    /// Why the pending command looks irreversible. A hint for the card only —
-    /// nothing here approves, denies, or blocks anything.
+    /// Why the pending command looks irreversible. A hint for the card only.
+    /// Nothing here approves, denies, or blocks anything.
     pub pending_risk: String,
     /// Tool failures inside the current turn. A failed grep is not a failed
-    /// turn — Claude usually just tries something else — so this is a marker,
-    /// not a state.
+    /// turn, since Claude usually just tries something else, so this is a
+    /// marker rather than a state.
     pub hiccups: u64,
     /// Subagents started but not yet finished.
     pub subagents: u64,
@@ -226,15 +226,15 @@ impl Session {
 pub struct Config {
     /// Which build's idea of this file it is. See [`CONFIG_VERSION`].
     pub version: u32,
-    /// False until the first run has been acknowledged. Deliberately *not*
-    /// backfilled for existing installs — an upgrade should get the welcome
+    /// False until the first run has been acknowledged. *Not* backfilled for
+    /// existing installs, because an upgrade should get the welcome
     /// once too, since it is the only place the setup is explained.
     pub welcomed: bool,
     pub pet: String,
     pub scale: f64,
     pub click_through: bool,
     pub show_bubble: bool,
-    /// Sessions rooted in a temp directory — scripted runs, evals — are hidden
+    /// Sessions rooted in a temp directory (scripted runs, evals) are hidden
     /// unless asked for. They are not projects and drown out real work.
     pub show_scratch: bool,
     /// Beep when a project starts waiting on you.
@@ -244,6 +244,10 @@ pub struct Config {
     pub flash_on_finish: bool,
     /// Do not disturb: no sound, no tray flash. The pet still updates.
     pub quiet: bool,
+    /// The chord that shows and hides the pet, e.g. "Ctrl+Alt+P". "off"
+    /// disables it. If the chord is already claimed by something else,
+    /// Pipsqueak falls back to the next one it can get and says which.
+    pub hotkey: String,
     /// Ask GitHub whether there is a newer release.
     ///
     /// Off until asked for. This is the only thing in the app that talks to
@@ -285,6 +289,7 @@ impl Default for Config {
             alert_on_waiting: false,
             flash_on_finish: true,
             quiet: false,
+            hotkey: "Ctrl+Alt+P".to_string(),
             update_check: false,
             update_dismissed: String::new(),
             x: None,
@@ -293,7 +298,7 @@ impl Default for Config {
     }
 }
 
-/// The shape this build understands. Bumped when a field changes meaning —
+/// The shape this build understands. Bumped when a field changes meaning,
 /// not when one is merely added, which `serde(default)` already handles.
 ///
 /// 2: the window grew to fit the setup panel. The saved position is the
@@ -489,7 +494,7 @@ fn attention_rank(session: &Session) -> u8 {
 /// 1. The agent process is gone. Certain, so delete the session outright.
 /// 2. Nothing has happened for [`WORKING_STALE_MS`] while the card claims work
 ///    is in progress. Claude Code fires a hook per tool call, so that silence
-///    means the turn died without a `Stop`. Downgrade rather than delete —
+///    means the turn died without a `Stop`. Downgrade rather than delete, since
 ///    the session may still be resumed. A session genuinely *waiting* on a
 ///    human is left alone: that claim stays true no matter how long it takes.
 /// 3. Nothing at all for [`STALE_AFTER_MS`]. Delete.

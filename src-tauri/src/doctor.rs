@@ -1,15 +1,15 @@
-//! "It isn't doing anything" — answered without a support thread.
+//! "It isn't doing anything", answered without a support thread.
 //!
 //! Everything this app shows arrives through Claude Code hooks, and there are
 //! several ordinary ways for that chain to break silently: the hooks were
 //! never registered, another tool rewrote `settings.json`, the executable
-//! moved, or the overlay is not actually running. From the outside all of
-//! those look identical, which is to say they look like nothing happening.
+//! moved, or the overlay is not actually running. From the outside every one
+//! of those looks the same: like nothing happening.
 //!
-//! So the checks are deliberately concrete, and the interesting one is not a
-//! check at all: it watches for real hook traffic while the user goes and does
-//! something. Configuration being right is not the same as it working, and
-//! only one of those is worth telling someone.
+//! So the checks are concrete, and the interesting one is not a check at all.
+//! It watches for real hook traffic while the user goes and does something.
+//! Configuration being right is not the same as it working, and only one of
+//! those is worth telling someone.
 
 use crate::install;
 use crate::state::{self, claude_settings_path, now_ms, read_sessions, sessions_dir};
@@ -72,12 +72,13 @@ fn fail(id: &'static str, label: &'static str, detail: String, fix: Option<&'sta
     }
 }
 
-pub fn run() -> Report {
+pub fn run(hotkey: &str) -> Report {
     let checks = vec![
         hooks_check(),
         binary_check(),
         storage_check(),
         overlay_check(),
+        hotkey_check(hotkey),
         traffic_check(),
     ];
     let status = if checks.iter().any(|c| c.status == "fail") {
@@ -237,6 +238,36 @@ fn overlay_check() -> Check {
     }
 }
 
+fn hotkey_check(registered: &str) -> Check {
+    let wanted = state::load_config().hotkey;
+    if wanted.trim().eq_ignore_ascii_case("off") || wanted.trim().is_empty() {
+        return ok("hotkey", "Keyboard shortcut", "Turned off.".into());
+    }
+    if registered.is_empty() {
+        return warn(
+            "hotkey",
+            "Keyboard shortcut",
+            "None registered. Every candidate chord is already claimed by another program; pick a free one with \"hotkey\" in config.json."
+                .into(),
+        );
+    }
+    if registered.eq_ignore_ascii_case(wanted.trim()) {
+        ok(
+            "hotkey",
+            "Keyboard shortcut",
+            format!("{registered} shows and hides the pet."),
+        )
+    } else {
+        // Worth saying out loud. Pressing the chord you configured and having
+        // nothing happen is indistinguishable from the app being broken.
+        warn(
+            "hotkey",
+            "Keyboard shortcut",
+            format!("{wanted} was already taken, so {registered} is being used instead."),
+        )
+    }
+}
+
 fn traffic_check() -> Check {
     let sessions = read_sessions();
     if sessions.is_empty() {
@@ -274,7 +305,7 @@ pub fn watch_result(since: u64) -> (&'static str, String) {
     if touched.is_empty() {
         return (
             "none",
-            "No hook events arrived. Either nothing ran, or the hooks are not firing — check that the events above are registered and that Claude Code was restarted after installing them."
+            "No hook events arrived. Either nothing ran, or the hooks are not firing. Check that the events above are registered and that Claude Code was restarted after installing them."
                 .into(),
         );
     }

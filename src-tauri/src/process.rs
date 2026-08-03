@@ -5,8 +5,8 @@
 //! Code crashes or is force-quit it sends no `SessionEnd`, and the card would
 //! otherwise keep claiming work is happening.
 //!
-//! Identity is `(pid, creation time)`, never the pid alone. Windows reuses pids
-//! freely, and a reused pid is exactly the case that would resurrect a dead
+//! Identity is `(pid, creation time)`, never the pid alone. Windows reuses
+//! pids freely, and a reused pid is the case that would resurrect a dead
 //! session as alive again.
 //!
 //! Dependency-free, in the same spirit as `desktop.rs`.

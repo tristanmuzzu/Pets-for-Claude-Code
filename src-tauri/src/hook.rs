@@ -2,7 +2,7 @@
 //! into a pet state plus a human-readable activity line, persist it.
 //!
 //! Invoked as `pipsqueak hook <EventName>` once per hook event, so it must be
-//! cheap, silent, and incapable of failing loudly — anything printed to stdout
+//! cheap, silent, and incapable of failing loudly. Anything printed to stdout
 //! would be parsed by Claude Code as hook output.
 
 use crate::process;
@@ -106,8 +106,8 @@ pub fn run(fallback_event: Option<String>) {
     // Anything other than the prompt itself means the prompt is over.
     //
     // Including a `PreToolUse` for the very tool being asked about, which took
-    // a wrong turn to arrive at. Claude Code runs `PreToolUse` first — it may
-    // answer the permission itself — and only then raises
+    // a wrong turn to arrive at. Claude Code runs `PreToolUse` first, where it
+    // may answer the permission itself, and only then raises
     // `PermissionRequest`, so a `PreToolUse` *after* a pending prompt means
     // the tool is running and the prompt was answered. Trying to protect the
     // pending state from it instead left the card saying "needs you" about a
@@ -184,16 +184,16 @@ pub fn run(fallback_event: Option<String>) {
 
 /// One state change.
 ///
-/// Every field is optional on purpose. Most events answer only one of "what is
-/// it doing", "how did the turn end", and "is a human blocking it" — and an
-/// event that is silent on a question must leave the existing answer alone.
+/// Every field is optional. Most events answer only one of "what is it doing",
+/// "how did the turn end", and "is a human blocking it", and an event that is
+/// silent on a question must leave the existing answer alone.
 /// Collapsing all three into a single `state` field is what let a card get
 /// stuck on an alert that nothing ever cleared.
 #[derive(Default)]
 struct Update {
     /// New durable state. Empty leaves it unchanged.
     state: &'static str,
-    /// The word on the status line. Deliberately coarse.
+    /// The word on the status line. Kept coarse.
     kind: String,
     activity: String,
     detail: String,
@@ -237,7 +237,7 @@ fn live(state: &'static str, kind: &str, activity: String) -> Update {
     }
 }
 
-/// Returns `None` for events the pet deliberately ignores.
+/// Returns `None` for events the pet ignores.
 fn classify(event: &str, payload: &Value) -> Option<Update> {
     let text = |key: &str| {
         payload
@@ -268,7 +268,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             }
         }
         // A Task call *is* a subagent launch, and is often the only signal one
-        // happened — Claude Code does not always send a matching SubagentStart.
+        // happened, since Claude Code does not always send a matching SubagentStart.
         "PreToolUse" if tool == "Task" || tool == "Agent" => Update {
             state: "running",
             kind: "Delegating".into(),
@@ -277,11 +277,11 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             ..Default::default()
         },
         "PreToolUse" => live("running", &kind_of(&tool), phrase(&tool, input).present),
-        // The matching PostToolUse is deliberately *not* a subagent stop: the
+        // The matching PostToolUse is *not* a subagent stop: the
         // dedicated SubagentStop event owns that, and counting both would
         // decrement twice.
         "PostToolUse" => live("running", &kind_of(&tool), phrase(&tool, input).past),
-        // One tool failing is not the turn failing — Claude nearly always
+        // One tool failing is not the turn failing. Claude nearly always
         // tries something else. Recorded as a mark on the turn, not a state.
         "PostToolUseFailure" => Update {
             state: "running",
@@ -291,14 +291,14 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             hiccup: true,
             ..Default::default()
         },
-        // PermissionRequest fires *before* anyone is asked — auto-mode and
+        // PermissionRequest fires *before* anyone is asked. Auto-mode and
         // permission hooks resolve most of them in milliseconds, so believing
         // it outright made the pet cry wolf constantly. Recording it costs
         // nothing: the frontend only surfaces a prompt that outlives the
         // debounce, by which point a human really is being asked.
         //
         // Note what this hook does *not* do. It writes a file and exits 0 with
-        // empty stdout — it never prints a decision, so it cannot approve or
+        // empty stdout. It never prints a decision, so it cannot approve or
         // deny a tool call, and Claude Code's own prompt appears exactly as it
         // would if we were not installed at all.
         "PermissionRequest" => Update {
@@ -472,8 +472,8 @@ fn stop_disposition(payload: &Value, last_message: &str) -> Stop {
 }
 
 /// The coarse category behind the status line. Several different tools map to
-/// one word on purpose: the word should survive a whole stretch of work so the
-/// only thing moving is the counter next to it.
+/// one word: it should survive a whole stretch of work, so the only thing
+/// moving is the counter next to it.
 fn kind_of(tool: &str) -> String {
     if let Some(rest) = tool.strip_prefix("mcp__") {
         let server = rest.split("__").next().unwrap_or("MCP");
@@ -717,7 +717,7 @@ mod tests {
 
     /// PermissionRequest fires before anyone is asked, and auto-mode resolves
     /// most of them instantly. Reacting to it made the pet claim to be blocked
-    /// on turns that were never interrupted — so it is recorded, and the card
+    /// on turns that were never interrupted, so it is recorded and the card
     /// only surfaces prompts that outlive the debounce.
     #[test]
     fn permission_requests_alone_do_not_mean_blocked() {
@@ -821,7 +821,7 @@ mod tests {
     }
 
     /// Claude said its piece but something is still finishing behind it. That
-    /// is a real completion — just one worth holding briefly in case a follow
+    /// is a real completion, just one worth holding briefly in case a follow
     /// up event cancels it.
     #[test]
     fn stop_with_background_work_and_an_answer_settles_late() {

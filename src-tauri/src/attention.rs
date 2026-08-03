@@ -1,12 +1,12 @@
 //! Getting your attention when the overlay itself cannot.
 //!
 //! The whole point of this app is that you can glance at it while doing
-//! something else — but a maximised video or a full-screen editor covers it
+//! something else. But a maximised video or a full-screen editor covers it
 //! completely, and then a finished turn goes unnoticed until you happen to
 //! look. The tray icon is the one surface that stays reachable, so a
 //! completion blinks it.
 //!
-//! Deliberately small and interruptible: it blinks for a few seconds, any
+//! Small and interruptible: it blinks for a few seconds, any
 //! click stops it, and Do Not Disturb suppresses it entirely.
 
 use crate::state::load_config;
@@ -91,7 +91,7 @@ fn normal_icon(app: &AppHandle) -> Option<Image<'static>> {
 /// The same icon pushed towards the alert colour.
 ///
 /// Recolouring rather than swapping in a second asset keeps it recognisably
-/// the same pet — a blink between two unrelated pictures reads as a glitch.
+/// the same pet. A blink between two unrelated pictures reads as a glitch.
 fn alert_icon(app: &AppHandle) -> Option<Image<'static>> {
     let base = app.default_window_icon()?;
     let mut rgba = base.rgba().to_vec();

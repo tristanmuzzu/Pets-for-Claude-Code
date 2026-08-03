@@ -6,6 +6,7 @@ mod control;
 mod desktop;
 mod doctor;
 mod hook;
+mod hotkey;
 mod install;
 mod process;
 mod project;
@@ -15,7 +16,7 @@ mod state;
 use std::fs;
 
 const HELP: &str = "\
-Pipsqueak — a desktop pet that shows what Claude Code is doing.
+Pipsqueak, a desktop pet that shows what Claude Code is doing.
 
 USAGE:
   pipsqueak                 Run the overlay (default)
@@ -47,7 +48,7 @@ fn main() {
 /// This is a GUI-subsystem binary on Windows, so depending on who launched it
 /// there may be no valid stdout handle at all. `println!` panics in that case,
 /// and with `panic = "abort"` that killed the process before it could record
-/// anything — so write the file first, and treat printing as best-effort.
+/// anything, so write the file first and treat printing as best-effort.
 fn report(result: Result<String, String>) {
     use std::io::Write;
 

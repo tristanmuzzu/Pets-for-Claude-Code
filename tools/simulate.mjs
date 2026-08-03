@@ -3,7 +3,7 @@
 //
 //   node tools/simulate.mjs [path-to-pipsqueak-binary]
 //
-// Three projects run concurrently at different cadences — the case that made
+// Three projects run concurrently at different cadences, the case that made
 // a single shared bubble unreadable.
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -53,7 +53,7 @@ const PROJECTS = [
   {
     id: 'sim-timezone',
     cwd: 'C:/code/clockwork',
-    // Deliberately frantic: a tool every few hundred ms.
+    // Frantic on purpose: a tool every few hundred ms.
     steps: [
       [500, 'SessionStart', { source: 'startup' }],
       [700, 'UserPromptSubmit', { prompt: 'Fix the flaky timezone test' }],

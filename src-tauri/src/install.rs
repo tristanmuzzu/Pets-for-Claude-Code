@@ -1,7 +1,7 @@
 //! Registers (and removes) the Claude Code hooks that feed the pet.
 //!
 //! `~/.claude/settings.json` is usually hand-tuned and load-bearing, so this
-//! module is deliberately conservative: it backs the file up first, only ever
+//! module is careful with it: it backs the file up first, only ever
 //! touches entries it can prove are its own, and refuses to run at all if the
 //! file is not valid JSON.
 
@@ -48,7 +48,7 @@ fn read_settings() -> Result<(Value, bool, String), String> {
     }
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| {
         format!(
-            "{} is not valid JSON ({e}) — refusing to touch it",
+            "{} is not valid JSON ({e}), so it was left alone",
             path.display()
         )
     })?;

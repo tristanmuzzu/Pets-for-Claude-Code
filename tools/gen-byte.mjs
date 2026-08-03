@@ -1,7 +1,7 @@
 // Byte: a little CRT-headed bot.
 //
 // The screen is the status: it shows the state as a face, so you can read the
-// pet without reading the card. No mouth, no fur, no ambiguity — the silhouette
+// pet without reading the card. No mouth, no fur, no ambiguity: the silhouette
 // is a monitor on legs.
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -40,8 +40,8 @@ const ARM = { y: 30, w: 4, h: 8, r: 2, dx: 15 }
 
 /**
  * Faces are drawn straight onto the screen in the state colour. Chunky blocks
- * rather than single pixels — at 96 physical pixels tall, thin glyphs turn to
- * mush and the whole point is that the pet reads without the card.
+ * rather than single pixels. At 96 physical pixels tall, thin glyphs turn to
+ * mush, and the pet is supposed to read without the card.
  */
 function drawFace(layer, kind, colour, dx = 0, dy = 0) {
   const cy = SCREEN_BOX.y + 6 + dy

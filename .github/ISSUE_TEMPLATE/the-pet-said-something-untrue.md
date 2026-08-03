@@ -7,7 +7,7 @@ labels: truthfulness
 
 **What the card said**
 
-<!-- e.g. "Done — Fixed the timezone test", or a card stuck on "Needs you" -->
+<!-- e.g. "Done: Fixed the timezone test", or a card stuck on "Needs you" -->
 
 **What was actually happening**
 

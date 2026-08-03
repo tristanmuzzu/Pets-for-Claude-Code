@@ -4,6 +4,7 @@
 use crate::attention::{self, Attention};
 use crate::desktop;
 use crate::doctor;
+use crate::hotkey::{self, Binding};
 use crate::install;
 use crate::state::{
     self, codex_pets_dir, load_config, pets_dir, read_sessions, root, sessions_dir, Config, Session,
@@ -21,8 +22,8 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// Hit-test rates, by how close the cursor is to something interactive. Only
-/// the first one has to be quick, and only while the cursor is right there —
-/// polling this fast all the time would keep a core busy for an overlay you
+/// the first one has to be quick, and only while the cursor is right there.
+/// Polling this fast all the time would keep a core busy for an overlay you
 /// are not even pointing at.
 const HIT_TEST_NEAR: Duration = Duration::from_millis(12);
 const HIT_TEST_APPROACHING: Duration = Duration::from_millis(50);
@@ -255,8 +256,8 @@ fn alert() {
 }
 
 #[tauri::command]
-fn run_doctor() -> doctor::Report {
-    doctor::run()
+fn run_doctor(app: AppHandle) -> doctor::Report {
+    doctor::run(&hotkey_binding(app))
 }
 
 /// Marks the start of the live connection test. The frontend tells the user to
@@ -273,14 +274,24 @@ fn watch_result(since: u64) -> (String, String) {
 }
 
 #[tauri::command]
-fn doctor_report() -> String {
-    doctor::markdown(&doctor::run())
+fn doctor_report(app: AppHandle) -> String {
+    doctor::markdown(&doctor::run(&hotkey_binding(app)))
 }
 
 /// Blink the tray icon: a project finished while you were looking elsewhere.
 #[tauri::command]
 fn flash_tray(app: AppHandle) {
     attention::flash(&app);
+}
+
+/// The chord that shows and hides the pet, for the menu to display.
+#[tauri::command]
+fn hotkey_binding(app: AppHandle) -> String {
+    app.state::<Binding>()
+        .0
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default()
 }
 
 /// You have seen it. Stop blinking.
@@ -378,7 +389,7 @@ fn place_window(app: &AppHandle, config: &Config) {
             let _ = window.set_position(PhysicalPosition::new(x, y));
             return;
         }
-        // The display it was parked on is gone — a laptop undocked, a monitor
+        // The display it was parked on is gone: a laptop undocked, a monitor
         // unplugged. Restoring the saved position would leave the overlay
         // stranded in space with no way to drag it back, so fall through and
         // re-place it.
@@ -450,7 +461,7 @@ fn ensure_on_screen(app: &AppHandle) {
 /// This has to be a poll rather than ordinary pointer events, because a window
 /// that is ignoring the cursor receives no events to tell it the cursor has
 /// arrived. The cost of polling is the gap: a click landing inside it goes to
-/// the wrong window. So the rate follows the cursor — fast when it is near
+/// the wrong window. So the rate follows the cursor: fast when it is near
 /// something interactive, idle when it is nowhere near the overlay.
 ///
 /// (The alternative is a second, always-interactive window shaped to the hit
@@ -581,7 +592,7 @@ fn drain_commands(app: &AppHandle) {
         other => {
             if let Some(pet) = other.strip_prefix("pet:") {
                 let _ = window.show();
-                // The frontend owns both sprite loading and the config file —
+                // The frontend owns both sprite loading and the config file, and
                 // writing it from here would race its copy and lose the window
                 // position.
                 let _ = app.emit("pipsqueak://pet", pet.to_string());
@@ -711,6 +722,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(Interactive::default())
         .manage(Attention::default())
+        .manage(Binding::default())
         .manage(ClickThrough::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
@@ -731,6 +743,7 @@ pub fn run() {
             watch_result,
             doctor_report,
             clear_attention,
+            hotkey_binding,
             autostart_enabled,
             set_autostart,
             quit
@@ -748,6 +761,17 @@ pub fn run() {
                 let _ = window.show();
             }
             build_tray(&handle)?;
+            // Whatever chord we actually got, so the menu can show it rather
+            // than the one that was asked for.
+            match hotkey::start(handle.clone()) {
+                Ok(chord) => {
+                    if let Ok(mut held) = handle.state::<Binding>().0.lock() {
+                        *held = chord;
+                    }
+                }
+                Err(reason) => eprintln!("no global hotkey: {reason}"),
+            }
+
             spawn_poller(handle.clone());
             spawn_hit_test(handle);
             Ok(())

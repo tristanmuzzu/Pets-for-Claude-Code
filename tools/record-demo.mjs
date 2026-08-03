@@ -3,7 +3,7 @@
 //   node tools/record-demo.mjs [--out assets/demo.png] [--frames 24] [--interval 260]
 //
 // The obvious way to do this is to run the app, work for a bit, and capture the
-// screen — which puts whatever you happen to have open into a public README.
+// screen, which puts whatever you happen to have open into a public README.
 // So this paints its own flat backdrop first, runs the app against an isolated
 // profile driven by `simulate.mjs`, and crops the result to the pixels that
 // actually changed. Nothing of yours is in frame, and anyone can regenerate it.
@@ -59,7 +59,7 @@ const BACKDROP = args.get('backdrop') ?? '#E8E4DE'
  * Where in the simulated timeline the recording starts.
  *
  * By this point three projects are going, one of them is genuinely blocked on
- * a human, and a test is about to fail — which is the whole story in one
+ * a human, and a test is about to fail, which is the whole story in one
  * window. Earlier is empty; much later is everything winding down.
  */
 const LEAD_IN_MS = Number(args.get('lead') ?? 6_500)
@@ -88,7 +88,7 @@ mkdirSync(shots, { recursive: true })
 //
 // Two coordinate systems meet here and quietly disagree. Tauri positions the
 // window in *physical* pixels, and the capture is DPI-aware so it is physical
-// too — but the window's declared size is *logical*, so on a scaled display it
+// too. But the window's declared size is *logical*, so on a scaled display it
 // occupies scale times as many pixels as its numbers suggest. Getting this
 // wrong crops the pet off the bottom of its own demo.
 const SCREEN = screenSize(true)
@@ -177,7 +177,7 @@ const frames = decoded.map((frame) => ({
 const buffer = encodeApng(box.w, box.h, frames)
 writeFileSync(OUT, buffer)
 rmSync(sandbox, { recursive: true, force: true })
-console.log(`Wrote ${OUT} — ${(buffer.length / 1024).toFixed(0)} KB, ${frames.length} frames`)
+console.log(`Wrote ${OUT}: ${(buffer.length / 1024).toFixed(0)} KB, ${frames.length} frames`)
 
 // --- helpers -------------------------------------------------------------
 
@@ -199,7 +199,7 @@ function powershell(script, params) {
 
 function screenSize(physical) {
   // The type name has to be unique per process, and each of these is a fresh
-  // PowerShell, so a fixed name is fine — but declaring it is not enough, it
+  // PowerShell, so a fixed name is fine. But declaring it is not enough, it
   // has to be *called* before anything asks about the screen.
   const aware = physical
     ? `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public class Dpi { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }'; [void][Dpi]::SetProcessDPIAware(); `

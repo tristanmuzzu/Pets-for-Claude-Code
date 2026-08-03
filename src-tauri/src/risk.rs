@@ -2,7 +2,7 @@
 //!
 //! This exists to answer one question on a card that says "needs you": is this
 //! a routine approval, or the kind you should pause the video for. It is a
-//! hint and nothing else — it never blocks, allows, or denies anything, and a
+//! hint and nothing else. It never blocks, allows, or denies anything, and a
 //! wrong answer costs at most a missing or spurious line of text.
 //!
 //! Which is why it errs towards silence. The command string comes from a model

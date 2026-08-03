@@ -32,7 +32,7 @@ const EYES = {
 }
 const PUPIL = EYES.pupil
 
-// Wisp colour per row — the mascot's status light.
+// Wisp colour per row: the mascot's status light.
 const WISP = {
   idle: [136, 148, 164, 255],
   'running-right': [86, 156, 250, 255],
@@ -54,7 +54,7 @@ const ARM = { cy: 33, rx: 3, ry: 4.5, dx: 11 }
 
 /**
  * Quadratic bezier tail made of shrinking blobs. Built as its own layer so it
- * can be outlined and composited *behind* the body — without that gap the tail
+ * can be outlined and composited *behind* the body. Without that gap the tail
  * merges into the silhouette and reads as a raised arm.
  */
 function tailLayer(swish, bodyDy = 0) {

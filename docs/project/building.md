@@ -26,7 +26,7 @@ npm run demo
 
 Paints a flat backdrop over the screen, runs the release build against an
 isolated profile driven by `tools/simulate.mjs`, captures frames, and crops to
-the pixels that actually changed — so re-recording it needs no judgement about
+the pixels that actually changed, so re-recording it needs no judgement about
 what happens to be on your desktop, and nothing of yours ends up in a public
 README. Windows only; the capture is a `CopyFromScreen` through PowerShell.
 
@@ -42,9 +42,9 @@ npm test                                   # the pure display logic and the pet 
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-The JavaScript tests run under Node's own runner — no framework, no config
+The JavaScript tests run under Node's own runner. No framework, no config
 file. `src/derive.js` holds every judgement about whether a card is telling the
-truth, deliberately separated from rendering so it can be tested without a
+truth, kept apart from rendering so it can be tested without a
 window, and every function takes `now` so the awkward moments can be examined
 rather than waited for.
 
@@ -56,7 +56,7 @@ against the release checklist below.
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and
    `src-tauri/tauri.conf.json`. Write `docs/releases/vX.Y.Z.md`.
-2. `npm run verify:release` — asserts all three agree, that the notes exist, and
+2. `npm run verify:release` asserts all three agree, that the notes exist, and
    that the tag matches.
 3. `npm test && cargo test --manifest-path src-tauri/Cargo.toml`
 4. Push the tag. CI runs the same checks before it builds anything, then

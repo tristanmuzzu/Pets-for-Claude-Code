@@ -1,4 +1,4 @@
-//! `pipsqueak control <action>` — the entry point used by the Claude Code
+//! `pipsqueak control <action>`, the entry point used by the Claude Code
 //! `/pet` command and anything else that wants to drive a running overlay.
 //!
 //! Commands are handed over through a file rather than a socket, for the same

@@ -1,9 +1,9 @@
 // Turning a session file into the one word a card shows.
 //
 // Kept apart from the rendering because this is where every judgement about
-// truthfulness lives — whether a prompt is real, whether a turn is finished,
-// which of several sessions speaks for a project — and those are worth being
-// able to test without a window.
+// truthfulness lives: whether a prompt is real, whether a turn is finished,
+// which of several sessions speaks for a project. Those are worth being able
+// to test without a window.
 //
 // Every function takes `now` so the awkward moments (a debounce that has not
 // elapsed, a completion that has not settled) can be examined directly rather
@@ -33,7 +33,7 @@ export const RUNNING = new Set(['thinking', 'running', 'compacting'])
  *
  * The hold is what makes the stack readable. Hook events arrive in bursts, and
  * without a floor the card can flick through three states faster than you can
- * read one — and "needs you" can vanish under a later "running" before you
+ * read one, and "needs you" can vanish under a later "running" before you
  * ever look up.
  */
 export const DISPLAY = {
@@ -75,8 +75,8 @@ export function blockedOn(session, now = Date.now()) {
 }
 
 /**
- * Collapse the three questions a session file answers — what is it doing, how
- * did the last turn end, is a human blocking it — into a single word, in that
+ * Collapse the three questions a session file answers (what is it doing, how
+ * did the last turn end, is a human blocking it) into a single word, in that
  * order of urgency.
  *
  * Returns '' while a prompt is inside its debounce, meaning "keep showing
@@ -103,7 +103,7 @@ export function displayState(session, now = Date.now()) {
  * Apply the minimum-display hold to a freshly derived state.
  *
  * `view` is mutated: it carries the state currently on screen, the earliest it
- * may be replaced, and the headline it belongs to. The headline matters —
+ * may be replaced, and the headline it belongs to. The headline matters:
  * holding "failed" over text that already says the turn succeeded is a worse
  * lie than the flicker the hold was preventing.
  */
@@ -127,7 +127,7 @@ export function holdState(view, session, raw, now = Date.now()) {
 /**
  * Is `candidate` a later release than `current`?
  *
- * Deliberately strict about what it accepts. This decides whether to tell
+ * Strict about what it accepts. This decides whether to tell
  * someone there is an update, based on a string from a network response, and
  * "probably newer" is not a good enough reason to nag.
  */

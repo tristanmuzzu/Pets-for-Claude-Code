@@ -1,7 +1,7 @@
 // The built-in pets have to agree with their own atlases.
 //
 // A frame count that does not match the image is invisible until the pet
-// reaches that row at runtime and draws a slice of empty space — which, being
+// reaches that row at runtime and draws a slice of empty space, which, being
 // a pet, is where nobody is looking closely.
 import test from 'node:test'
 import assert from 'node:assert/strict'

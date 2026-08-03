@@ -18,7 +18,7 @@ export const FRAME_COUNTS = [6, 8, 8, 4, 5, 8, 6, 6, 6]
  *
  * Even timing is what makes a six-frame loop read as a metronome. Holding the
  * frames where the pet is at rest and snapping through the middle is what makes
- * the same six frames read as breathing — which matters here, because the pet
+ * the same six frames read as breathing, which matters here, because the pet
  * spends most of its life on one of these loops in the corner of someone's eye.
  *
  * Rows follow ROW_NAMES below.
@@ -80,7 +80,7 @@ export class Layer {
     this.d[i + 3] = c[3] === undefined ? 255 : c[3]
   }
 
-  /** Alpha-blend rather than replace — used for glows. */
+  /** Alpha-blend rather than replace. Used for glows. */
   blend(x, y, c) {
     x = Math.round(x)
     y = Math.round(y)
@@ -118,7 +118,7 @@ export class Layer {
     }
   }
 
-  /** Rounded rectangle — the base shape for blockier characters. */
+  /** Rounded rectangle: the base shape for blockier characters. */
   roundRect(x, y, w, h, r, c) {
     for (let yy = 0; yy < h; yy++) {
       for (let xx = 0; xx < w; xx++) {
@@ -254,7 +254,7 @@ export function drawEyes(layer, cx, cy, kind, palette) {
   }
 }
 
-/** Radial falloff, white-hot core — a hard-edged disc reads as a UI chip. */
+/** Radial falloff, white-hot core. A hard-edged disc reads as a UI chip. */
 export function drawWisp(layer, x, y, colour, intensity = 1) {
   const R = 4.8
   for (let dy = -Math.ceil(R); dy <= Math.ceil(R); dy++) {

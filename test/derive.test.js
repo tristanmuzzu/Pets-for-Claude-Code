@@ -29,7 +29,7 @@ const quiet = (fields = {}) => ({
 test('a prompt inside the debounce is not yet worth showing', () => {
   const session = quiet({ pending_since: NOW - 200, pending_tool: 'Bash' })
   assert.equal(blockedOn(session, NOW), '')
-  // '' means "keep showing whatever was already there" — not "idle".
+  // '' means "keep showing whatever was already there", not "idle".
   assert.equal(displayState(session, NOW), '')
 })
 

@@ -37,7 +37,7 @@ const FADE_MS = 140
  * How long the pet keeps animating an idle loop before settling.
  *
  * The point of this overlay is that you can leave it up while doing something
- * else — which is exactly when a permanently animating canvas is at its most
+ * else, which is exactly when a permanently animating canvas is at its most
  * wasteful, compositing a frame every 16ms over a video that wants the GPU.
  */
 const SETTLE_AFTER_MS = 5000

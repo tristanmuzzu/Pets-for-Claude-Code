@@ -4,16 +4,16 @@
 
 Three pets ship with the app, switchable from the right-click menu.
 
-**Byte** — a CRT-headed bot whose screen shows the state as a face, so the pet
+**Byte** is a CRT-headed bot whose screen shows the state as a face, so the pet
 is readable on its own without looking at the card. The default.
 
 ![Byte](../../assets/states-byte.png)
 
-**Pip** — an ember-fox with a floating status wisp.
+**Pip** is an ember-fox with a floating status wisp.
 
 ![Pip](../../assets/states-pip.png)
 
-**Ember** — a clay pebble with a spark for a status light.
+**Ember** is a clay pebble with a spark for a status light.
 
 ![Ember](../../assets/states-ember.png)
 
@@ -63,7 +63,7 @@ The atlas is one row per state, one column per frame:
 
 `fps` gives every frame the same duration, which is what makes a short loop read
 as a metronome. `frameDurations` holds each frame for as long as you like, in
-milliseconds — one array per row, one entry per frame:
+milliseconds. One array per row, one entry per frame:
 
 ```json
 "frameDurations": [
@@ -80,7 +80,7 @@ fall back to `fps`.
 
 Omit the geometry fields and Pipsqueak assumes the Codex defaults (192×208
 cells, `spritesheet.webp`), so **pets built for the Codex app work here
-unchanged** — including ones already installed in `~/.codex/pets`, which show up
+unchanged**, including ones already installed in `~/.codex/pets`, which show up
 in the menu automatically. It works in the other direction too: copy
 `~/.pipsqueak/pets/*` into `~/.codex/pets/` and they run there.
 

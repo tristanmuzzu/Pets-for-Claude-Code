@@ -4,7 +4,7 @@
   --faint: #7d7670;
   /*
    * Fully opaque. A translucent panel has to be legible against whatever is
-   * behind it, which on a desktop is anything at all — and the compromise was
+   * behind it, which on a desktop is anything at all, and the compromise was
    * a card that looked washed out over a bright window and grey over a dark
    * one. Blur is not an option either: backdrop-filter has nothing to sample
    * in a transparent window and WebView2 paints a black rectangle where it
@@ -21,7 +21,7 @@
   --running: #569cfa;
   --waiting: #ff9838;
   --failed: #f45858;
-  /* Deliberately calmer than the states that want you to look. A finished
+  /* Calmer than the states that want you to look. A finished
      project is good news, not something to interrupt a video for. */
   --done: #3fbf76;
   --compacting: #b26efa;
@@ -185,7 +185,7 @@ body {
 
 /*
  * Something finished and nobody has looked yet. This is the mark that survives
- * the card collapsing back to a chip — the whole point being that a completion
+ * the card collapsing back to a chip. The whole point is that a completion
  * during a full-screen video is still there when you come back.
  */
 .unread {
@@ -323,7 +323,7 @@ body {
 
 /*
  * The status line. The word changes only when the *kind* of work changes; the
- * counters tick. That is the whole trick — you can watch it without reading it.
+ * counters tick. That is the whole trick: you can watch it without reading it.
  */
 .status {
   margin: 4px 0 0;
@@ -362,7 +362,7 @@ body {
  * than competing with the status line.
  */
 .ask {
-  /* The card gets taller when this appears. That is deliberate — the stack is
+  /* The card gets taller when this appears, which is wanted: the stack is
      anchored at the bottom, so it grows away from the pet, and the movement is
      itself the signal. Easing it in stops that reading as a layout glitch. */
   animation: unfold 180ms ease-out;
@@ -388,7 +388,7 @@ body {
 }
 
 /*
- * A hint, and only a hint — nothing here approves or blocks anything. It marks
+ * A hint, and only a hint. Nothing here approves or blocks anything. It marks
  * the difference between a routine approval and one worth pausing the video
  * for.
  */

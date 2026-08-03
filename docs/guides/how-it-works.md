@@ -21,7 +21,7 @@ one human-readable line, and writes `~/.pipsqueak/sessions/<session-id>.json`.
 The overlay polls that directory and animates.
 
 There is no daemon and no port. If the pet is not running, the hooks are a few
-milliseconds of file write and nothing else — and the state is still on disk
+milliseconds of file write and nothing else, and the state is still on disk
 when it next starts.
 
 Events used: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
@@ -43,8 +43,8 @@ cannot affect a session.
 
 ## What it does to your settings
 
-`~/.claude/settings.json` is usually hand-tuned, so the installer is
-deliberately timid:
+`~/.claude/settings.json` is usually hand-tuned, so the installer is careful
+with it:
 
 - It **copies the file first** to `settings.json.pipsqueak-backup-<timestamp>`.
 - It **refuses to run** if the file is not valid JSON.
@@ -60,10 +60,10 @@ ended* and *whether a human is blocking it*. Collapsing those into one state
 field is what used to leave a card stuck on "Needs you" when a prompt was
 answered somewhere the hooks could not see.
 
-- `state` — `idle`, `thinking`, `running`, `compacting`. Only forward progress
+- `state`: `idle`, `thinking`, `running`, `compacting`. Only forward progress
   moves it.
-- `outcome` — `done` or `failed`, cleared the moment the next turn starts.
-- `waiting_since` / `pending_since` — non-zero while something is blocking.
+- `outcome`: `done` or `failed`, cleared the moment the next turn starts.
+- `waiting_since` / `pending_since`: non-zero while something is blocking.
 
 ## Why `Stop` is not "finished"
 
@@ -86,7 +86,7 @@ permission hook answers most of them within a few hundred milliseconds. A pet
 that reacts to the event itself cries wolf constantly.
 
 So the prompt is recorded, and only becomes a visible "needs you" if it is still
-unanswered 800ms later — by which point a human really is being looked at. The
+unanswered 800ms later, by which point a human really is being looked at. The
 same debounce applies to `Notification`/`permission_prompt`, `idle_prompt` and
 `agent_needs_input`. Auto-mode declining a call is shown as ordinary progress,
 not a failure.
@@ -111,7 +111,7 @@ stays true no matter how long you take.
 
 Right-click the pet → **Check my setup**. It verifies that the hooks are
 registered, that they point at a program that still exists, and that the session
-folder is writable — then watches for ten seconds while you go and run
+folder is writable, then watches for ten seconds while you go and run
 something, which is the only way to tell "nothing happened" apart from "the
 hooks are not firing".
 

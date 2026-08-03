@@ -1,16 +1,16 @@
 # Pipsqueak
 
-A tiny desktop pet that shows what Claude Code is doing — without switching to it.
+A tiny desktop pet that shows what Claude Code is doing, without switching to it.
 
 Pipsqueak sits in the corner of your screen on top of everything else. While
 Claude Code works, the pet mirrors its state: thinking, running a tool, blocked
 on a permission prompt, failed, or done. Watch a video, read a PR, do anything
 else, and still know at a glance whether the agent is busy, stuck, or finished.
 
-![Three Claude Code projects stacked in the corner of a desktop. Two are working — one calling a Vercel MCP tool, one running an eval suite — while the third has turned orange and says "Needs you · Allow Bash(npm test)?". The pet below them shows an exclamation mark on its screen.](assets/demo.png)
+![Three Claude Code projects stacked in the corner of a desktop. Two are working, one calling a Vercel MCP tool and one running an eval suite, while the third has turned orange and says "Needs you · Allow Bash(npm test)?". The pet below them shows an exclamation mark on its screen.](assets/demo.png)
 
 <sub>Recorded by `npm run demo`, which paints its own backdrop and drives the app
-with simulated sessions — so it is reproducible and contains nobody's desktop.</sub>
+with simulated sessions, so it is reproducible and contains nobody's desktop.</sub>
 
 ---
 
@@ -22,22 +22,22 @@ a window you're not looking at can't do that. A pet on top of everything can.
 
 Which puts most of the design pressure on one thing: **the pet must not say
 anything that isn't true.** A card that claims a turn finished when it hasn't,
-or claims work is happening after the agent crashed, is worse than no card —
-you stop trusting the one glance the whole thing exists for.
+or claims work is happening after the agent crashed, is worse than no card.
+You stop trusting the one glance the whole thing exists for.
 
 ## Features
 
-- **Transparent always-on-top overlay** — no taskbar entry, no window chrome.
+- **Transparent always-on-top overlay.** No taskbar entry, no window chrome.
 - **Click-through everywhere except the pet.** The overlay does not eat clicks
   meant for whatever is underneath it. Most pet overlays get this wrong.
 - **One card per project, stacked.** Run Claude Code in four repos and you get
   four cards, not one bubble flickering between them. Press **×** to collapse a
   project into a chip; it reopens itself if that project gets blocked or fails.
-- **Readable at speed.** Each card has a *headline* — what the turn is about —
-  that changes once per turn, and a dimmer live line for the current tool. Every
+- **Readable at speed.** Each card has a *headline* (what the turn is
+  about) that changes once per turn, and a dimmer live line for the current tool. Every
   state has a floor on how long it stays up, so nothing flashes past.
 - **It says what it is blocked on**, with a warning when the command can't be
-  undone — a force push, an `rm -rf`, a `DROP TABLE`.
+  undone: a force push, an `rm -rf`, a `DROP TABLE`.
 - **Completions survive not being seen.** A turn that finishes while the overlay
   is behind a full-screen window leaves a mark until you look, and blinks the
   tray icon if the overlay is covered entirely.
@@ -45,8 +45,11 @@ you stop trusting the one glance the whole thing exists for.
   won't interrupt you.
 - **A setup check** that watches for real hook traffic, so "nothing is
   happening" and "the hooks aren't firing" stop looking identical.
-- **An event log** — click a card for the last two dozen things that project did.
-- **Jump to the window** — **↗** on a card brings that Claude Code window
+- **`Ctrl+Alt+P` shows and hides it** from anywhere, so you never have to go
+  hunting for the tray icon. If something else already owns that chord,
+  Pipsqueak takes the next free one and tells you which.
+- **An event log.** Click a card for the last two dozen things that project did.
+- **Jump to the window.** **↗** on a card brings that Claude Code window
   forward.
 - **Three pets built in**, and you can drop your own sprite folder in.
   **Codex pets work as-is**, including any already in `~/.codex/pets`.
@@ -69,9 +72,9 @@ Editing · 42 actions · 3m
 | Headline | your prompt, then Claude's answer when the turn ends | once per turn |
 | Status | the *category* of work, plus counters | on category change |
 
-Nothing on the card strobes. Several tools map to one status word on purpose —
-`Read`, `Glob` and `Grep` are all `Reading` — so the only thing moving during a
-burst is the counter. The exact call is in the tooltip, and the full log is one
+Nothing on the card strobes. Several tools share one status word on
+purpose. `Read`, `Glob` and `Grep` are all `Reading`, so the only thing moving
+during a burst is the counter. The exact call is in the tooltip, and the full log is one
 click away.
 
 ### Which project a session belongs to
@@ -122,8 +125,8 @@ The details, and why each one is the way it is, are in
 Requires the Microsoft Edge WebView2 runtime, which ships with Windows 11 and is
 installed automatically by the setup if missing.
 
-On first launch a panel offers to register the Claude Code hooks — the only step
-that touches your configuration, and it says exactly what it edits. Then
+On first launch a panel offers to register the Claude Code hooks. That is the
+only step that touches your configuration, and it says exactly what it edits. Then
 **restart Claude Code**, because it reads its hooks at startup.
 
 There is also a plugin so you can control the pet from inside a session:
@@ -140,7 +143,7 @@ See [configuration and CLI](docs/guides/configuration.md) for the commands.
 ## What it does to your settings
 
 `~/.claude/settings.json` is usually hand-tuned, so the installer is
-deliberately timid: it copies the file first, refuses to run if it is not valid
+careful with it: it copies the file first, refuses to run if it is not valid
 JSON, and only ever removes entries whose command path contains `pipsqueak`.
 Uninstalling the app takes the hooks with it.
 
@@ -157,16 +160,16 @@ the update check, which is **off by default**, asks GitHub for the latest
 release tag and nothing else, and never downloads anything.
 
 Session files hold the project folder name, the current tool and its target, and
-a truncated copy of the last assistant message — the same things shown on the
-card. They live in `~/.pipsqueak` and are deleted when the session ends. The
+a truncated copy of the last assistant message, which is what the card shows
+anyway. They live in `~/.pipsqueak` and are deleted when the session ends. The
 setup check's copyable report contains no paths, prompts, or file contents.
 
 ## Docs
 
-- [How it works](docs/guides/how-it-works.md) — hooks, state, and why each
-  claim is delayed or withheld
+- [How it works](docs/guides/how-it-works.md): hooks, state, and why each claim
+  is delayed or withheld
 - [Configuration and CLI](docs/guides/configuration.md)
-- [Custom pets](docs/guides/custom-pets.md) — the atlas format, timing, and
+- [Custom pets](docs/guides/custom-pets.md): the atlas format, timing, and
   Codex compatibility
 - [Building and releasing](docs/project/building.md)
 - [Release notes](docs/releases/)

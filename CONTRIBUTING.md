@@ -9,9 +9,9 @@ Right-click the pet → **Check my setup** → **Copy report**, and paste that i
 the issue. It contains the version, the platform, and which of the four checks
 failed; it contains no paths, prompts, or file contents.
 
-If the pet is showing something untrue — a completion that had not happened,
-work that had stopped, a card stuck on "needs you" — that is the most valuable
-kind of report this project can get, and worth more detail than usual: what you
+A completion that had not happened, work that had stopped, a card stuck on
+"needs you": if the pet is showing something untrue, that is the most valuable
+kind of report this project can get. Worth more detail than usual, too. What you
 were running, and what the card said versus what was actually going on.
 
 ## Building
@@ -63,7 +63,7 @@ reverses one is probably a bug:
 
 ## Pets
 
-A pet is a folder with a `pet.json` and a spritesheet — see
+A pet is a folder with a `pet.json` and a spritesheet. See
 [docs/guides/custom-pets.md](docs/guides/custom-pets.md). If you make one you
 are happy to share, open a PR adding it to `public/pets/`, ideally with a
 generator alongside it so it can be regenerated and colour-tweaked.

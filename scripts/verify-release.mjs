@@ -2,7 +2,7 @@
 //
 // The version lives in three files that nothing keeps in step, plus the tag
 // that triggers the build. Any two of them drifting produces an installer that
-// reports the wrong version — which is only ever discovered later, by someone
+// reports the wrong version, which is only ever discovered later, by someone
 // trying to work out which build they are running.
 //
 // Runs before the build job, not after, so a mismatch costs seconds.
@@ -33,7 +33,7 @@ if (tauri !== version) {
 
 const notes = `docs/releases/v${version}.md`
 if (!existsSync(resolve(root, notes))) {
-  problems.push(`${notes} does not exist — a release needs notes before it needs a build`)
+  problems.push(`${notes} does not exist. A release needs notes before it needs a build.`)
 }
 
 // Set by GitHub Actions on a tag push.

@@ -313,7 +313,7 @@ function render() {
   // A pet that visibly dozes is doing real work: it says "nothing is running
   // and I will not interrupt you", which is different from an overlay that has
   // silently stopped receiving events. Do Not Disturb looks the same on
-  // purpose — it is the same promise.
+  // purpose, because it is the same promise.
   if (groups.some((group) => group.live)) lastLiveAt = Date.now()
   const dozing = config.quiet || Date.now() - lastLiveAt > SLEEP_AFTER_MS
   el.pet.classList.toggle('asleep', dozing)
@@ -455,7 +455,7 @@ async function checkForUpdate(manual) {
       return
     }
     if (!manual && config.updateDismissed === latest) return
-    showNotice(`Pipsqueak ${latest} is available — ${RELEASES_PAGE}`)
+    showNotice(`Pipsqueak ${latest} is available: ${RELEASES_PAGE}`)
     if (!manual) {
       // Told once. Saying it again every twelve hours is how an update prompt
       // becomes something people learn to ignore.
@@ -523,6 +523,27 @@ function action(label, onClick, primary) {
  * guess what "install hooks" meant. This says what it edits, in the same
  * breath as asking to do it.
  */
+/**
+ * Tells the welcome panel which chord actually registered.
+ *
+ * Filled in after the panel is built, because asking the backend is async and
+ * a panel that pops up half a frame late is worse than a line that arrives
+ * half a frame late.
+ */
+function hotkeyLine() {
+  const node = para('Checking the keyboard shortcut…')
+  invoke('hotkey_binding')
+    .then((chord) => {
+      node.textContent = chord
+        ? `Press ${chord} any time to show or hide the pet.`
+        : 'No keyboard shortcut was available; set "hotkey" in ~/.pipsqueak/config.json.'
+    })
+    .catch(() => {
+      node.textContent = ''
+    })
+  return node
+}
+
 function showWelcome() {
   openPanel('Pipsqueak', () => {
     const nodes = [
@@ -547,10 +568,11 @@ function showWelcome() {
         config.updateCheck = !config.updateCheck
         await saveConfig()
         button.textContent = config.updateCheck
-          ? 'Will check for updates — nothing is ever downloaded'
+          ? 'Will check for updates. Nothing is ever downloaded'
           : 'Will not check for updates'
       }),
-      para('Then start a session. Restart Claude Code first — it reads its hooks at startup.'),
+      para('Then start a session. Restart Claude Code first, because it reads its hooks at startup.'),
+      hotkeyLine(),
       action('Done', () => {
         closePanel()
       })
@@ -626,7 +648,7 @@ async function showDoctor() {
         const text = await invoke('doctor_report').catch(() => '')
         try {
           await navigator.clipboard.writeText(text)
-          button.textContent = 'Copied — paste it into an issue'
+          button.textContent = 'Copied. Paste it into an issue'
         } catch {
           button.textContent = 'Could not reach the clipboard'
         }
@@ -641,6 +663,7 @@ async function openMenu() {
   const pets = await invoke('list_pets').catch(() => [])
   const installed = await invoke('hooks_installed').catch(() => false)
   const autostart = await invoke('autostart_enabled').catch(() => false)
+  const chord = await invoke('hotkey_binding').catch(() => '')
   const children = []
 
   const heading = (text) => {
@@ -748,6 +771,17 @@ async function openMenu() {
   )
 
   children.push(heading('Setup'))
+  // The chord shown is the one that registered, which is not always the one
+  // that was asked for: another program may already own it.
+  children.push(
+    button(chord ? `Show or hide with ${chord}` : 'No global hotkey available', () =>
+      showNotice(
+        chord
+          ? `${chord} shows and hides the pet. Change it with "hotkey" in ~/.pipsqueak/config.json.`
+          : 'Every candidate hotkey is already taken. Set "hotkey" in ~/.pipsqueak/config.json to a free one.'
+      )
+    )
+  )
   children.push(button('Check my setup…', () => showDoctor()))
   children.push(button('Check for updates', () => checkForUpdate(true)))
   children.push(
@@ -840,8 +874,8 @@ function wireInteraction() {
 
   el.pet.addEventListener('pointerup', () => {
     if (origin && !dragging) {
-      // A click outside the menu can't reach us — the window is click-through
-      // there — so the pet itself is what dismisses it.
+      // A click outside the menu can't reach us, because the window is
+      // click-through there, so the pet itself is what dismisses it.
       if (!el.menu.hidden) el.menu.hidden = true
       else stackHidden = !stackHidden
       // Looking at the pet is looking at the pet.
@@ -908,7 +942,7 @@ async function boot() {
     return
   }
 
-  // Any dismissal counts as acknowledged — Done, the close button, or simply
+  // Any dismissal counts as acknowledged: Done, the close button, or simply
   // never opening it again. A welcome that keeps coming back is worse than one
   // that is missed.
   if (!config.welcomed) {
@@ -1037,7 +1071,7 @@ function startBrowserDemo() {
   if (wanted === 'welcome') showWelcome()
   if (wanted === 'doctor') {
     openPanel('Setup check', () => [
-      para('Rendering with sample results — the real check needs the app.'),
+      para('Rendering with sample results. The real check needs the app.'),
       ...[
         ['ok', 'Claude Code hooks', 'All 15 events registered.'],
         ['fail', 'Hook program', 'The hooks point at a copy that no longer exists.'],

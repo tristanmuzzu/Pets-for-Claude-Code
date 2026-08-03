@@ -3,7 +3,7 @@
 [← README](../../README.md)
 
 Everything lives in `~/.pipsqueak/config.json` and is editable from the pet's
-right-click menu. Editing the file by hand is fine — an out-of-range value is
+right-click menu. Editing the file by hand is fine. An out-of-range value is
 pulled back to something usable and costs only itself, and a file that cannot be
 parsed at all is moved to `config.json.bak` rather than overwritten.
 
@@ -11,13 +11,14 @@ parsed at all is moved to `config.json.bak` rather than overwritten.
 | --- | --- |
 | `version` | which build's idea of this file it is; managed for you |
 | `pet` | id of the active pet (`byte`, `pip`, `ember`, or your own) |
-| `scale` | pet size, 1–6 |
+| `scale` | pet size, 1 to 6 |
 | `click_through` | make the pet itself non-interactive too |
 | `show_bubble` | hide the status cards, keep the pet |
 | `show_scratch` | include sessions rooted in a temp directory |
 | `alert_on_waiting` | play a sound when a project starts waiting on you |
 | `flash_on_finish` | blink the tray icon when a project finishes |
 | `quiet` | do not disturb: no sound, no blink, the pet dozes |
+| `hotkey` | chord that shows and hides the pet, or `off` |
 | `update_check` | ask GitHub about new releases (off by default) |
 | `update_dismissed` | a version you have already been told about |
 | `welcomed` | whether the first-run panel has been dismissed |
@@ -26,6 +27,19 @@ parsed at all is moved to `config.json.bak` rather than overwritten.
 A config written by a newer version of Pipsqueak is read but never written back
 to, so running an older build cannot quietly delete settings it does not know
 about.
+
+## Keyboard shortcut
+
+`Ctrl+Alt+P` shows and hides the pet from anywhere, so you never have to go
+looking for the tray icon.
+
+Windows gives a chord to whichever program asks for it first, so if something
+else already owns `Ctrl+Alt+P`, Pipsqueak takes the next one it can get and the
+right-click menu shows which. Set `hotkey` in `config.json` to pick your own, or
+to `off` to register nothing at all. Any combination of `Ctrl`, `Alt`, `Shift`
+and `Win` plus a letter, digit or function key works. A chord with no modifier
+is refused, since it would take that key away from everything else on the
+machine.
 
 ## CLI
 
@@ -65,7 +79,7 @@ There is a small plugin so you never have to open a terminal:
 The command runs while the skill expands, so it takes effect immediately
 without spending a turn and without a console window appearing. Under the hood
 it is `pipsqueak control <action>`, which writes a one-line instruction to
-`~/.pipsqueak/command.json` for the running overlay to pick up — and starts the
+`~/.pipsqueak/command.json` for the running overlay to pick up, and starts the
 overlay first if it isn't up.
 
 ## Uninstalling
