@@ -355,6 +355,11 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                     ..Default::default()
                 },
                 Stop::Finished { settle_ms } => Update {
+                    // The turn is over, so the session is no longer *doing*
+                    // anything. Leaving this as "running" would have the sweep
+                    // decide five minutes later that a finished session had
+                    // stopped responding, and say so over the answer.
+                    state: "idle",
                     kind: "Done".into(),
                     // The turn is over: a live line would only show a stale
                     // tool call.
@@ -780,6 +785,11 @@ mod tests {
         let update = classify("Stop", &payload).unwrap();
         assert_eq!(update.outcome, "done");
         assert_eq!(update.settle_ms, 0);
+        // The turn is over, so the session is not running any more. Leaving it
+        // running would have the staleness sweep decide five minutes later
+        // that a finished session had stopped responding, and say so over the
+        // answer it had already given.
+        assert_eq!(update.state, "idle");
         assert_eq!(update.headline.as_deref(), Some("Fixed the off-by-one."));
         // The turn is over, so the live line clears rather than showing a stale tool.
         assert!(update.activity.is_empty());

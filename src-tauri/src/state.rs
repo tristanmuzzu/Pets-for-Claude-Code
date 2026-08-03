@@ -528,7 +528,9 @@ pub fn sweep() -> usize {
             changed += 1;
             continue;
         }
-        if age > WORKING_STALE_MS && session.is_running() {
+        // A session that reported how its turn ended is not silently stuck,
+        // however long ago that was.
+        if age > WORKING_STALE_MS && session.is_running() && session.outcome.is_empty() {
             session.state = "idle".to_string();
             session.kind = "Idle".to_string();
             session.activity.clear();
