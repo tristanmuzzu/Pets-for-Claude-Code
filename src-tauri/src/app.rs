@@ -1,6 +1,7 @@
 //! The overlay: a transparent, always-on-top window that polls session state
 //! and animates the pet.
 
+use crate::desktop;
 use crate::install;
 use crate::state::{
     self, codex_pets_dir, load_config, pets_dir, read_sessions, root, sessions_dir, Config, Session,
@@ -203,6 +204,36 @@ fn open_pets_dir() -> Result<(), String> {
     let dir = pets_dir();
     let _ = fs::create_dir_all(&dir);
     open_path(&dir)
+}
+
+/// Brings the window for a project forward. Matching is by window title, so it
+/// is best-effort: `false` means nothing recognisable was open.
+#[tauri::command]
+fn focus_project(project: String, workspace: String) -> bool {
+    let mut fragments = Vec::new();
+    if !workspace.is_empty() {
+        fragments.push(workspace);
+    }
+    if !project.is_empty() {
+        fragments.push(project);
+    }
+    fragments.push("claude".to_string());
+    desktop::focus_window_titled(&fragments)
+}
+
+#[tauri::command]
+fn alert() {
+    desktop::alert();
+}
+
+#[tauri::command]
+fn autostart_enabled() -> bool {
+    desktop::autostart_enabled()
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    desktop::set_autostart(enabled)
 }
 
 #[tauri::command]
@@ -462,6 +493,10 @@ pub fn run() {
             install_hooks,
             hooks_installed,
             open_pets_dir,
+            focus_project,
+            alert,
+            autostart_enabled,
+            set_autostart,
             quit
         ])
         .setup(|app| {

@@ -22,14 +22,22 @@
         <header class="card-head">
           <span class="dot" aria-hidden="true"></span>
           <span class="project"></span>
+          <span class="workspace" hidden></span>
           <span class="count" hidden></span>
           <span class="age"></span>
-          <button class="close" type="button" title="Collapse this project">×</button>
+          <button class="icon focus" type="button" title="Bring this window forward">↗</button>
+          <button class="icon close" type="button" title="Collapse this project">×</button>
         </header>
         <p class="headline"></p>
-        <p class="live"><span class="live-text"></span><span class="burst" hidden></span></p>
+        <p class="status">
+          <span class="kind"></span>
+          <span class="sep" aria-hidden="true">·</span>
+          <span class="actions"></span>
+          <span class="sep" aria-hidden="true">·</span>
+          <span class="elapsed"></span>
+        </p>
         <div class="more" hidden>
-          <p class="detail"></p>
+          <p class="detail" hidden></p>
           <ol class="log"></ol>
         </div>
       </article>

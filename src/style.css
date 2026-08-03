@@ -80,6 +80,9 @@ body {
   background: var(--surface);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
   animation: rise 160ms ease-out;
+  /* Every row is always rendered, so a card never resizes under the cursor and
+     the cards below never jump. */
+  min-height: 82px;
 }
 
 @keyframes rise {
@@ -174,7 +177,20 @@ body {
   margin-left: auto;
 }
 
-.close {
+.workspace {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  color: var(--faint);
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon {
   flex: none;
   width: 16px;
   height: 16px;
@@ -184,11 +200,15 @@ body {
   border-radius: 4px;
   background: transparent;
   color: var(--faint);
-  font-size: 14px;
+  font-size: 12px;
   cursor: pointer;
 }
 
-.close:hover {
+.close {
+  font-size: 14px;
+}
+
+.icon:hover {
   background: rgba(255, 255, 255, 0.14);
   color: var(--ink);
 }
@@ -205,32 +225,40 @@ body {
   overflow: hidden;
 }
 
-/* The live line: subordinate on purpose, and rate-limited in JS. */
-.live {
-  margin: 3px 0 0;
+/*
+ * The status line. The word changes only when the *kind* of work changes; the
+ * counters tick. That is the whole trick — you can watch it without reading it.
+ */
+.status {
+  margin: 4px 0 0;
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.4;
   color: var(--muted);
-}
-
-.live-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.burst {
-  flex: none;
-  font-size: 10px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--faint);
+.status .kind {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+.status .sep {
+  opacity: 0.35;
+}
+
+.status .actions,
+.status .elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.card[data-state="waiting"] .status .kind { color: var(--waiting); }
+.card[data-state="failed"] .status .kind { color: var(--failed); }
+.card[data-state="done"] .status .kind { color: var(--done); }
 
 .detail {
   margin: 6px 0 0;

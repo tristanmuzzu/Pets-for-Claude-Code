@@ -65,7 +65,12 @@ const PROJECTS = [
       [300, 'PostToolUse', file('Read', 'C:/code/clockwork/src/clock.js')],
       [400, 'PreToolUse', file('Edit', 'C:/code/clockwork/src/clock.js')],
       [400, 'PostToolUse', file('Edit', 'C:/code/clockwork/src/clock.js')],
-      [1500, 'PermissionRequest', bash('npm test -- --run')],
+      // PermissionRequest alone is ignored by design — auto-mode answers most
+      // of them. This pair is the "resolved instantly, never bothered you" case.
+      [120, 'PermissionRequest', bash('npm run lint')],
+      [1500, 'PreToolUse', bash('npm run lint', 'Lint the project')],
+      // And this is a prompt a human actually saw.
+      [1500, 'Notification', { notification_type: 'permission_prompt', message: 'Allow Bash(npm test)?' }],
       [2500, 'PreToolUse', bash('npm test -- --run', 'Run the test suite')],
       [2000, 'PostToolUseFailure', {
         ...bash('npm test -- --run'),
@@ -93,6 +98,18 @@ const PROJECTS = [
       [1200, 'Stop', {
         last_assistant_message: 'Added 12 tier C scenarios; the suite passes in 41s.'
       }],
+      [9000, 'SessionEnd', { reason: 'clear' }]
+    ]
+  },
+  {
+    // Rooted in a temp directory: hidden unless "Include scratch/temp sessions"
+    // is on. This is what an eval or scripted run looks like.
+    id: 'sim-scratch',
+    cwd: `${process.env.TEMP?.replace(/\\/g, '/') ?? '/tmp'}/harness-ablation/runs/design-quality__r7`,
+    steps: [
+      [900, 'SessionStart', { source: 'startup' }],
+      [900, 'UserPromptSubmit', { prompt: 'Score the transcript against the rubric' }],
+      [3000, 'PreToolUse', file('Read', 'transcript.jsonl')],
       [9000, 'SessionEnd', { reason: 'clear' }]
     ]
   },

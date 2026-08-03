@@ -6,18 +6,19 @@ import { PetRenderer, GREETING_ROW } from './pet.js'
 /** `npm run dev` in a plain browser has no IPC; fall back to a demo loop. */
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
+const SLOT_LIMIT = 3
 /**
- * How long a live line stays put before the next one may replace it. Tools can
- * fire several times a second; without this the line is unreadable.
+ * A turn can enter and leave `waiting` in a few hundred milliseconds when a
+ * hook or auto-mode answers the permission prompt. Only a state that persists
+ * is worth telling anyone about.
  */
-const MIN_DWELL_MS = 2500
-/** States that jump the queue — you never want a blocked prompt held back. */
+const WAITING_DEBOUNCE_MS = 800
+/** How long a finished project keeps its card before collapsing to a chip. */
+const DONE_LINGER_MS = 30_000
 const URGENT = new Set(['waiting', 'failed'])
-const MAX_CARDS = 3
-const STALE_MS = 45_000
+const ACTIVE = new Set(['thinking', 'running', 'waiting', 'failed', 'compacting', 'done'])
 
 const el = {
-  stage: document.getElementById('stage'),
   stack: document.getElementById('stack'),
   chips: document.getElementById('chips'),
   menu: document.getElementById('menu'),
@@ -28,42 +29,91 @@ const el = {
 const appWindow = IS_TAURI ? getCurrentWindow() : null
 const renderer = new PetRenderer(el.pet)
 
-let config = { pet: 'ember', scale: 2, clickThrough: false, showBubble: true }
+let config = {
+  pet: 'pip',
+  scale: 2,
+  clickThrough: false,
+  showBubble: true,
+  showScratch: false,
+  alertOnWaiting: false
+}
 let sessions = []
 let notice = null
 let noticeTimer = null
 let stackHidden = false
 let seenSessions = new Set()
 
-/** project -> { shown, shownAt, pending, skipped, expanded } */
+/**
+ * Card order is a property of the UI, not of the data. Sorting by "most
+ * recently updated" on every hook event made the visible set churn every few
+ * hundred milliseconds. A project keeps its slot until it goes quiet.
+ */
+let slots = []
 const views = new Map()
-/** Projects the user collapsed; cleared automatically when one needs attention. */
 const collapsed = new Set()
-/** Last state seen per project, to detect transitions into an urgent state. */
-const lastStates = new Map()
-/** project -> card element, so updates don't rebuild (and re-animate) the DOM. */
 const cards = new Map()
+const chipNodes = new Map()
 
 // --- data ---------------------------------------------------------------
+function viewFor(key) {
+  let view = views.get(key)
+  if (!view) {
+    view = { expanded: false, waitingSince: 0, lastStable: 'running', wasUrgent: false }
+    views.set(key, view)
+  }
+  return view
+}
+
 /**
- * One card per project. Sessions arrive already ordered attention-first, so the
- * first session seen for a project is the one worth showing.
+ * One card per project. Several sessions can share a project (worktrees,
+ * subagents); the busiest one speaks for it.
  */
 function groupByProject(list) {
   const groups = []
   const index = new Map()
   for (const session of list) {
+    if (session.scratch && !config.showScratch) continue
     const key = session.project || session.session_id.slice(0, 8)
     const existing = index.get(key)
     if (existing) {
       existing.count += 1
+      if (rank(session.state) > rank(existing.session.state)) existing.session = session
       continue
     }
     const group = { key, session, count: 1 }
     index.set(key, group)
     groups.push(group)
   }
+  for (const group of groups) {
+    group.state = effectiveState(group.key, group.session)
+    group.live = ACTIVE.has(group.state)
+  }
   return groups
+}
+
+function rank(state) {
+  if (state === 'waiting') return 3
+  if (state === 'failed') return 2
+  if (state === 'idle') return 0
+  return 1
+}
+
+function effectiveState(key, session) {
+  const view = viewFor(key)
+  const now = Date.now()
+  const raw = session.state || 'idle'
+
+  if (raw === 'waiting') {
+    if (!view.waitingSince) view.waitingSince = now
+    // Hold the previous state until the wait proves real.
+    if (now - view.waitingSince < WAITING_DEBOUNCE_MS) return view.lastStable
+    return 'waiting'
+  }
+  view.waitingSince = 0
+
+  if (raw === 'done' && now - session.updated_ms > DONE_LINGER_MS) return 'idle'
+  view.lastStable = raw
+  return raw
 }
 
 function relativeTime(ms) {
@@ -75,35 +125,12 @@ function relativeTime(ms) {
   return `${Math.floor(delta / 3_600_000)}h`
 }
 
-function viewFor(key) {
-  let view = views.get(key)
-  if (!view) {
-    view = { shown: '', shownAt: 0, pending: '', skipped: 0, expanded: false }
-    views.set(key, view)
-  }
-  return view
-}
-
-/**
- * Rate-limits the live line. Urgent states are adopted immediately; everything
- * else waits out the dwell, and anything that arrived meanwhile is counted so
- * the card can show "+3" rather than silently dropping it.
- */
-function pumpLiveLine(key, activity, state) {
-  const view = viewFor(key)
-  const now = Date.now()
-  if (activity !== view.pending) {
-    if (view.pending && view.pending !== view.shown) view.skipped += 1
-    view.pending = activity
-  }
-  const urgent = URGENT.has(state)
-  const settled = now - view.shownAt >= MIN_DWELL_MS
-  if (view.pending !== view.shown && (urgent || settled || !view.shown)) {
-    view.shown = view.pending
-    view.shownAt = now
-    view.skipped = 0
-  }
-  return view
+function duration(ms) {
+  if (!ms) return '0s'
+  const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h`
 }
 
 // --- rendering ----------------------------------------------------------
@@ -114,6 +141,14 @@ function buildCard(key) {
     collapsed.add(key)
     render()
   })
+  node.querySelector('.focus').addEventListener('click', (event) => {
+    event.stopPropagation()
+    const group = groupByProject(sessions).find((candidate) => candidate.key === key)
+    invoke('focus_project', {
+      project: key,
+      workspace: group?.session.workspace ?? ''
+    }).catch(() => {})
+  })
   node.addEventListener('click', () => {
     const view = viewFor(key)
     view.expanded = !view.expanded
@@ -123,33 +158,42 @@ function buildCard(key) {
 }
 
 function paintCard(node, group) {
-  const { session, key, count } = group
-  const view = pumpLiveLine(key, session.activity || '', session.state)
-  const stale = Date.now() - session.updated_ms > STALE_MS
+  const { session, key, count, state } = group
 
-  node.dataset.state = session.state || 'idle'
-  node.dataset.dim = String(session.state === 'idle' && stale)
+  node.dataset.state = state
   node.querySelector('.project').textContent = key
   node.querySelector('.age').textContent = relativeTime(session.updated_ms)
 
+  const workspace = node.querySelector('.workspace')
+  workspace.hidden = !session.workspace
+  workspace.textContent = session.workspace || ''
+
   const countNode = node.querySelector('.count')
   countNode.hidden = count < 2
-  countNode.textContent = `${count} sessions`
+  countNode.textContent = `${count}×`
 
-  // Sessions that started before their first prompt have no headline yet.
-  const headline = session.headline || session.activity || 'Working…'
-  node.querySelector('.headline').textContent = headline
+  node.querySelector('.headline').textContent =
+    session.headline || session.activity || 'Working…'
 
-  const live = node.querySelector('.live')
-  // Compare against what is actually on screen, or the fallback above shows the
-  // same sentence twice.
-  const liveText = view.shown && view.shown !== headline ? view.shown : ''
-  live.hidden = !liveText
-  node.querySelector('.live-text').textContent = liveText
-  const burst = node.querySelector('.burst')
-  burst.hidden = view.skipped < 1
-  burst.textContent = `+${view.skipped}`
+  // Status line: a coarse word plus counters. The detail that used to live here
+  // moved to the expanded panel, where fast-changing text is fine.
+  node.querySelector('.kind').textContent = kindLabel(state, session)
+  // Counters only mean something once a turn has actually started; showing
+  // "0 actions" before the first prompt is noise.
+  const turnStarted = session.turn_started_ms || 0
+  const actions = session.turn_tools ?? 0
+  const showCounters = turnStarted > 0
+  for (const part of node.querySelectorAll('.sep, .actions, .elapsed')) {
+    part.hidden = !showCounters
+  }
+  if (showCounters) {
+    node.querySelector('.actions').textContent = `${actions} ${actions === 1 ? 'action' : 'actions'}`
+    node.querySelector('.elapsed').textContent = duration(turnStarted)
+  }
+  // The exact call is still one hover away, without occupying a row.
+  node.title = session.activity || ''
 
+  const view = viewFor(key)
   const more = node.querySelector('.more')
   more.hidden = !view.expanded
   if (view.expanded) {
@@ -174,42 +218,58 @@ function paintCard(node, group) {
   }
 }
 
-function buildChip(key, state, label, onClick) {
+function kindLabel(state, session) {
+  if (state === 'waiting') return 'Needs you'
+  if (state === 'failed') return 'Failed'
+  if (state === 'done') return 'Done'
+  if (state === 'compacting') return 'Compacting'
+  return session.kind || 'Working'
+}
+
+function buildChip(key) {
   const button = document.createElement('button')
   button.type = 'button'
   const dot = document.createElement('span')
   dot.className = 'dot'
-  dot.style.background = `var(--${state in STATE_COLOURS ? state : 'idle'})`
   const text = document.createElement('span')
-  text.textContent = label
   button.append(dot, text)
-  button.addEventListener('click', onClick)
+  button.addEventListener('click', () => {
+    stackHidden = false
+    collapsed.delete(key)
+    if (!slots.includes(key)) slots.unshift(key)
+    render()
+  })
   return button
-}
-
-const STATE_COLOURS = {
-  idle: 1, thinking: 1, running: 1, waiting: 1, failed: 1, done: 1, compacting: 1
 }
 
 function render() {
   const groups = groupByProject(sessions)
+  const byKey = new Map(groups.map((group) => [group.key, group]))
 
-  // A project that starts needing attention un-collapses itself.
+  // Slots only change when a project starts or stops being active, or when one
+  // starts needing attention. Ordinary progress never reorders anything.
+  const liveKeys = groups.filter((group) => group.live).map((group) => group.key)
+  slots = slots.filter((key) => liveKeys.includes(key))
+  for (const key of liveKeys) if (!slots.includes(key)) slots.push(key)
+
   for (const group of groups) {
-    const previous = lastStates.get(group.key)
-    if (URGENT.has(group.session.state) && previous !== group.session.state) {
+    const view = viewFor(group.key)
+    const urgent = URGENT.has(group.state)
+    if (urgent && !view.wasUrgent) {
       collapsed.delete(group.key)
+      slots = [group.key, ...slots.filter((key) => key !== group.key)]
+      if (group.state === 'waiting' && config.alertOnWaiting) invoke('alert').catch(() => {})
     }
-    lastStates.set(group.key, group.session.state)
+    view.wasUrgent = urgent
   }
 
-  const leader = groups[0]?.session
+  const leader = byKey.get(slots[0])
   renderer.setState(notice ? 'idle' : leader ? leader.state : 'idle')
 
   const visible = stackHidden
     ? []
-    : groups.filter((group) => !collapsed.has(group.key)).slice(0, MAX_CARDS)
-  const visibleKeys = new Set(visible.map((group) => group.key))
+    : slots.filter((key) => !collapsed.has(key)).slice(0, SLOT_LIMIT)
+  const visibleKeys = new Set(visible)
 
   for (const [key, node] of cards) {
     if (!visibleKeys.has(key)) {
@@ -221,11 +281,13 @@ function render() {
   // DOM order is bottom-up: #stack is column-reverse, so the first child sits
   // closest to the pet and the chip row ends up on top of the stack.
   let previous = null
-  for (const group of visible) {
-    let node = cards.get(group.key)
+  for (const key of visible) {
+    const group = byKey.get(key)
+    if (!group) continue
+    let node = cards.get(key)
     if (!node) {
-      node = buildCard(group.key)
-      cards.set(group.key, node)
+      node = buildCard(key)
+      cards.set(key, node)
     }
     paintCard(node, group)
     if (previous) {
@@ -235,23 +297,32 @@ function render() {
     }
     previous = node
   }
+
+  renderChips(groups.filter((group) => !visibleKeys.has(group.key) && (group.live || collapsed.has(group.key))))
   el.stack.append(el.chips)
-
-  const hiddenGroups = stackHidden
-    ? groups
-    : groups.filter((group) => collapsed.has(group.key) || !visibleKeys.has(group.key))
-  el.chips.hidden = hiddenGroups.length === 0
-  el.chips.replaceChildren(
-    ...hiddenGroups.map((group) =>
-      buildChip(group.key, group.session.state, group.key, () => {
-        stackHidden = false
-        collapsed.delete(group.key)
-        render()
-      })
-    )
-  )
-
   syncHitRects()
+}
+
+/** Diffed rather than rebuilt: replacing these every second made them flicker. */
+function renderChips(groups) {
+  const wanted = new Set(groups.map((group) => group.key))
+  for (const [key, node] of chipNodes) {
+    if (!wanted.has(key)) {
+      node.remove()
+      chipNodes.delete(key)
+    }
+  }
+  for (const group of groups) {
+    let node = chipNodes.get(group.key)
+    if (!node) {
+      node = buildChip(group.key)
+      chipNodes.set(group.key, node)
+      el.chips.append(node)
+    }
+    node.querySelector('.dot').style.background = `var(--${group.state})`
+    node.lastElementChild.textContent = group.key
+  }
+  el.chips.hidden = chipNodes.size === 0
 }
 
 /**
@@ -278,17 +349,21 @@ function showNotice(message) {
   clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => {
     notice = null
+    sessions = sessions.filter((s) => s.session_id !== 'notice')
     render()
   }, 6000)
   sessions = [
     {
       session_id: 'notice',
       project: 'Pipsqueak',
-      state: 'idle',
+      state: 'done',
       headline: message,
+      kind: 'Notice',
       activity: '',
       detail: '',
       updated_ms: Date.now(),
+      turn_started_ms: Date.now(),
+      turn_tools: 0,
       recent: []
     },
     ...sessions.filter((s) => s.session_id !== 'notice')
@@ -300,6 +375,7 @@ function showNotice(message) {
 async function openMenu() {
   const pets = await invoke('list_pets').catch(() => [])
   const installed = await invoke('hooks_installed').catch(() => false)
+  const autostart = await invoke('autostart_enabled').catch(() => false)
   const children = []
 
   const heading = (text) => {
@@ -356,6 +432,26 @@ async function openMenu() {
   )
   children.push(
     button(
+      'Include scratch/temp sessions',
+      async () => {
+        config.showScratch = !config.showScratch
+        await saveConfig()
+      },
+      config.showScratch
+    )
+  )
+  children.push(
+    button(
+      'Sound when a project needs you',
+      async () => {
+        config.alertOnWaiting = !config.alertOnWaiting
+        await saveConfig()
+      },
+      config.alertOnWaiting
+    )
+  )
+  children.push(
+    button(
       'Click through the pet',
       async () => {
         config.clickThrough = !config.clickThrough
@@ -366,6 +462,18 @@ async function openMenu() {
   )
 
   children.push(heading('Setup'))
+  children.push(
+    button(
+      'Start with Windows',
+      async () => {
+        const result = await invoke('set_autostart', { enabled: !autostart }).catch((e) =>
+          String(e)
+        )
+        if (typeof result === 'string') showNotice(result)
+      },
+      autostart
+    )
+  )
   children.push(
     button(installed ? 'Reinstall Claude Code hooks' : 'Install Claude Code hooks', async () => {
       const message = await invoke('install_hooks').catch((e) => String(e))
@@ -382,7 +490,7 @@ async function openMenu() {
 
 async function selectPet(id) {
   try {
-    const payload = await invoke('load_pet', { id })
+    const payload = await loadPetPayload(id)
     await renderer.load(id, payload)
     renderer.setScale(config.scale)
     config.pet = id
@@ -399,6 +507,8 @@ async function saveConfig() {
       scale: config.scale,
       click_through: config.clickThrough,
       show_bubble: config.showBubble,
+      show_scratch: config.showScratch,
+      alert_on_waiting: config.alertOnWaiting,
       x: config.x ?? null,
       y: config.y ?? null
     }
@@ -459,10 +569,12 @@ async function boot() {
   const stored = await invoke('get_config').catch(() => null)
   if (stored) {
     config = {
-      pet: stored.pet ?? 'ember',
+      pet: stored.pet ?? 'pip',
       scale: stored.scale ?? 2,
       clickThrough: Boolean(stored.click_through),
       showBubble: stored.show_bubble !== false,
+      showScratch: Boolean(stored.show_scratch),
+      alertOnWaiting: Boolean(stored.alert_on_waiting),
       x: stored.x,
       y: stored.y
     }
@@ -471,8 +583,8 @@ async function boot() {
   try {
     await renderer.load(config.pet, await loadPetPayload(config.pet))
   } catch {
-    config.pet = 'ember'
-    await renderer.load('ember', null)
+    config.pet = 'pip'
+    await renderer.load('pip', null)
   }
   renderer.setScale(config.scale)
   renderer.start()
@@ -498,13 +610,14 @@ async function boot() {
     }
     const live = new Set(incoming.map((s) => s.session_id))
     seenSessions = new Set([...seenSessions].filter((id) => live.has(id)))
-    sessions = notice ? [sessions[0], ...incoming] : incoming
+    const kept = notice ? sessions.filter((s) => s.session_id === 'notice') : []
+    sessions = [...kept, ...incoming]
     render()
   })
 
   await listen('pipsqueak://notice', (event) => showNotice(String(event.payload)))
 
-  // Ages tick and the dwell timer expires even when no event arrives.
+  // Ages and elapsed timers tick even when no event arrives.
   setInterval(render, 1000)
 }
 
@@ -517,43 +630,49 @@ async function loadPetPayload(id) {
 /** Cycles states in a browser tab so the UI can be designed without a build. */
 function startBrowserDemo() {
   const scripts = {
-    pipsqueak: [
-      ['thinking', 'Fix the flaky timezone test', 'Thinking…'],
-      ['running', 'Fix the flaky timezone test', 'Reading clock.test.js'],
-      ['running', 'Fix the flaky timezone test', 'Running: npm test -- --run'],
-      ['waiting', 'Fix the flaky timezone test', 'Needs permission to run: rm -rf build'],
-      ['failed', 'Fix the flaky timezone test', 'Bash failed'],
-      ['done', 'Fixed: the formatter used local time.', '']
+    clockwork: [
+      ['thinking', 'Thinking', 'Fix the flaky timezone test'],
+      ['running', 'Reading', 'Fix the flaky timezone test'],
+      ['running', 'Editing', 'Fix the flaky timezone test'],
+      ['running', 'Running', 'Fix the flaky timezone test'],
+      ['waiting', 'Needs you', 'Fix the flaky timezone test'],
+      ['done', 'Done', 'Fixed: the formatter used local time.']
     ],
     orchestrator: [
-      ['running', 'Add tier C eval scenarios', 'Editing scenarios.json'],
-      ['running', 'Add tier C eval scenarios', 'Running: pytest -q'],
-      ['done', 'Added 12 scenarios and wired them into the suite.', '']
+      ['running', 'Editing', 'Add tier C eval scenarios'],
+      ['running', 'Running', 'Add tier C eval scenarios'],
+      ['failed', 'Failed', 'Add tier C eval scenarios'],
+      ['done', 'Done', 'Added 12 scenarios; suite passes in 41s.']
     ]
   }
   let tick = 0
+  const started = Date.now() - 143_000
   const advance = () => {
     const now = Date.now()
     sessions = Object.entries(scripts).map(([project, steps], i) => {
-      const [state, headline, activity] = steps[(tick + i) % steps.length]
+      const [state, kind, headline] = steps[(tick + i) % steps.length]
       return {
         session_id: project,
         project,
+        workspace: i === 1 ? 'feature-x' : '',
+        scratch: false,
         state,
+        kind,
         headline,
-        activity,
+        activity: `${kind} something`,
         detail: state === 'failed' ? 'expected 03:00 to be 02:00' : '',
         updated_ms: now,
-        started_ms: now - 60_000,
-        tools: tick,
-        recent: [{ ms: now, state, text: activity || headline }]
+        started_ms: started,
+        turn_started_ms: started,
+        turn_tools: 12 + tick * 3,
+        recent: [{ ms: now, state, text: `${kind} something` }]
       }
     })
     tick += 1
     render()
   }
   advance()
-  setInterval(advance, 2000)
+  setInterval(advance, 2600)
   setInterval(render, 1000)
 }
 

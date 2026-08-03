@@ -85,14 +85,29 @@ pub struct Session {
     pub headline: String,
     /// The live line: "Editing render.js", "Running: npm test".
     pub activity: String,
+    /// The *category* of the current work: Reading, Editing, Running… This
+    /// changes far less often than `activity`, which is the point.
+    pub kind: String,
     /// Longer text for the expanded panel (assistant summary, error body).
     pub detail: String,
-    /// Basename of cwd — which project this session belongs to.
+    /// Display name of the owning project — the git repository, not the folder
+    /// the session happens to be sitting in.
     pub project: String,
+    /// Set only when the session runs somewhere other than the project root
+    /// (a worktree, a subdirectory), for a secondary label.
+    pub workspace: String,
+    pub project_root: String,
+    /// True when the project root is a temp directory — throwaway sessions
+    /// from scripted runs, which should not compete with real work.
+    pub scratch: bool,
     pub cwd: String,
     pub event: String,
     pub updated_ms: u64,
     pub started_ms: u64,
+    /// Start of the current turn, for the "3m" on the status line.
+    pub turn_started_ms: u64,
+    /// Tool calls in the current turn.
+    pub turn_tools: u64,
     pub tools: u64,
     pub recent: Vec<Entry>,
 }
@@ -123,6 +138,11 @@ pub struct Config {
     pub scale: f64,
     pub click_through: bool,
     pub show_bubble: bool,
+    /// Sessions rooted in a temp directory — scripted runs, evals — are hidden
+    /// unless asked for. They are not projects and drown out real work.
+    pub show_scratch: bool,
+    /// Beep when a project starts waiting on you.
+    pub alert_on_waiting: bool,
     pub x: Option<i32>,
     pub y: Option<i32>,
 }
@@ -130,10 +150,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            pet: "ember".to_string(),
+            pet: "pip".to_string(),
             scale: 2.0,
             click_through: false,
             show_bubble: true,
+            show_scratch: false,
+            alert_on_waiting: false,
             x: None,
             y: None,
         }

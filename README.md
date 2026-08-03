@@ -34,27 +34,61 @@ sits stalled for ten minutes while you're in another window.
   live line has a floor on how often it may change, so nothing flashes past.
 - **An event log** — click a card for the last two dozen things that project
   did, with relative timestamps.
-- **Two pets built in**, and you can drop your own sprite folder in.
+- **Jump to the window** — **↗** on a card brings that Claude Code window
+  forward, so "this one needs you" is one click from being in front of you.
+- **Optional sound** when a project starts waiting, and a **start with Windows**
+  toggle. Both off by default.
+- **Three pets built in**, and you can drop your own sprite folder in.
 - **Codex pets work as-is.** Pipsqueak reads the same `pet.json` +
   spritesheet layout, including any pets already in `~/.codex/pets`.
 
 ### Why it stays readable
 
 An agent can fire five tools in three seconds. Showing each one is unreadable;
-showing none of it is useless. Pipsqueak splits the difference:
+showing none of it is useless. A card is three lines that move at three
+different speeds:
+
+```
+● CLOCKWORK                              3m  ↗  ×
+Fix the flaky timezone test
+Editing · 42 actions · 3m
+```
 
 | Line | Source | Changes |
 | --- | --- | --- |
-| Headline | your prompt, then Claude's answer at the end of the turn | once per turn |
-| Live line | the current tool call | at most every 2.5s |
+| Project | the git repository the session belongs to | never |
+| Headline | your prompt, then Claude's answer when the turn ends | once per turn |
+| Status | the *category* of work, plus counters | on category change |
 
-If several tool calls are skipped while the live line is held, the card shows a
-small `+3` so you know things are moving fast. Anything that needs you —
-a permission prompt, a failure — bypasses the delay entirely.
+Nothing on the card strobes. Several tools map to one status word on purpose —
+`Read`, `Glob` and `Grep` are all `Reading` — so the only thing moving during a
+burst is the counter. The exact call is in the tooltip, and the full log is one
+click away.
+
+### Which project a session belongs to
+
+Agents work in git worktrees and scripted runs work in temp directories with
+generated names, so `basename(cwd)` produces card titles like
+`design-quality__nocaveman__r3`. Pipsqueak resolves the **repository** instead,
+following `.git` worktree pointers back to the repo that owns them, and falls
+back to `CLAUDE_PROJECT_DIR` and then the working directory. A session running
+somewhere other than the repo root gets a small badge showing where.
+
+Sessions rooted in a temp directory are treated as scratch and hidden, since
+they are runs rather than projects. Turn them on in the menu.
+
+### What "needs you" means
+
+Only a permission prompt a human actually saw. `PermissionRequest` fires
+*before* anyone is asked and auto-mode answers most of them in milliseconds, so
+reacting to it makes a pet that cries wolf. Pipsqueak waits for
+`Notification`/`permission_prompt`, `idle_prompt` or `agent_needs_input`, and
+even then holds the state briefly to be sure it is real. Auto-mode declining a
+call is shown as ordinary progress, not a failure.
 
 ## States
 
-![Ember idle, working, waiting, failed, reviewing, and mid-hop](assets/states-ember.png)
+![Pip idle, working, waiting, failed, reviewing, and mid-hop](assets/states-pip.png)
 
 A single project, blocked and then broken:
 
@@ -130,15 +164,23 @@ to stdout — nothing Pipsqueak does can alter what Claude Code decides.
 
 ## Pets
 
-Two ship with the app, switchable from the right-click menu:
+Three ship with the app, switchable from the right-click menu.
 
-| | | |
-| --- | --- | --- |
-| **Ember** (default) | a clay pebble with a spark for a status light | ![Ember](assets/states-ember.png) |
-| **Pip** | an ember-fox with a floating wisp | ![Pip](assets/states-pip.png) |
+**Pip** — an ember-fox with a floating status wisp. The default.
 
-Neither uses anyone's logo or branding. If you want a mascot that does, that is
-your call to make on your own machine — see below.
+![Pip](assets/states-pip.png)
+
+**Byte** — a CRT-headed bot whose screen shows the state as a face, so the pet
+is readable on its own without looking at the card.
+
+![Byte](assets/states-byte.png)
+
+**Ember** — a clay pebble with a spark for a status light.
+
+![Ember](assets/states-ember.png)
+
+None of them uses anyone's logo or branding. If you want a mascot that does,
+that is your call to make on your own machine — see below.
 
 ### Custom pets
 
@@ -198,10 +240,12 @@ right-click menu:
 
 | Key | Meaning |
 | --- | --- |
-| `pet` | id of the active pet (`ember` by default) |
+| `pet` | id of the active pet (`pip`, `byte`, `ember`, or your own) |
 | `scale` | `1.5`, `2`, or `3` |
 | `click_through` | make the pet itself non-interactive too |
-| `show_bubble` | hide the status bubble, keep the pet |
+| `show_bubble` | hide the status cards, keep the pet |
+| `show_scratch` | include sessions rooted in a temp directory |
+| `alert_on_waiting` | play a sound when a project starts waiting on you |
 | `x` / `y` | window position, saved when you drag the pet |
 
 ## CLI

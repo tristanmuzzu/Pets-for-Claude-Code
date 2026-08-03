@@ -5,6 +5,7 @@
 //! cheap, silent, and incapable of failing loudly — anything printed to stdout
 //! would be parsed by Claude Code as hook output.
 
+use crate::project;
 use crate::state::{
     now_ms, prune_stale, sanitize, sessions_dir, write_atomic, Session,
 };
@@ -50,16 +51,28 @@ pub fn run(fallback_event: Option<String>) {
         session.started_ms = now_ms();
     }
     if let Some(cwd) = payload.get("cwd").and_then(Value::as_str) {
-        if !cwd.is_empty() {
+        // Resolving walks the filesystem, so only redo it when the session
+        // actually moves.
+        if !cwd.is_empty() && cwd != session.cwd {
+            let resolved = project::resolve(cwd);
             session.cwd = cwd.to_string();
-            session.project = basename(cwd);
+            session.project = resolved.name;
+            session.workspace = resolved.workspace;
+            session.project_root = resolved.root.to_string_lossy().to_string();
+            session.scratch = resolved.scratch;
         }
     }
     if event == "PreToolUse" {
         session.tools += 1;
+        session.turn_tools += 1;
+    }
+    if event == "UserPromptSubmit" {
+        session.turn_started_ms = now_ms();
+        session.turn_tools = 0;
     }
     session.session_id = session_id;
     session.state = update.state.to_string();
+    session.kind = update.kind;
     session.activity = update.activity.clone();
     session.detail = update.detail;
     if let Some(headline) = update.headline {
@@ -80,14 +93,17 @@ pub fn run(fallback_event: Option<String>) {
 /// disturb what the card says the turn is about.
 struct Update {
     state: &'static str,
+    /// The word on the status line. Deliberately coarse.
+    kind: String,
     activity: String,
     detail: String,
     headline: Option<String>,
 }
 
-fn live(state: &'static str, activity: String) -> Update {
+fn live(state: &'static str, kind: &str, activity: String) -> Update {
     Update {
         state,
+        kind: kind.to_string(),
         activity,
         detail: String::new(),
         headline: None,
@@ -109,6 +125,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
     Some(match event {
         "SessionStart" => Update {
             state: "idle",
+            kind: "Idle".into(),
             activity: String::new(),
             detail: String::new(),
             headline: Some("Session started".into()),
@@ -117,40 +134,49 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             let prompt = text("prompt");
             Update {
                 state: "thinking",
+                kind: "Thinking".into(),
                 activity: "Thinking…".into(),
                 detail: truncate(&prompt, 400),
-                headline: Some(truncate(&first_line(&prompt), 110)),
+                headline: Some(truncate(&first_line(&prompt), 90)),
             }
         }
-        "PreToolUse" => live("running", phrase(&tool, input).present),
-        "PostToolUse" => live("running", phrase(&tool, input).past),
+        "PreToolUse" => live("running", &kind_of(&tool), phrase(&tool, input).present),
+        "PostToolUse" => live("running", &kind_of(&tool), phrase(&tool, input).past),
         "PostToolUseFailure" => Update {
             state: "failed",
+            kind: "Failed".into(),
             activity: format!("{} failed", pretty_tool(&tool)),
             detail: truncate(&first_line(&text("error")), 400),
             headline: None,
         },
-        "PermissionRequest" => live(
-            "waiting",
-            format!("Needs permission to {}", phrase(&tool, input).infinitive),
-        ),
+        // PermissionRequest fires *before* anyone is asked — auto-mode and
+        // permission hooks resolve most of them in milliseconds. Treating it as
+        // "blocked on you" made the pet cry wolf constantly. The event that
+        // means a human was actually asked is Notification/permission_prompt.
+        "PermissionRequest" => return None,
+        // Auto-mode declining a call is routine policy, not a failure.
         "PermissionDenied" => live(
-            "failed",
-            format!("Not allowed to {}", phrase(&tool, input).infinitive),
+            "running",
+            &kind_of(&tool),
+            format!("Auto-mode declined: {}", phrase(&tool, input).infinitive),
         ),
         "Notification" => {
-            let kind = text("notification_type");
+            let notification = text("notification_type");
             let message = truncate(&text("message"), 200);
-            match kind.as_str() {
+            match notification.as_str() {
                 "permission_prompt" => live(
                     "waiting",
+                    "Needs you",
                     if message.is_empty() {
-                        "Needs your permission".into()
+                        "Waiting for permission".into()
                     } else {
                         message
                     },
                 ),
-                "idle_prompt" => live("waiting", "Waiting for you".into()),
+                "idle_prompt" => live("waiting", "Needs you", "Waiting for your reply".into()),
+                "agent_needs_input" => {
+                    live("waiting", "Needs you", "A teammate needs input".into())
+                }
                 _ => return None,
             }
         }
@@ -159,6 +185,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             let summary = first_line(&message);
             Update {
                 state: "done",
+                kind: "Done".into(),
                 // The turn is over: the live line would only show a stale tool.
                 activity: String::new(),
                 detail: truncate(&message, 600),
@@ -170,27 +197,51 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             }
         }
         "StopFailure" => {
-            let kind = text("error_type");
+            let error_kind = text("error_type");
             Update {
                 state: "failed",
+                kind: "Failed".into(),
                 activity: String::new(),
                 detail: truncate(&first_line(&text("error")), 400),
-                headline: Some(if kind.is_empty() {
+                headline: Some(if error_kind.is_empty() {
                     "Turn failed".into()
                 } else {
-                    format!("Turn failed: {}", kind.replace('_', " "))
+                    format!("Turn failed: {}", error_kind.replace('_', " "))
                 }),
             }
         }
         "SubagentStart" => live(
             "running",
+            "Delegating",
             format!("Subagent: {}", short(&text("agent_type"), "agent")),
         ),
-        "SubagentStop" => live("running", "Subagent finished".into()),
-        "PreCompact" => live("compacting", "Compacting context".into()),
-        "PostCompact" => live("thinking", "Context compacted".into()),
+        "SubagentStop" => live("running", "Delegating", "Subagent finished".into()),
+        "PreCompact" => live("compacting", "Compacting", "Compacting context".into()),
+        "PostCompact" => live("thinking", "Thinking", "Context compacted".into()),
         _ => return None,
     })
+}
+
+/// The coarse category behind the status line. Several different tools map to
+/// one word on purpose: the word should survive a whole stretch of work so the
+/// only thing moving is the counter next to it.
+fn kind_of(tool: &str) -> String {
+    if let Some(rest) = tool.strip_prefix("mcp__") {
+        let server = rest.split("__").next().unwrap_or("MCP");
+        return format!("Calling {server}");
+    }
+    match tool {
+        "Read" | "Glob" | "Grep" | "NotebookRead" => "Reading",
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "Editing",
+        "Bash" | "PowerShell" => "Running",
+        "WebFetch" | "WebSearch" => "Browsing",
+        "Task" | "Agent" => "Delegating",
+        "Skill" => "Running a skill",
+        "TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskGet" => "Planning",
+        "" => "Working",
+        _ => "Working",
+    }
+    .to_string()
 }
 
 /// One tool call, in the three tenses the bubble needs: "Editing clock.js",
@@ -388,15 +439,49 @@ mod tests {
         );
     }
 
+    /// PermissionRequest fires before anyone is asked, and auto-mode resolves
+    /// most of them instantly. Reacting to it made the pet claim to be blocked
+    /// on turns that were never interrupted.
     #[test]
-    fn permission_requests_ask_for_attention() {
+    fn permission_requests_alone_do_not_mean_blocked() {
         let payload = json!({
             "tool_name": "Bash",
             "tool_input": { "command": "rm -rf build" }
         });
-        let update = classify("PermissionRequest", &payload).unwrap();
+        assert!(classify("PermissionRequest", &payload).is_none());
+    }
+
+    #[test]
+    fn only_a_real_prompt_means_blocked() {
+        let update = classify(
+            "Notification",
+            &json!({ "notification_type": "permission_prompt", "message": "Allow Bash?" }),
+        )
+        .unwrap();
         assert_eq!(update.state, "waiting");
-        assert_eq!(update.activity, "Needs permission to run: rm -rf build");
+        assert_eq!(update.kind, "Needs you");
+    }
+
+    #[test]
+    fn auto_mode_declining_a_call_is_not_a_failure() {
+        let update = classify(
+            "PermissionDenied",
+            &json!({ "tool_name": "Bash", "tool_input": { "command": "curl example.com" } }),
+        )
+        .unwrap();
+        assert_eq!(update.state, "running");
+        assert!(update.activity.starts_with("Auto-mode declined"));
+    }
+
+    #[test]
+    fn related_tools_share_one_status_word() {
+        for tool in ["Read", "Glob", "Grep"] {
+            assert_eq!(kind_of(tool), "Reading");
+        }
+        for tool in ["Edit", "Write", "NotebookEdit"] {
+            assert_eq!(kind_of(tool), "Editing");
+        }
+        assert_eq!(kind_of("mcp__github__create_issue"), "Calling github");
     }
 
     #[test]
@@ -418,7 +503,7 @@ mod tests {
             "tool_name": "Read",
             "tool_input": { "file_path": "/code/clock.js" }
         });
-        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"] {
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
             let update = classify(event, &payload).unwrap();
             assert!(
                 update.headline.is_none(),
