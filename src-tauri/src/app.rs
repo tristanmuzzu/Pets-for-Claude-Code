@@ -385,14 +385,17 @@ fn place_window(app: &AppHandle, config: &Config) {
         return;
     };
     if let (Some(x), Some(y)) = (config.x, config.y) {
-        if visible_somewhere(&window, x, y) {
-            let _ = window.set_position(PhysicalPosition::new(x, y));
-            return;
+        let (x, y) = clamp_to_display(&window, x, y);
+        let _ = window.set_position(PhysicalPosition::new(x, y));
+        if (x, y) != (config.x.unwrap_or(x), config.y.unwrap_or(y)) {
+            // Remember the corrected position, or every launch pays the same
+            // correction and a drag near the edge keeps snapping back.
+            let mut stored = config.clone();
+            stored.x = Some(x);
+            stored.y = Some(y);
+            let _ = state::save_config(&stored);
         }
-        // The display it was parked on is gone: a laptop undocked, a monitor
-        // unplugged. Restoring the saved position would leave the overlay
-        // stranded in space with no way to drag it back, so fall through and
-        // re-place it.
+        return;
     }
     // Default: bottom-right, clear of the Windows taskbar. Persist it, or the
     // position stays null until the pet is dragged for the first time.
@@ -409,31 +412,65 @@ fn place_window(app: &AppHandle, config: &Config) {
     }
 }
 
-/// True when the window's midpoint falls inside some display.
+/// Pulls a position back until the whole window sits inside a display.
 ///
-/// The midpoint rather than the corner: a window whose top-left is just off the
-/// left edge of a screen is still perfectly usable, while one that only
-/// overlaps by a pixel is not.
-fn visible_somewhere(window: &tauri::WebviewWindow, x: i32, y: i32) -> bool {
+/// A midpoint check is not enough, which is how the pet ended up below the
+/// bottom of the screen: the window is 640 tall, the pet is drawn at the
+/// *bottom* of it, and a window whose middle is comfortably on screen can
+/// still have its bottom corner hanging off. The part that matters is the part
+/// you can see.
+///
+/// Clamping rather than re-placing also means a saved position that is merely
+/// slightly wrong, after a resolution change, a scaling change, or a window
+/// that grew between versions, gets nudged back instead of thrown away.
+fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32) {
     let Ok(monitors) = window.available_monitors() else {
-        // No way to tell. Trusting the saved position is the safer error: it
-        // is at worst where the user last put it.
-        return true;
+        return (x, y);
     };
     if monitors.is_empty() {
-        return true;
+        return (x, y);
     }
     let size = window.outer_size().unwrap_or_default();
-    let mid_x = x + size.width as i32 / 2;
-    let mid_y = y + size.height as i32 / 2;
-    monitors.iter().any(|monitor| {
-        let origin = monitor.position();
-        let area = monitor.size();
-        mid_x >= origin.x
-            && mid_y >= origin.y
-            && mid_x < origin.x + area.width as i32
-            && mid_y < origin.y + area.height as i32
-    })
+    let (w, h) = (size.width as i32, size.height as i32);
+    let mid_x = x + w / 2;
+    let mid_y = y + h / 2;
+
+    // The display the window is mostly on, or the nearest one if it is adrift.
+    let contains = |m: &tauri::Monitor| {
+        let o = m.position();
+        let s = m.size();
+        mid_x >= o.x
+            && mid_y >= o.y
+            && mid_x < o.x + s.width as i32
+            && mid_y < o.y + s.height as i32
+    };
+    let monitor = monitors
+        .iter()
+        .find(|m| contains(m))
+        .or_else(|| {
+            monitors.iter().min_by_key(|m| {
+                let o = m.position();
+                let s = m.size();
+                let cx = o.x + s.width as i32 / 2;
+                let cy = o.y + s.height as i32 / 2;
+                (mid_x - cx).pow(2) + (mid_y - cy).pow(2)
+            })
+        })
+        .unwrap_or(&monitors[0]);
+
+    // Work area rather than the whole screen, so the pet does not end up
+    // behind the taskbar.
+    let area = monitor.work_area();
+    let left = area.position.x;
+    let top = area.position.y;
+    let right = left + area.size.width as i32 - w;
+    let bottom = top + area.size.height as i32 - h;
+    // A window taller than the work area has no valid position; pin it to the
+    // top-left of that display rather than inverting the range.
+    (
+        x.clamp(left, right.max(left)),
+        y.clamp(top, bottom.max(top)),
+    )
 }
 
 /// Rescues the overlay when the display it was on disappears while running.
@@ -444,13 +481,15 @@ fn ensure_on_screen(app: &AppHandle) {
     let Ok(position) = window.outer_position() else {
         return;
     };
-    if visible_somewhere(&window, position.x, position.y) {
+    let (x, y) = clamp_to_display(&window, position.x, position.y);
+    if (x, y) == (position.x, position.y) {
         return;
     }
+    let _ = window.set_position(PhysicalPosition::new(x, y));
     let mut config = load_config();
-    config.x = None;
-    config.y = None;
-    place_window(app, &config);
+    config.x = Some(x);
+    config.y = Some(y);
+    let _ = state::save_config(&config);
 }
 
 /// Keeps the window click-through except over the pet and its cards.

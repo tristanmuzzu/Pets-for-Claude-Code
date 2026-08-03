@@ -86,6 +86,10 @@ export function displayState(session, now = Date.now()) {
   if (blockedOn(session, now)) return 'waiting'
   if (session.waiting_since || session.pending_since) return ''
 
+  // Gave up waiting on it. Not a failure and not a completion: the turn just
+  // stopped producing events.
+  if (session.stalled) return 'idle'
+
   const outcome = session.outcome || ''
   if (outcome === 'done') {
     // Claude Code sends Stop while background work is still finishing. Until

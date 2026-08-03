@@ -150,6 +150,9 @@ pub fn run(fallback_event: Option<String>) {
         .saturating_add_signed(update.subagents)
         .min(64);
 
+    // Any event at all is proof of life, so whatever the sweep concluded is
+    // no longer true.
+    session.stalled = false;
     session.session_id = session_id;
     if !update.silent {
         session.kind = update.kind;

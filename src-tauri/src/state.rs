@@ -179,6 +179,14 @@ pub struct Session {
     pub hiccups: u64,
     /// Subagents started but not yet finished.
     pub subagents: u64,
+    /// The sweep gave up on this session: running, but silent for longer than
+    /// any real turn goes without firing a hook.
+    ///
+    /// A flag rather than a message written into the headline. The headline
+    /// only changes at turn boundaries, so a sentence dropped into it by the
+    /// sweep outlives the situation it describes and sits there contradicting
+    /// the status line once work resumes.
+    pub stalled: bool,
 
     /// The agent process that owns this session, as `(pid, creation time)`.
     /// The creation time is what makes it safe: pids get reused, and a reused
@@ -310,14 +318,9 @@ impl Default for Config {
 /// The shape this build understands. Bumped when a field changes meaning,
 /// not when one is merely added, which `serde(default)` already handles.
 ///
-/// 2: the window grew to fit the setup panel. The saved position is the
-///    window's top-left, but the pet sits at the *bottom* of it, so a taller
-///    window with the same origin would have pushed the pet down behind the
-///    taskbar.
+/// 2: the window grew to fit the setup panel, which moved the pet (drawn at
+///    the bottom of it) down by the difference.
 pub const CONFIG_VERSION: u32 = 2;
-
-/// How much taller the window became in version 2.
-const V2_WINDOW_GROWTH: i32 = 200;
 
 /// Reads the config, surviving anything that might have happened to the file.
 ///
@@ -354,11 +357,17 @@ pub fn load_config() -> Config {
 /// having the newest step applied to the oldest shape.
 fn migrate(config: &mut Config) {
     if config.version < 2 {
-        // The pet is drawn at the bottom of the window, so a window that grew
-        // downward from the same saved origin would take the pet with it.
-        if let Some(y) = config.y {
-            config.y = Some(y - V2_WINDOW_GROWTH);
-        }
+        // Version 2 grew the window, which pushed the pet below the bottom of
+        // the screen for anyone with a saved position. Correcting the
+        // coordinate here was the obvious fix and the wrong one: the saved
+        // value is in physical pixels and the window's size is declared in
+        // logical ones, so on a scaled display the correction was short by the
+        // scale factor and the pet stayed off screen.
+        //
+        // `app::clamp_to_display` handles it instead, and handles every other
+        // way a saved position can stop fitting: a resolution change, a
+        // scaling change, a taskbar that moved. Nothing to do here but record
+        // that we looked.
         config.version = 2;
     }
 }
@@ -550,8 +559,9 @@ pub fn sweep() -> usize {
             session.activity.clear();
             session.subagents = 0;
             // Not a completion. Saying "Done" here would be the same lie in a
-            // friendlier voice.
-            session.headline = "Stopped responding".to_string();
+            // friendlier voice. The headline is left alone: it still describes
+            // what the turn was about, which is true whatever happened next.
+            session.stalled = true;
             if let Ok(bytes) = serde_json::to_vec(&session) {
                 let _ = write_atomic(&path, &bytes);
                 changed += 1;
@@ -565,32 +575,21 @@ pub fn sweep() -> usize {
 mod tests {
     use super::*;
 
+    /// Migration leaves the saved position alone on purpose. Correcting it
+    /// here needs the display scale, which this layer does not have, and
+    /// getting it wrong is what put the pet below the bottom of the screen.
+    /// Placement clamps it to the work area instead.
     #[test]
-    fn a_taller_window_keeps_the_pet_where_it_was() {
+    fn migration_does_not_touch_the_saved_position() {
         let mut config = Config {
             version: 1,
-            y: Some(900),
+            x: Some(1326),
+            y: Some(649),
             ..Config::default()
         };
         migrate(&mut config);
-        assert_eq!(config.version, 2);
-        assert_eq!(
-            config.y,
-            Some(700),
-            "the pet is bottom-anchored, so the origin moves up"
-        );
-    }
-
-    #[test]
-    fn migration_runs_once() {
-        let mut config = Config {
-            version: 1,
-            y: Some(900),
-            ..Config::default()
-        };
-        migrate(&mut config);
-        migrate(&mut config);
-        assert_eq!(config.y, Some(700));
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!((config.x, config.y), (Some(1326), Some(649)));
     }
 
     #[test]

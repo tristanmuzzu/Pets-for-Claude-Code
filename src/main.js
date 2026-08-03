@@ -250,6 +250,7 @@ function paintCard(node, group) {
 }
 
 function kindLabel(state, session) {
+  if (session.stalled) return 'Stopped responding'
   if (state === 'waiting') return 'Needs you'
   if (state === 'failed') return 'Failed'
   if (state === 'done') return 'Done'

@@ -70,6 +70,14 @@ test('a failed turn stays visible far longer than a successful one', () => {
   assert.equal(displayState(session, NOW + DONE_LINGER_MS + 1), 'failed')
 })
 
+test('a session the sweep gave up on reads as idle, not finished', () => {
+  // The sweep sets this when a running session has produced no event for
+  // longer than any real turn goes quiet. It is neither a completion nor a
+  // failure, and it must not outrank either.
+  const session = quiet({ state: 'running', stalled: true })
+  assert.equal(displayState(session, NOW), 'idle')
+})
+
 test('the busiest session speaks for a project', () => {
   const blocked = quiet({ pending_since: NOW })
   const working = quiet({ state: 'running' })
