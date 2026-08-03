@@ -151,6 +151,19 @@ pub struct Session {
     /// any forward progress.
     pub waiting_since: u64,
     pub waiting_reason: String,
+
+    /// A permission prompt Claude Code raised and has not resolved.
+    ///
+    /// Recorded rather than believed. Auto-mode and permission hooks settle
+    /// most of these in a couple of hundred milliseconds without anyone being
+    /// asked, so this only becomes a visible "needs you" once it outlives the
+    /// debounce in the frontend.
+    pub pending_tool: String,
+    pub pending_detail: String,
+    pub pending_since: u64,
+    /// Why the pending command looks irreversible. A hint for the card only —
+    /// nothing here approves, denies, or blocks anything.
+    pub pending_risk: String,
     /// Tool failures inside the current turn. A failed grep is not a failed
     /// turn — Claude usually just tries something else — so this is a marker,
     /// not a state.
@@ -199,6 +212,13 @@ impl Session {
         self.waiting_since = 0;
         self.waiting_reason.clear();
     }
+
+    pub fn clear_permission(&mut self) {
+        self.pending_tool.clear();
+        self.pending_detail.clear();
+        self.pending_risk.clear();
+        self.pending_since = 0;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -213,6 +233,11 @@ pub struct Config {
     pub show_scratch: bool,
     /// Beep when a project starts waiting on you.
     pub alert_on_waiting: bool,
+    /// Blink the tray icon when a project finishes. The only channel that
+    /// reaches you when the overlay is behind a fullscreen window.
+    pub flash_on_finish: bool,
+    /// Do not disturb: no sound, no tray flash. The pet still updates.
+    pub quiet: bool,
     pub x: Option<i32>,
     pub y: Option<i32>,
 }
@@ -226,6 +251,8 @@ impl Default for Config {
             show_bubble: true,
             show_scratch: false,
             alert_on_waiting: false,
+            flash_on_finish: true,
+            quiet: false,
             x: None,
             y: None,
         }

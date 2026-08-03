@@ -103,6 +103,24 @@ pub fn run(fallback_event: Option<String>) {
     if PROGRESS_EVENTS.contains(&event.as_str()) {
         session.clear_pending();
     }
+    // Anything other than the prompt itself means the prompt is over — except
+    // a `PreToolUse` for the very tool being asked about. Claude Code has not
+    // committed to an order between those two, and clearing on the wrong one
+    // would either strand the prompt or hide it instantly.
+    if !session.pending_tool.is_empty()
+        && event != "PermissionRequest"
+        && event != "Notification"
+        && !(event == "PreToolUse"
+            && payload.get("tool_name").and_then(Value::as_str) == Some(&session.pending_tool))
+    {
+        session.clear_permission();
+    }
+    if !update.permission.is_empty() && session.pending_tool != update.permission {
+        session.pending_tool = update.permission.clone();
+        session.pending_detail = update.permission_detail.clone();
+        session.pending_risk = update.permission_risk.to_string();
+        session.pending_since = now;
+    }
     if !update.state.is_empty() {
         session.state = update.state.to_string();
     }
@@ -129,16 +147,18 @@ pub fn run(fallback_event: Option<String>) {
         .min(64);
 
     session.session_id = session_id;
-    session.kind = update.kind;
-    session.activity = update.activity.clone();
-    session.detail = update.detail;
-    if let Some(headline) = update.headline {
-        session.headline = headline;
+    if !update.silent {
+        session.kind = update.kind;
+        session.activity = update.activity.clone();
+        session.detail = update.detail;
+        if let Some(headline) = update.headline {
+            session.headline = headline;
+        }
     }
     session.event = event;
     session.event_ms = now;
     session.updated_ms = now;
-    if !update.activity.is_empty() {
+    if !update.silent && !update.activity.is_empty() {
         let tag = if !update.outcome.is_empty() {
             update.outcome
         } else if !update.waiting.is_empty() {
@@ -185,6 +205,23 @@ struct Update {
     subagents: i64,
     /// A tool failed mid-turn. Not a failed turn.
     hiccup: bool,
+    /// A permission prompt was raised for this tool. Empty means "no change".
+    permission: String,
+    permission_detail: String,
+    permission_risk: &'static str,
+    /// Record the event, but leave everything the card displays alone.
+    silent: bool,
+}
+
+/// The command a Bash-shaped tool call would run, if it is one.
+fn bash_command(tool: &str, input: Option<&Value>) -> Option<String> {
+    if tool != "Bash" && tool != "PowerShell" {
+        return None;
+    }
+    input
+        .and_then(|v| v.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn live(state: &'static str, kind: &str, activity: String) -> Update {
@@ -251,10 +288,30 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             ..Default::default()
         },
         // PermissionRequest fires *before* anyone is asked — auto-mode and
-        // permission hooks resolve most of them in milliseconds. Treating it as
-        // "blocked on you" made the pet cry wolf constantly. The event that
-        // means a human was actually asked is Notification/permission_prompt.
-        "PermissionRequest" => return None,
+        // permission hooks resolve most of them in milliseconds, so believing
+        // it outright made the pet cry wolf constantly. Recording it costs
+        // nothing: the frontend only surfaces a prompt that outlives the
+        // debounce, by which point a human really is being asked.
+        //
+        // Note what this hook does *not* do. It writes a file and exits 0 with
+        // empty stdout — it never prints a decision, so it cannot approve or
+        // deny a tool call, and Claude Code's own prompt appears exactly as it
+        // would if we were not installed at all.
+        "PermissionRequest" => Update {
+            // Nothing visible changes yet. The card keeps showing whatever the
+            // session was doing until the prompt outlives the debounce.
+            silent: true,
+            permission: if tool.is_empty() {
+                "a tool".into()
+            } else {
+                tool.clone()
+            },
+            permission_detail: phrase(&tool, input).infinitive,
+            permission_risk: bash_command(&tool, input)
+                .and_then(|command| crate::risk::irreversible(&command))
+                .unwrap_or_default(),
+            ..Default::default()
+        },
         // Auto-mode declining a call is routine policy, not a failure.
         "PermissionDenied" => live(
             "running",
@@ -624,14 +681,31 @@ mod tests {
 
     /// PermissionRequest fires before anyone is asked, and auto-mode resolves
     /// most of them instantly. Reacting to it made the pet claim to be blocked
-    /// on turns that were never interrupted.
+    /// on turns that were never interrupted — so it is recorded, and the card
+    /// only surfaces prompts that outlive the debounce.
     #[test]
     fn permission_requests_alone_do_not_mean_blocked() {
-        let payload = json!({
-            "tool_name": "Bash",
-            "tool_input": { "command": "rm -rf build" }
-        });
-        assert!(classify("PermissionRequest", &payload).is_none());
+        let update = classify(
+            "PermissionRequest",
+            &json!({ "tool_name": "Bash", "tool_input": { "command": "rm -rf build" } }),
+        )
+        .unwrap();
+        assert!(update.silent, "nothing on the card may change yet");
+        assert!(update.waiting.is_empty());
+        assert!(update.state.is_empty());
+        assert_eq!(update.permission, "Bash");
+        assert_eq!(update.permission_risk, "Deletes a directory tree");
+    }
+
+    #[test]
+    fn an_ordinary_prompt_carries_no_warning() {
+        let update = classify(
+            "PermissionRequest",
+            &json!({ "tool_name": "Bash", "tool_input": { "command": "npm test" } }),
+        )
+        .unwrap();
+        assert_eq!(update.permission, "Bash");
+        assert!(update.permission_risk.is_empty());
     }
 
     #[test]

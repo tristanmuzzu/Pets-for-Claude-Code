@@ -2,16 +2,28 @@
   --ink: #f6f1ea;
   --muted: #a9a19a;
   --faint: #7d7670;
-  /* Opaque-ish rather than blurred: backdrop-filter has nothing to sample in a
-     transparent window and WebView2 paints a black rectangle where it tries. */
-  --surface: rgba(20, 17, 23, 0.93);
-  --edge: rgba(255, 255, 255, 0.13);
+  /*
+   * Fully opaque. A translucent panel has to be legible against whatever is
+   * behind it, which on a desktop is anything at all — and the compromise was
+   * a card that looked washed out over a bright window and grey over a dark
+   * one. Blur is not an option either: backdrop-filter has nothing to sample
+   * in a transparent window and WebView2 paints a black rectangle where it
+   * tries.
+   */
+  --surface: #16131b;
+  --raised: #1d1a24;
+  /* The visible hairline. The panel gets a dark ring underneath it as well, so
+     the edge reads on a light desktop instead of dissolving into it. */
+  --edge: rgba(255, 255, 255, 0.10);
+  --ring: rgba(0, 0, 0, 0.5);
   --idle: #8894a4;
   --thinking: #f0b429;
   --running: #569cfa;
-  --waiting: #fa9234;
+  --waiting: #ff9838;
   --failed: #f45858;
-  --done: #4ad280;
+  /* Deliberately calmer than the states that want you to look. A finished
+     project is good news, not something to interrupt a video for. */
+  --done: #3fbf76;
   --compacting: #b26efa;
   --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
 }
@@ -74,11 +86,20 @@ body {
 
 .card {
   width: 100%;
-  padding: 8px 10px 9px;
+  padding: 9px 11px 10px;
   border: 1px solid var(--edge);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--surface);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4);
+  /*
+   * Three layers, outermost first: a dark ring so the panel has a defined
+   * edge against a light desktop, the drop shadow that lifts it off, and an
+   * inner top highlight so the surface reads as lit from above rather than as
+   * a flat rectangle.
+   */
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 10px 26px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
   animation: rise 160ms ease-out;
   /* Every row is always rendered, so a card never resizes under the cursor and
      the cards below never jump. */
@@ -115,12 +136,16 @@ body {
 }
 
 .card[data-state="waiting"] {
-  border-color: rgba(250, 146, 52, 0.6);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(250, 146, 52, 0.15);
+  border-color: rgba(255, 152, 56, 0.55);
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 3px rgba(255, 152, 56, 0.16),
+    0 10px 26px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .card[data-state="failed"] {
-  border-color: rgba(244, 88, 88, 0.55);
+  border-color: rgba(244, 88, 88, 0.5);
 }
 
 .card-head {
@@ -128,6 +153,57 @@ body {
   align-items: center;
   gap: 6px;
   margin-bottom: 3px;
+}
+
+/* A long project name truncates; the age and the buttons never clip mid-glyph.
+   Squeeze order is a readability guarantee, not an accident of source order. */
+.card-head > .age,
+.card-head > .icon,
+.card-head > .unread {
+  flex: none;
+  min-width: min-content;
+}
+
+/*
+ * Something finished and nobody has looked yet. This is the mark that survives
+ * the card collapsing back to a chip — the whole point being that a completion
+ * during a full-screen video is still there when you come back.
+ */
+.unread {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--done);
+  box-shadow: 0 0 0 3px rgba(63, 191, 118, 0.16);
+  font-size: 0;
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+.card[data-state="failed"] .unread {
+  background: var(--failed);
+  box-shadow: 0 0 0 3px rgba(244, 88, 88, 0.16);
+}
+
+@keyframes breathe {
+  50% { opacity: 0.35; }
+}
+
+@keyframes unfold {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* Motion here is decoration on top of colour and text, never the only carrier
+   of meaning, so it is safe to switch all of it off. */
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .ask,
+  .unread,
+  .dot {
+    animation: none !important;
+  }
 }
 
 .dot {
@@ -259,6 +335,77 @@ body {
 .card[data-state="waiting"] .status .kind { color: var(--waiting); }
 .card[data-state="failed"] .status .kind { color: var(--failed); }
 .card[data-state="done"] .status .kind { color: var(--done); }
+
+/*
+ * What the session is blocked on. The only line on a card worth interrupting
+ * something else to read, so it gets its own row and its own background rather
+ * than competing with the status line.
+ */
+.ask {
+  /* The card gets taller when this appears. That is deliberate — the stack is
+     anchored at the bottom, so it grows away from the pet, and the movement is
+     itself the signal. Easing it in stops that reading as a layout glitch. */
+  animation: unfold 180ms ease-out;
+  margin: 7px 0 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 152, 56, 0.10);
+  border: 1px solid rgba(255, 152, 56, 0.22);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ask-what {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * A hint, and only a hint — nothing here approves or blocks anything. It marks
+ * the difference between a routine approval and one worth pausing the video
+ * for.
+ */
+.risk {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #ffc9a0;
+}
+
+.badges {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* Counts, not sentences: they say how much is going on without any text
+   changing as work proceeds. */
+.chip {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+  font-family: system-ui, sans-serif;
+}
+
+.chip.subagents {
+  color: #cbb4ff;
+  background: rgba(178, 110, 250, 0.16);
+}
+
+.chip.hiccups {
+  color: #ffb4b4;
+  background: rgba(244, 88, 88, 0.15);
+}
 
 .detail {
   margin: 6px 0 0;

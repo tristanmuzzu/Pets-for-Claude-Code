@@ -1,12 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod attention;
 mod control;
 mod desktop;
 mod hook;
 mod install;
 mod process;
 mod project;
+mod risk;
 mod state;
 
 use std::fs;

@@ -1,6 +1,7 @@
 //! The overlay: a transparent, always-on-top window that polls session state
 //! and animates the pet.
 
+use crate::attention::{self, Attention};
 use crate::desktop;
 use crate::install;
 use crate::state::{
@@ -226,7 +227,25 @@ fn focus_project(project: String, workspace: String) -> bool {
 
 #[tauri::command]
 fn alert() {
+    // Do Not Disturb has to be checked here rather than in the frontend: the
+    // frontend's copy of the config can be a moment stale, and a beep that
+    // escapes a quiet mode is the one failure nobody forgives.
+    if load_config().quiet {
+        return;
+    }
     desktop::alert();
+}
+
+/// Blink the tray icon: a project finished while you were looking elsewhere.
+#[tauri::command]
+fn flash_tray(app: AppHandle) {
+    attention::flash(&app);
+}
+
+/// You have seen it. Stop blinking.
+#[tauri::command]
+fn clear_attention(app: AppHandle) {
+    attention::clear(&app);
 }
 
 #[tauri::command]
@@ -468,6 +487,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         config.click_through,
         None::<&str>,
     )?;
+    let quiet = CheckMenuItem::with_id(
+        app,
+        "quiet",
+        "Do not disturb",
+        true,
+        config.quiet,
+        None::<&str>,
+    )?;
     let pets = MenuItem::with_id(app, "pets", "Open pets folder", true, None::<&str>)?;
     let hooks = MenuItem::with_id(app, "hooks", "Reinstall Claude Code hooks", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Pipsqueak", true, None::<&str>)?;
@@ -476,6 +503,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         &[
             &toggle,
             &click_through,
+            &quiet,
             &PredefinedMenuItem::separator(app)?,
             &pets,
             &hooks,
@@ -501,6 +529,15 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = window.set_ignore_cursor_events(config.click_through);
                 }
             }
+            "quiet" => {
+                let mut config = load_config();
+                config.quiet = !config.quiet;
+                let _ = state::save_config(&config);
+                if config.quiet {
+                    attention::clear(app);
+                }
+                let _ = app.emit("pipsqueak://config", ());
+            }
             "pets" => {
                 let _ = open_pets_dir();
             }
@@ -521,6 +558,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
+                // Clicking the tray is the user noticing it. Whatever the
+                // blink was for, they have seen it.
+                attention::clear(tray.app_handle());
                 toggle_window(tray.app_handle());
             }
         });
@@ -539,6 +579,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(Interactive::default())
+        .manage(Attention::default())
         .manage(ClickThrough::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
@@ -553,6 +594,8 @@ pub fn run() {
             open_pets_dir,
             focus_project,
             alert,
+            flash_tray,
+            clear_attention,
             autostart_enabled,
             set_autostart,
             quit

@@ -60,7 +60,9 @@ let config = {
   clickThrough: false,
   showBubble: true,
   showScratch: false,
-  alertOnWaiting: false
+  alertOnWaiting: false,
+  flashOnFinish: true,
+  quiet: false
 }
 let sessions = []
 let notice = null
@@ -87,6 +89,9 @@ function viewFor(key) {
       expanded: false,
       lastStable: 'running',
       wasUrgent: false,
+      // A finished turn nobody has acknowledged yet.
+      unread: false,
+      lastShown: '',
       // The state currently on screen, and the earliest it may be replaced.
       heldState: '',
       heldUntil: 0
@@ -125,11 +130,29 @@ function groupByProject(list) {
 
 /** Which of a project's sessions gets to speak for it. */
 function rank(session) {
-  if (session.waiting_since) return 4
+  if (session.waiting_since || session.pending_since) return 4
   if (session.outcome === 'failed') return 3
   if (RUNNING.has(session.state)) return 2
   if (session.outcome === 'done') return 1
   return 0
+}
+
+/**
+ * What the session is blocked on, once it has been blocked long enough to be
+ * worth saying. Empty while the prompt is still inside the debounce.
+ */
+function blockedOn(session) {
+  const now = Date.now()
+  if (session.waiting_since && now - session.waiting_since >= WAITING_DEBOUNCE_MS) {
+    return session.waiting_reason || 'Waiting for you'
+  }
+  // A permission prompt Claude Code raised and nothing has resolved. Most are
+  // answered by auto-mode within a few hundred milliseconds and never reach
+  // a human, which is exactly what the debounce is filtering out.
+  if (session.pending_since && now - session.pending_since >= WAITING_DEBOUNCE_MS) {
+    return session.pending_detail || `Permission for ${session.pending_tool}`
+  }
+  return ''
 }
 
 /**
@@ -142,12 +165,10 @@ function rank(session) {
 function displayState(session) {
   const now = Date.now()
 
-  if (session.waiting_since) {
-    // Held back briefly: auto-mode answers most permission prompts in a couple
-    // of hundred milliseconds, and a card that flashes "Needs you" for one
-    // frame teaches you to distrust it.
-    return now - session.waiting_since >= WAITING_DEBOUNCE_MS ? 'waiting' : ''
-  }
+  if (blockedOn(session)) return 'waiting'
+  // Inside the debounce, hold whatever was on screen rather than committing to
+  // a "needs you" that auto-mode is about to answer.
+  if (session.waiting_since || session.pending_since) return ''
 
   const outcome = session.outcome || ''
   if (outcome === 'done') {
@@ -169,8 +190,19 @@ function effectiveState(key, session) {
   const raw = displayState(session) || view.lastStable
   view.lastStable = RUNNING.has(raw) || raw === 'idle' ? raw : view.lastStable
 
-  // A state that has not been up long enough only gives way to something more
-  // urgent than itself.
+  // The hold exists to stop the colour flickering between two states that are
+  // really the same moment. It must not survive the card's *text* changing:
+  // holding "failed" over a headline that already says the turn succeeded is a
+  // worse lie than the flicker it was preventing.
+  const subject = session.headline || ''
+  if (view.heldSubject !== subject) {
+    view.heldSubject = subject
+    view.heldState = ''
+    view.heldUntil = 0
+  }
+
+  // Otherwise a state that has not been up long enough only gives way to
+  // something more urgent than itself.
   if (view.heldState && now < view.heldUntil && priority(raw) <= priority(view.heldState)) {
     return view.heldState
   }
@@ -217,6 +249,9 @@ function buildCard(key) {
   node.addEventListener('click', () => {
     const view = viewFor(key)
     view.expanded = !view.expanded
+    // Clicking a card is the one unambiguous signal that you have seen it.
+    view.unread = false
+    invoke('clear_attention').catch(() => {})
     render()
   })
   return node
@@ -237,8 +272,35 @@ function paintCard(node, group) {
   countNode.hidden = count < 2
   countNode.textContent = `${count}×`
 
+  const view = viewFor(key)
+  node.querySelector('.unread').hidden = !view.unread
+
   node.querySelector('.headline').textContent =
     session.headline || session.activity || 'Working…'
+
+  // What it is blocked on, in its own row. This is the only text on the card
+  // that is worth interrupting something else to read.
+  const ask = node.querySelector('.ask')
+  const reason = state === 'waiting' ? blockedOn(session) : ''
+  const risk = node.querySelector('.risk')
+  ask.hidden = !reason
+  node.querySelector('.ask-what').textContent = reason
+  // Cleared rather than left behind: a stale warning that reappears with the
+  // next prompt would be attached to the wrong command.
+  risk.hidden = !reason || !session.pending_risk
+  risk.textContent = reason && session.pending_risk ? `⚠ ${session.pending_risk}` : ''
+
+  // Two counts that say how much is going on without any text changing:
+  // subagents running, and tools that failed and were worked around.
+  const subagents = session.subagents ?? 0
+  const subagentChip = node.querySelector('.subagents')
+  subagentChip.hidden = subagents < 1
+  subagentChip.textContent = `${subagents} sub`
+  const hiccups = session.hiccups ?? 0
+  const hiccupChip = node.querySelector('.hiccups')
+  hiccupChip.hidden = hiccups < 1
+  hiccupChip.textContent = `${hiccups} retried`
+  hiccupChip.title = `${hiccups} tool ${hiccups === 1 ? 'call' : 'calls'} failed and were worked around`
 
   // Status line: a coarse word plus counters. The detail that used to live here
   // moved to the expanded panel, where fast-changing text is fine.
@@ -258,7 +320,6 @@ function paintCard(node, group) {
   // The exact call is still one hover away, without occupying a row.
   node.title = session.activity || ''
 
-  const view = viewFor(key)
   const more = node.querySelector('.more')
   more.hidden = !view.expanded
   if (view.expanded) {
@@ -326,6 +387,19 @@ function render() {
       if (group.state === 'waiting' && config.alertOnWaiting) invoke('alert').catch(() => {})
     }
     view.wasUrgent = urgent
+
+    // Finishing while you were looking at something else is the thing this
+    // whole overlay exists to tell you about, and a 30s linger is no use if
+    // the 30s happened during a video. The mark outlives the card.
+    const settled = group.state === 'done' || group.state === 'failed'
+    const fresh = Date.now() - (group.session.outcome_ms || 0) < DONE_LINGER_MS
+    if (settled && view.lastShown !== group.state && fresh) {
+      view.unread = true
+      invoke('flash_tray').catch(() => {})
+    }
+    // Work restarting answers the question the mark was asking.
+    if (RUNNING.has(group.state)) view.unread = false
+    view.lastShown = group.state
   }
 
   const leader = byKey.get(slots[0])
@@ -521,6 +595,27 @@ async function openMenu() {
   )
   children.push(
     button(
+      'Blink the tray when a project finishes',
+      async () => {
+        config.flashOnFinish = !config.flashOnFinish
+        await saveConfig()
+      },
+      config.flashOnFinish
+    )
+  )
+  children.push(
+    button(
+      'Do not disturb',
+      async () => {
+        config.quiet = !config.quiet
+        if (config.quiet) invoke('clear_attention').catch(() => {})
+        await saveConfig()
+      },
+      config.quiet
+    )
+  )
+  children.push(
+    button(
       'Click through the pet',
       async () => {
         config.clickThrough = !config.clickThrough
@@ -578,6 +673,8 @@ async function saveConfig() {
       show_bubble: config.showBubble,
       show_scratch: config.showScratch,
       alert_on_waiting: config.alertOnWaiting,
+      flash_on_finish: config.flashOnFinish,
+      quiet: config.quiet,
       x: config.x ?? null,
       y: config.y ?? null
     }
@@ -609,6 +706,8 @@ function wireInteraction() {
       // there — so the pet itself is what dismisses it.
       if (!el.menu.hidden) el.menu.hidden = true
       else stackHidden = !stackHidden
+      // Looking at the pet is looking at the pet.
+      invoke('clear_attention').catch(() => {})
       render()
     }
     origin = null
@@ -644,6 +743,8 @@ async function boot() {
       showBubble: stored.show_bubble !== false,
       showScratch: Boolean(stored.show_scratch),
       alertOnWaiting: Boolean(stored.alert_on_waiting),
+      flashOnFinish: stored.flash_on_finish !== false,
+      quiet: Boolean(stored.quiet),
       x: stored.x,
       y: stored.y
     }
@@ -749,10 +850,16 @@ function startBrowserDemo() {
         outcome,
         outcome_ms: outcome ? now : 0,
         settles_ms: 0,
-        waiting_since: want === 'waiting' ? now - WAITING_DEBOUNCE_MS : 0,
-        waiting_reason: want === 'waiting' ? 'Waiting for permission' : '',
-        hiccups: 0,
-        subagents: 0,
+        waiting_since: 0,
+        waiting_reason: '',
+        // The demo's one blocked step is a risky command, so the ask row and
+        // its warning can be designed without a real session.
+        pending_since: want === 'waiting' ? now - WAITING_DEBOUNCE_MS : 0,
+        pending_tool: want === 'waiting' ? 'Bash' : '',
+        pending_detail: want === 'waiting' ? 'run: git push --force origin main' : '',
+        pending_risk: want === 'waiting' ? 'Force-pushes over remote history' : '',
+        hiccups: i === 1 ? 2 : 0,
+        subagents: want === 'running' && i === 0 ? 3 : 0,
         kind,
         headline,
         activity: `${kind} something`,
