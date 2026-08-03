@@ -19,7 +19,17 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
-const HIT_TEST_INTERVAL: Duration = Duration::from_millis(60);
+/// Hit-test rates, by how close the cursor is to something interactive. Only
+/// the first one has to be quick, and only while the cursor is right there —
+/// polling this fast all the time would keep a core busy for an overlay you
+/// are not even pointing at.
+const HIT_TEST_NEAR: Duration = Duration::from_millis(12);
+const HIT_TEST_APPROACHING: Duration = Duration::from_millis(50);
+const HIT_TEST_FAR: Duration = Duration::from_millis(220);
+/// Roughly a card's own height: far enough out that a fast flick is caught
+/// before it lands.
+const NEAR_PX: f64 = 90.0;
+const APPROACHING_PX: f64 = 320.0;
 /// Often enough that a crashed session disappears while you are still looking
 /// at the card, rare enough that it costs nothing.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
@@ -36,6 +46,13 @@ pub struct Rect {
 impl Rect {
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
+    }
+
+    /// Distance from the point to the nearest edge; zero inside.
+    fn distance_to(&self, x: f64, y: f64) -> f64 {
+        let dx = (self.x - x).max(0.0).max(x - (self.x + self.w));
+        let dy = (self.y - y).max(0.0).max(y - (self.y + self.h));
+        (dx * dx + dy * dy).sqrt()
     }
 }
 
@@ -334,15 +351,22 @@ fn place_window(app: &AppHandle, config: &Config) {
         return;
     };
     if let (Some(x), Some(y)) = (config.x, config.y) {
-        let _ = window.set_position(PhysicalPosition::new(x, y));
-        return;
+        if visible_somewhere(&window, x, y) {
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+            return;
+        }
+        // The display it was parked on is gone — a laptop undocked, a monitor
+        // unplugged. Restoring the saved position would leave the overlay
+        // stranded in space with no way to drag it back, so fall through and
+        // re-place it.
     }
     // Default: bottom-right, clear of the Windows taskbar. Persist it, or the
     // position stays null until the pet is dragged for the first time.
     if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.outer_size()) {
         let area = monitor.size();
-        let x = area.width.saturating_sub(size.width + 24) as i32;
-        let y = area.height.saturating_sub(size.height + 72) as i32;
+        let origin = monitor.position();
+        let x = origin.x + area.width.saturating_sub(size.width + 24) as i32;
+        let y = origin.y + area.height.saturating_sub(size.height + 72) as i32;
         let _ = window.set_position(PhysicalPosition::new(x, y));
         let mut stored = config.clone();
         stored.x = Some(x);
@@ -351,15 +375,71 @@ fn place_window(app: &AppHandle, config: &Config) {
     }
 }
 
-/// Keeps the window click-through except over the pet and its bubble.
+/// True when the window's midpoint falls inside some display.
+///
+/// The midpoint rather than the corner: a window whose top-left is just off the
+/// left edge of a screen is still perfectly usable, while one that only
+/// overlaps by a pixel is not.
+fn visible_somewhere(window: &tauri::WebviewWindow, x: i32, y: i32) -> bool {
+    let Ok(monitors) = window.available_monitors() else {
+        // No way to tell. Trusting the saved position is the safer error: it
+        // is at worst where the user last put it.
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+    let size = window.outer_size().unwrap_or_default();
+    let mid_x = x + size.width as i32 / 2;
+    let mid_y = y + size.height as i32 / 2;
+    monitors.iter().any(|monitor| {
+        let origin = monitor.position();
+        let area = monitor.size();
+        mid_x >= origin.x
+            && mid_y >= origin.y
+            && mid_x < origin.x + area.width as i32
+            && mid_y < origin.y + area.height as i32
+    })
+}
+
+/// Rescues the overlay when the display it was on disappears while running.
+fn ensure_on_screen(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    if visible_somewhere(&window, position.x, position.y) {
+        return;
+    }
+    let mut config = load_config();
+    config.x = None;
+    config.y = None;
+    place_window(app, &config);
+}
+
+/// Keeps the window click-through except over the pet and its cards.
 ///
 /// A transparent overlay otherwise swallows every click inside its rectangle,
 /// which would make the pet actively hostile to the thing it sits on top of.
+///
+/// This has to be a poll rather than ordinary pointer events, because a window
+/// that is ignoring the cursor receives no events to tell it the cursor has
+/// arrived. The cost of polling is the gap: a click landing inside it goes to
+/// the wrong window. So the rate follows the cursor — fast when it is near
+/// something interactive, idle when it is nowhere near the overlay.
+///
+/// (The alternative is a second, always-interactive window shaped to the hit
+/// area. That works for a single small sprite; here the interactive area is a
+/// stack of separate cards, and one window covering their union would swallow
+/// clicks in the gaps between them.)
 fn spawn_hit_test(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
+        let mut interval = HIT_TEST_FAR;
         loop {
-            std::thread::sleep(HIT_TEST_INTERVAL);
+            std::thread::sleep(interval);
             let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
                 continue;
             };
@@ -368,6 +448,7 @@ fn spawn_hit_test(app: AppHandle) {
                     let _ = window.set_ignore_cursor_events(true);
                     last = Some(true);
                 }
+                interval = HIT_TEST_FAR;
                 continue;
             }
             let (Ok(cursor), Ok(origin), Ok(scale)) = (
@@ -379,12 +460,28 @@ fn spawn_hit_test(app: AppHandle) {
             };
             let local_x = (cursor.x - origin.x as f64) / scale;
             let local_y = (cursor.y - origin.y as f64) / scale;
-            let over = app
+            let (over, distance) = app
                 .state::<Interactive>()
                 .0
                 .lock()
-                .map(|rects| rects.iter().any(|r| r.contains(local_x, local_y)))
-                .unwrap_or(false);
+                .map(|rects| {
+                    let over = rects.iter().any(|r| r.contains(local_x, local_y));
+                    let distance = rects
+                        .iter()
+                        .map(|r| r.distance_to(local_x, local_y))
+                        .fold(f64::INFINITY, f64::min);
+                    (over, distance)
+                })
+                .unwrap_or((false, f64::INFINITY));
+            // Approaching a card, or just left one: this is the window in which
+            // being wrong costs a misdirected click.
+            interval = if distance <= NEAR_PX {
+                HIT_TEST_NEAR
+            } else if distance <= APPROACHING_PX {
+                HIT_TEST_APPROACHING
+            } else {
+                HIT_TEST_FAR
+            };
             if last != Some(!over) {
                 let _ = window.set_ignore_cursor_events(!over);
                 last = Some(!over);
@@ -403,6 +500,9 @@ fn spawn_poller(app: AppHandle) {
             // can retire a session, so it has to run on a clock of its own.
             if Instant::now() >= next_sweep {
                 state::sweep();
+                // Same cadence, different job: catch an undock or an unplugged
+                // monitor that left the overlay somewhere you cannot reach it.
+                ensure_on_screen(&app);
                 next_sweep = Instant::now() + SWEEP_INTERVAL;
             }
             let sessions = read_sessions();

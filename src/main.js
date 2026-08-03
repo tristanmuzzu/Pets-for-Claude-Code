@@ -17,6 +17,8 @@ const WAITING_DEBOUNCE_MS = 800
 const DONE_LINGER_MS = 30_000
 /** A failed turn is something you need to see, so it waits around longer. */
 const FAILED_LINGER_MS = 5 * 60_000
+/** Quiet for this long and the pet visibly dozes off. */
+const SLEEP_AFTER_MS = 60_000
 const URGENT = new Set(['waiting', 'failed'])
 const ACTIVE = new Set(['thinking', 'running', 'waiting', 'failed', 'compacting', 'done'])
 /** The durable states a session file can report. */
@@ -65,6 +67,8 @@ let config = {
   quiet: false
 }
 let sessions = []
+/** When any project was last doing something, for the doze. */
+let lastLiveAt = Date.now()
 let notice = null
 let noticeTimer = null
 let stackHidden = false
@@ -404,6 +408,14 @@ function render() {
 
   const leader = byKey.get(slots[0])
   renderer.setState(notice ? 'idle' : leader ? leader.state : 'idle')
+
+  // A pet that visibly dozes is doing real work: it says "nothing is running
+  // and I will not interrupt you", which is different from an overlay that has
+  // silently stopped receiving events. Do Not Disturb looks the same on
+  // purpose — it is the same promise.
+  if (groups.some((group) => group.live)) lastLiveAt = Date.now()
+  const dozing = config.quiet || Date.now() - lastLiveAt > SLEEP_AFTER_MS
+  el.pet.classList.toggle('asleep', dozing)
 
   const visible = stackHidden
     ? []

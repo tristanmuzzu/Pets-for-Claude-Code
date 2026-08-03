@@ -72,6 +72,25 @@ body {
   transform: scale(0.96);
 }
 
+/*
+ * Nothing running, or Do Not Disturb. Dimmed and slowly breathing rather than
+ * static: a frozen sprite is indistinguishable from an overlay that has
+ * quietly stopped working, which is the one thing a status pet must never
+ * look like.
+ */
+#pet.asleep {
+  opacity: 0.5;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.45)) saturate(0.55);
+  animation: doze 4.5s ease-in-out infinite;
+}
+
+@keyframes doze {
+  50% {
+    opacity: 0.34;
+    transform: translateY(1px);
+  }
+}
+
 /* --- the stack -------------------------------------------------------- */
 #stack {
   position: absolute;
@@ -201,7 +220,8 @@ body {
   .card,
   .ask,
   .unread,
-  .dot {
+  .dot,
+  #pet.asleep {
     animation: none !important;
   }
 }
