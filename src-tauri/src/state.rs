@@ -55,6 +55,15 @@ pub fn command_path() -> PathBuf {
     root().join("command.json")
 }
 
+/// Written every time the global hotkey fires.
+///
+/// "The shortcut does nothing" is otherwise unanswerable: registering the
+/// chord and receiving the keypress are separate things, and from outside the
+/// process they look identical. This makes the second one observable.
+pub fn hotkey_log_path() -> PathBuf {
+    root().join("hotkey.json")
+}
+
 /// Touched by the running overlay so other invocations can tell it is alive.
 pub fn heartbeat_path() -> PathBuf {
     root().join("running.json")

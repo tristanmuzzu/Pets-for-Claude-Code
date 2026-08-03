@@ -33,6 +33,12 @@ about.
 `Ctrl+Alt+P` shows and hides the pet from anywhere, so you never have to go
 looking for the tray icon.
 
+If pressing it appears to do nothing, open **Check my setup**. The keyboard
+shortcut row says which chord registered and how many times it has actually
+been pressed. Registering a chord and receiving one are separate things: a
+program with a low-level keyboard hook can swallow the keypress on its way
+past, and from inside Pipsqueak that looks exactly like nobody pressing it.
+
 Windows gives a chord to whichever program asks for it first, so if something
 else already owns `Ctrl+Alt+P`, Pipsqueak takes the next one it can get and the
 right-click menu shows which. Set `hotkey` in `config.json` to pick your own, or

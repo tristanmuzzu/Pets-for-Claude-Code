@@ -180,9 +180,26 @@ mod platform {
                 return;
             }
             if msg.message == WM_HOTKEY {
+                record();
                 toggle(app);
             }
         }
+    }
+
+    /// Notes that the key actually arrived, with a count, so "it does nothing"
+    /// can be told apart from "it never reached us".
+    fn record() {
+        let path = crate::state::hotkey_log_path();
+        let fired = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| value.get("fired").and_then(serde_json::Value::as_u64))
+            .unwrap_or(0);
+        let payload = serde_json::json!({ "at": crate::state::now_ms(), "fired": fired + 1 });
+        let _ = crate::state::write_atomic(
+            &path,
+            serde_json::to_vec(&payload).unwrap_or_default().as_slice(),
+        );
     }
 
     fn toggle(app: &AppHandle) {

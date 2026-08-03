@@ -255,7 +255,7 @@ fn hotkey_check(registered: &str) -> Check {
         ok(
             "hotkey",
             "Keyboard shortcut",
-            format!("{registered} shows and hides the pet."),
+            format!("{registered} shows and hides the pet. {}", fired_summary()),
         )
     } else {
         // Worth saying out loud. Pressing the chord you configured and having
@@ -266,6 +266,25 @@ fn hotkey_check(registered: &str) -> Check {
             format!("{wanted} was already taken, so {registered} is being used instead."),
         )
     }
+}
+
+/// How many times the chord has actually reached us, and when.
+///
+/// Registering a hotkey and receiving one are separate things: another program
+/// with a low-level keyboard hook can swallow the keypress on its way past,
+/// and from inside this process that is indistinguishable from nobody pressing
+/// it. Saying which one it is turns a shrug into a next step.
+fn fired_summary() -> String {
+    let Some(value) = fs::read_to_string(state::hotkey_log_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    else {
+        return "Not pressed yet since it was installed.".to_string();
+    };
+    let count = value.get("fired").and_then(Value::as_u64).unwrap_or(0);
+    let at = value.get("at").and_then(Value::as_u64).unwrap_or(0);
+    let ago = now_ms().saturating_sub(at) / 1000;
+    format!("Pressed {count} time(s), last {ago}s ago.")
 }
 
 fn traffic_check() -> Check {
