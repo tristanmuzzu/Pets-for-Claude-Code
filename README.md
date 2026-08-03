@@ -56,7 +56,7 @@ When something breaks, it looks like this:
 ## Install
 
 **Windows 10/11.** Download the installer from
-[Releases](https://github.com/ResolveZeticle/pipsqueak/releases) and run it.
+[Releases](https://github.com/tristanmuzzu/pipsqueak/releases) and run it.
 Requires the Microsoft Edge WebView2 runtime, which ships with Windows 11 and is
 installed automatically by the setup if missing.
 

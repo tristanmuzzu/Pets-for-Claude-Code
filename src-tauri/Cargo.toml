@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A tiny desktop pet that shows what Claude Code is doing, at a glance."
 authors = ["Tristan Rafe Muzzu"]
 license = "MIT"
-repository = "https://github.com/ResolveZeticle/pipsqueak"
+repository = "https://github.com/tristanmuzzu/pipsqueak"
 edition = "2021"
 rust-version = "1.77"
 
