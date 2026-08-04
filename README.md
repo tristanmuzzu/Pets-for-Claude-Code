@@ -33,6 +33,10 @@ You stop trusting the one glance the whole thing exists for.
 - **One card per project, stacked.** Run Claude Code in four repos and you get
   four cards, not one bubble flickering between them. Press **×** to collapse a
   project into a chip; it reopens itself if that project gets blocked or fails.
+- **The stack collapses instead of growing.** Past three projects it becomes one
+  card for the one you are watching and a single line each for the rest — still
+  saying what each is doing, still closeable. Click any line to hand it the
+  card. Anything that starts needing you takes the card back.
 - **Readable at speed.** Each card has a *headline* — the chat's own title in
   the Claude Code desktop app, or what the turn is about when there is no app to
   ask — and under it, **what the session is doing right now in its own words**,
@@ -73,16 +77,21 @@ showing none of it is useless. A card is three lines that move at three
 different speeds:
 
 ```
-● CLOCKWORK                              3m  ↗  ×
-Fix the flaky timezone test
+● CLOCKWORK  Timezone test flakiness       3m  ↗  ×
+It parses in local time and compares in UTC —
+that is the bug. Rewriting the assertion.
 Editing · 42 actions · 3m
 ```
 
 | Line | Source | Changes |
 | --- | --- | --- |
-| Project | the git repository the session belongs to | never |
-| Headline | your prompt, then Claude's answer when the turn ends | once per turn |
+| Project and chat | the repository, and the chat's title in the desktop app | never |
+| The live line | what Claude last said or thought, read from the transcript | every 20s or so |
 | Status | the *category* of work, plus counters | on category change |
+
+The middle line gets the space because it is the one that moves. A chat's
+subject is settled in the first minute and then never changes again; what the
+session is doing right now is the reason you looked up.
 
 Nothing on the card strobes. Several tools share one status word on
 purpose. `Read`, `Glob` and `Grep` are all `Reading`, so the only thing moving

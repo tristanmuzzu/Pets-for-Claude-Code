@@ -24,8 +24,10 @@ const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in windo
 /** Replaced at build time from package.json. See vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
 
-/** How many project cards are shown at once before the rest become chips. */
+/** How many project cards are shown in full before the stack collapses. */
 const SLOT_LIMIT = 3
+/** How many projects fit once they are one line each. */
+const DENSE_LIMIT = 6
 
 const el = {
   stack: document.getElementById('stack'),
@@ -86,6 +88,14 @@ const chipNodes = new Map()
  * news again.
  */
 const acknowledged = new Set()
+/**
+ * The project holding the one full card while the stack is collapsed.
+ *
+ * Null means "whichever is nearest the pet", which is the busiest or most
+ * urgent one. Clicking a collapsed line hands it the card, because the thing
+ * you just clicked is by definition the thing you want to read.
+ */
+let promoted = null
 const outcomeKey = (session) => `${session.session_id}@${session.outcome_ms || 0}`
 const settled = (state) => state === 'done' || state === 'failed'
 /** Recent enough that finishing is still news rather than a standing fact. */
@@ -163,6 +173,21 @@ function effectiveState(key, session) {
  */
 const LINE_HOLD_MS = 1000
 
+/**
+ * What the main line says when the session has said nothing at all.
+ *
+ * Rare, and worth handling anyway: a session that has only just started, or one
+ * whose transcript the overlay cannot read, would otherwise leave the biggest
+ * text on the card blank.
+ */
+function restingLine(state) {
+  if (state === 'waiting') return 'Waiting for you'
+  if (state === 'done') return 'Finished'
+  if (state === 'failed') return 'The turn failed'
+  if (state === 'idle') return 'Nothing running'
+  return 'Working…'
+}
+
 function holdLine(view, line, now = Date.now()) {
   if (!line) return view.line ?? ''
   if (view.line === line) return line
@@ -207,9 +232,16 @@ function buildCard(key) {
   })
   node.addEventListener('click', () => {
     const view = viewFor(key)
-    // Clicking a card is the one unambiguous signal that you have seen it, so
-    // on a finished one it is the dismissal; on a live one it opens the detail.
-    if (!acknowledge(key)) view.expanded = !view.expanded
+    // Three things one click can mean, in order of how sure we are of it.
+    // Finished: you have seen it, so it goes. Collapsed to a line: you want to
+    // read this one, so it takes the card. Otherwise: open the detail.
+    if (acknowledge(key)) {
+      // Nothing else to do; the card is on its way out.
+    } else if (node.dataset.density === 'compact') {
+      promoted = key
+    } else {
+      view.expanded = !view.expanded
+    }
     view.unread = false
     invoke('clear_attention').catch(() => {})
     render()
@@ -217,10 +249,11 @@ function buildCard(key) {
   return node
 }
 
-function paintCard(node, group) {
+function paintCard(node, group, compact = false) {
   const { session, key, count, state } = group
 
   node.dataset.state = state
+  node.dataset.density = compact ? 'compact' : 'full'
   node.querySelector('.project').textContent = key
   node.querySelector('.age').textContent = relativeTime(session.updated_ms)
 
@@ -238,16 +271,17 @@ function paintCard(node, group) {
   // What the app itself calls this chat, when it knows: the title in its own
   // sidebar, written by the thing that has read the whole conversation. A
   // prompt's first line is a fair guess at the subject; this is the answer.
-  node.querySelector('.headline').textContent =
-    session.chat_title || session.headline || session.activity || 'Working…'
+  node.querySelector('.title').textContent =
+    session.chat_title || session.headline || ''
 
-  // What it is doing right now. Its own sentence when it has said one, and the
-  // tool line when it has not: "Editing render.js" is the category of the work,
-  // "Now the frontend: chat titles and the done card" is the point of it.
-  const narration = node.querySelector('.narration')
-  const said = holdLine(view, session.narration || session.activity || '')
-  narration.hidden = !said
-  narration.textContent = said
+  // What it is doing right now, which is the line the card is really for. Its
+  // own sentence when it has said one, and the tool line when it has not:
+  // "Editing render.js" is the category of the work, "Now the frontend: chat
+  // titles and the done card" is the point of it. Written twice because a
+  // collapsed card shows it on the head row instead of under it.
+  const said = holdLine(view, session.narration || session.activity || '') || restingLine(state)
+  node.querySelector('.narration').textContent = said
+  node.querySelector('.line').textContent = said
 
   // What it is blocked on, in its own row. This is the only text on the card
   // that is worth interrupting something else to read.
@@ -367,6 +401,9 @@ function render() {
     if (urgent && !view.wasUrgent) {
       collapsed.delete(group.key)
       slots = [group.key, ...slots.filter((key) => key !== group.key)]
+      // Something needing you outranks whatever you were reading, so it takes
+      // the full card back off it.
+      promoted = null
       if (group.state === 'waiting' && config.alertOnWaiting) invoke('alert').catch(() => {})
     }
     view.wasUrgent = urgent
@@ -400,9 +437,18 @@ function render() {
   const dozing = config.quiet || Date.now() - lastLiveAt > SLEEP_AFTER_MS
   el.pet.classList.toggle('asleep', dozing)
 
-  const visible = stackHidden
-    ? []
-    : slots.filter((key) => !collapsed.has(key)).slice(0, SLOT_LIMIT)
+  // Three projects fit as cards. Past that the stack would own the screen, so
+  // it collapses: one card for the project being watched, one line each for the
+  // rest, which is enough to see what every project is doing and to close any
+  // of them. More projects than that fit *because* they are lines.
+  const wanted = stackHidden ? [] : slots.filter((key) => !collapsed.has(key))
+  const dense = wanted.length > SLOT_LIMIT
+  const visible = wanted.slice(0, dense ? DENSE_LIMIT : SLOT_LIMIT)
+  const detailed = dense
+    ? visible.includes(promoted)
+      ? promoted
+      : visible[0]
+    : null
   const visibleKeys = new Set(visible)
 
   for (const [key, node] of cards) {
@@ -423,7 +469,7 @@ function render() {
       node = buildCard(key)
       cards.set(key, node)
     }
-    paintCard(node, group)
+    paintCard(node, group, detailed !== null && key !== detailed)
     if (previous) {
       if (previous.nextElementSibling !== node) previous.after(node)
     } else if (el.stack.firstElementChild !== node) {
@@ -1143,6 +1189,30 @@ async function loadPetPayload(id) {
   return invoke('load_pet', { id })
 }
 
+/** What each demo project is "saying", so the main line has real sentences. */
+const DEMO_LINES = {
+  clockwork: [
+    'Reading the formatter to see which clock it trusts.',
+    'It parses in local time and compares in UTC — that is the bug.',
+    'Rewriting the assertion to fix the timezone at the boundary.',
+    'Both suites pass; nothing left to check.'
+  ],
+  orchestrator: [
+    'Adding the twelve tier C scenarios to the eval set.',
+    'The runner times out at eight; raising the budget.',
+    'Added 12 scenarios; suite passes in 41s.'
+  ],
+  ledger: [
+    'Checking how finance rounds a half cent.',
+    'Half-up, and only at the invoice total.',
+    'Rewriting the totals to round once, at the end.'
+  ],
+  atlas: [
+    'Tiles are re-fetched every hour for no reason.',
+    'Setting a week of cache with a content hash in the path.'
+  ]
+}
+
 /** Cycles states in a browser tab so the UI can be designed without a build. */
 function startBrowserDemo() {
   // The desktop app supplies the chat title in a real session; here it is
@@ -1150,8 +1220,12 @@ function startBrowserDemo() {
   // have to fit.
   const titles = {
     clockwork: 'Timezone test flakiness',
-    orchestrator: 'Tier C eval coverage'
+    orchestrator: 'Tier C eval coverage',
+    ledger: 'Invoice rounding rules',
+    atlas: 'Tile server cache headers'
   }
+  // Four projects rather than two: three is where the stack collapses, and a
+  // layout whose rule you cannot see is a layout you cannot design.
   const scripts = {
     clockwork: [
       ['thinking', 'Thinking', 'Fix the flaky timezone test'],
@@ -1166,6 +1240,16 @@ function startBrowserDemo() {
       ['running', 'Running', 'Add tier C eval scenarios'],
       ['failed', 'Failed', 'Add tier C eval scenarios'],
       ['done', 'Done', 'Added 12 scenarios; suite passes in 41s.']
+    ],
+    ledger: [
+      ['running', 'Reading', 'Round invoice totals the way finance does'],
+      ['running', 'Editing', 'Round invoice totals the way finance does'],
+      ['running', 'Running', 'Round invoice totals the way finance does']
+    ],
+    atlas: [
+      ['running', 'Running', 'Cache tiles for a week, not an hour'],
+      ['thinking', 'Thinking', 'Cache tiles for a week, not an hour'],
+      ['running', 'Editing', 'Cache tiles for a week, not an hour']
     ]
   }
   // In the app the cursor arrives from the window manager, because the overlay
@@ -1217,10 +1301,7 @@ function startBrowserDemo() {
         headline,
         // In a real session this is whatever Claude last said or thought; the
         // demo needs one so the line can be designed at its real length.
-        narration:
-          want === 'done'
-            ? 'Both suites pass; nothing left to check.'
-            : 'Now the frontend: the done card and the narration line.',
+        narration: DEMO_LINES[project]?.[tick % DEMO_LINES[project].length] ?? '',
         activity: `${kind} something`,
         detail: want === 'failed' ? 'expected 03:00 to be 02:00' : '',
         updated_ms: now,
