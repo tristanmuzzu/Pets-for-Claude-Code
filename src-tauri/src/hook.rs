@@ -175,7 +175,11 @@ pub fn run(fallback_event: Option<String>) {
     session.stalled = false;
     session.session_id = session_id;
     if !update.silent {
-        session.kind = update.kind;
+        // An event that does not describe work leaves the last word about work
+        // standing, rather than blanking it or replacing it with its own.
+        if !update.kind.is_empty() {
+            session.kind = update.kind;
+        }
         session.activity = update.activity.clone();
         session.detail = update.detail;
         if let Some(headline) = update.headline {
@@ -351,8 +355,12 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             // `state` stays empty: being blocked does not change what the
             // session was doing, and overwriting it here is what used to leave
             // a card stuck on "Needs you" when the answer arrived elsewhere.
+            // `kind` is deliberately left alone. The card says "Needs you" off
+            // the *state*, which only becomes `waiting` once the prompt has
+            // outlived the debounce; writing the word here as well put it on
+            // cards that were still plainly running, which is the pet claiming
+            // something that was not true yet.
             let waiting = |reason: &str| Update {
-                kind: "Needs you".into(),
                 activity: reason.to_string(),
                 waiting: reason.to_string(),
                 ..Default::default()
@@ -751,7 +759,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(update.waiting, "Allow Bash?");
-        assert_eq!(update.kind, "Needs you");
+        // Not even the word: "Needs you" is the card's name for the *state*,
+        // and the state is only blocked once the prompt outlives the debounce.
+        // Writing it here put it on cards whose dot was still plainly running.
+        assert!(update.kind.is_empty());
         // Being blocked says nothing about what the session was doing, so the
         // durable state is left alone. Overwriting it here is what used to
         // strand a card on "Needs you" when the prompt was answered elsewhere.

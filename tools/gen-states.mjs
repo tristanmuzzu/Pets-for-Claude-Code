@@ -49,3 +49,21 @@ PICKS.forEach(([row, frame], index) => {
 mkdirSync(dirname(OUT), { recursive: true })
 writeFileSync(OUT, encodePng(outW, outH, out))
 console.log(`wrote ${OUT} (${outW}x${outH})`)
+
+// One resting frame on its own, for the top of the README.
+const PORTRAIT_SCALE = 5
+const portraitCell = FRAME * PORTRAIT_SCALE
+const portrait = new Uint8Array(portraitCell * portraitCell * 4)
+for (let y = 0; y < portraitCell; y++) {
+  for (let x = 0; x < portraitCell; x++) {
+    const si = (Math.floor(y / PORTRAIT_SCALE) * width + Math.floor(x / PORTRAIT_SCALE)) * 4
+    const di = (y * portraitCell + x) * 4
+    portrait[di] = rgba[si]
+    portrait[di + 1] = rgba[si + 1]
+    portrait[di + 2] = rgba[si + 2]
+    portrait[di + 3] = rgba[si + 3]
+  }
+}
+const PORTRAIT = resolve(HERE, '..', 'assets', `portrait-${pet}.png`)
+writeFileSync(PORTRAIT, encodePng(portraitCell, portraitCell, portrait))
+console.log(`wrote ${PORTRAIT} (${portraitCell}x${portraitCell})`)
