@@ -122,7 +122,7 @@ body {
   animation: rise 160ms ease-out;
   /* Every row is always rendered, so a card never resizes under the cursor and
      the cards below never jump. */
-  min-height: 82px;
+  min-height: 84px;
 }
 
 @keyframes rise {
@@ -245,11 +245,15 @@ body {
   50% { opacity: 0.25; }
 }
 
+/* The project name is how you tell two cards apart, so it is the last thing on
+   the row allowed to lose characters: the chat title beside it gives way first. */
 .project {
-  font-size: 11px;
+  flex: 0 0 auto;
+  max-width: 46%;
+  font-size: 10.5px;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -310,15 +314,94 @@ body {
 }
 
 /* The stable line: what this turn is about. Changes once per turn. */
-.headline {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.36;
+/*
+ * Which chat this is. It used to be the headline, two lines of it, and it was
+ * the wrong thing to be biggest: a chat's subject is settled within a minute
+ * and then never changes again, while the line underneath it changes every
+ * twenty seconds. Now it rides along the top with the project name, at the
+ * size of a label, and gives its space to the part that moves.
+ */
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * What it is doing right now, and the reason the card exists. Two lines of
+ * room, always both reserved: a line that grows and shrinks with the sentence
+ * would move every card below it several times a minute.
+ */
+.narration {
+  margin: 2px 0 0;
+  font-size: 13.5px;
+  line-height: 1.38;
+  color: var(--ink);
   overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  min-height: calc(2 * 1.38em);
+}
+
+/* The same sentence, on the head row, for cards collapsed to one line. */
+.card-head > .line {
+  display: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * Past three projects the stack stops being a list of cards and becomes a list
+ * of lines: one per project, still saying what that project is doing, still
+ * closeable. The one you are watching keeps its card. Clicking any other line
+ * hands it the card instead.
+ */
+.card[data-density="compact"] {
+  min-height: 0;
+  padding: 6px 9px;
+}
+
+.card[data-density="compact"] .card-head {
+  margin-bottom: 0;
+}
+
+.card[data-density="compact"] .title,
+.card[data-density="compact"] .narration,
+.card[data-density="compact"] .status,
+.card[data-density="compact"] .workspace,
+.card[data-density="compact"] .more {
+  display: none;
+}
+
+.card[data-density="compact"] .card-head > .line {
+  display: block;
+}
+
+/* On one line every character of the row belongs to the sentence, so the
+   project name gets only as much of it as it needs to stay recognisable. */
+.card[data-density="compact"] .project {
+  flex: none;
+  max-width: 30%;
+}
+
+.card[data-density="compact"] .card-head {
+  gap: 5px;
+}
+
+.card[data-density="compact"] .age {
+  font-size: 10px;
 }
 
 /*

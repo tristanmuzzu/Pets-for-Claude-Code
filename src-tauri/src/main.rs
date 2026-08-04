@@ -2,16 +2,19 @@
 
 mod app;
 mod attention;
+mod chats;
 mod control;
 mod desktop;
 mod doctor;
 mod hook;
 mod hotkey;
 mod install;
+mod narration;
 mod process;
 mod project;
 mod risk;
 mod state;
+mod text;
 
 use std::fs;
 

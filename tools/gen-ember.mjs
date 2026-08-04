@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import {
   FRAME, ROW_NAMES, Layer, PROP,
   drawEyes, drawWisp, drawLaptop, drawMagnifier, drawBang, drawSweat, drawSparkle,
-  wave, writePet
+  lookDirection, wave, writePet
 } from './pixel.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -140,8 +140,21 @@ function hopPose(f, n, colour) {
 }
 
 function poseFor(row, f) {
-  const colour = SPARK[ROW_NAMES[row]]
+  const colour = SPARK[ROW_NAMES[row]] ?? SPARK.idle
   switch (ROW_NAMES[row]) {
+    // Sixteen directions. Ember is a pebble with no neck, so it leans its whole
+    // body a pixel and moves the pupils; the spark follows the lean.
+    case 'look-a':
+    case 'look-b': {
+      const { dx, dy } = lookDirection(row, f)
+      return {
+        sparkColour: colour,
+        spark: { x: 39 + Math.round(dx * 2), y: 12 + Math.round(dy * 2), i: 0.85 },
+        lean: Math.round(dx),
+        bodyDy: Math.round(dy * 0.6),
+        eyes: { gaze: { dx: Math.round(dx * 1.8), dy: Math.round(dy * 1.8) } }
+      }
+    }
     case 'idle': {
       const bob = wave(f, 6, 1)
       return {

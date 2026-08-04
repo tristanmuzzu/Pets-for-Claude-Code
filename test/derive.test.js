@@ -59,15 +59,17 @@ test('a completion that has not settled is still a running turn', () => {
   assert.equal(displayState(session, NOW + 2001), 'done')
 })
 
-test('a completion stops being news eventually', () => {
+test('a finished turn stays finished until somebody looks at it', () => {
+  // No timer: a card that removes itself after 30s is a card that finished
+  // while you were in a meeting and never told you.
   const session = quiet({ state: 'idle', outcome: 'done', outcome_ms: NOW })
   assert.equal(displayState(session, NOW + 1000), 'done')
-  assert.equal(displayState(session, NOW + DONE_LINGER_MS + 1), 'idle')
+  assert.equal(displayState(session, NOW + DONE_LINGER_MS * 10), 'done')
 })
 
-test('a failed turn stays visible far longer than a successful one', () => {
+test('a failed turn stays visible too', () => {
   const session = quiet({ state: 'idle', outcome: 'failed', outcome_ms: NOW })
-  assert.equal(displayState(session, NOW + DONE_LINGER_MS + 1), 'failed')
+  assert.equal(displayState(session, NOW + DONE_LINGER_MS * 10), 'failed')
 })
 
 test('a session the sweep gave up on reads as idle, not finished', () => {

@@ -33,14 +33,24 @@ You stop trusting the one glance the whole thing exists for.
 - **One card per project, stacked.** Run Claude Code in four repos and you get
   four cards, not one bubble flickering between them. Press **×** to collapse a
   project into a chip; it reopens itself if that project gets blocked or fails.
-- **Readable at speed.** Each card has a *headline* (what the turn is
-  about) that changes once per turn, and a dimmer live line for the current tool. Every
-  state has a floor on how long it stays up, so nothing flashes past.
+- **The stack collapses instead of growing.** Past three projects it becomes one
+  card for the one you are watching and a single line each for the rest — still
+  saying what each is doing, still closeable. Click any line to hand it the
+  card. Anything that starts needing you takes the card back.
+- **Readable at speed.** Each card has a *headline* — the chat's own title in
+  the Claude Code desktop app, or what the turn is about when there is no app to
+  ask — and under it, **what the session is doing right now in its own words**,
+  read live from the transcript: "Now the frontend: the done card and the
+  narration line", not "Editing". It falls back to the tool line when nothing
+  has been said, and the menu offers speech only, speech and thinking, or
+  silence. Every state has a floor on how long it stays up, so nothing flashes
+  past.
 - **It says what it is blocked on**, with a warning when the command can't be
   undone: a force push, an `rm -rf`, a `DROP TABLE`.
-- **Completions survive not being seen.** A turn that finishes while the overlay
-  is behind a full-screen window leaves a mark until you look, and blinks the
-  tray icon if the overlay is covered entirely.
+- **Completions survive not being seen.** A finished card says **Done** and
+  stays until you acknowledge it — click it, or press **×** — and then it goes
+  away entirely rather than shrinking to a chip. The tray icon blinks too, for
+  when the overlay is covered.
 - **Do Not Disturb** silences both, and the pet visibly dozes so you can see it
   won't interrupt you.
 - **A setup check** that watches for real hook traffic, so "nothing is
@@ -49,10 +59,16 @@ You stop trusting the one glance the whole thing exists for.
   hunting for the tray icon. If something else already owns that chord,
   Pipsqueak takes the next free one and tells you which.
 - **An event log.** Click a card for the last two dozen things that project did.
-- **Jump to the window.** **↗** on a card brings that Claude Code window
-  forward.
+- **Jump to the chat.** **↗** on a card opens *that* conversation in the Claude
+  Code desktop app and raises the window. Every chat shares one window and one
+  title, so the card asks the app to switch to the right one by id; a session
+  the app has never held falls back to matching the window title.
+- **The pet watches your cursor.** All three built-ins are drawn in sixteen
+  directions and turn to face the pointer while they are resting, then go back
+  to work when there is work. Poke one and it jumps.
 - **Three pets built in**, and you can drop your own sprite folder in.
-  **Codex pets work as-is**, including any already in `~/.codex/pets`.
+  **Codex pets work as-is**, including any already in `~/.codex/pets`, both
+  versions of that contract.
 
 ### Why it stays readable
 
@@ -61,16 +77,21 @@ showing none of it is useless. A card is three lines that move at three
 different speeds:
 
 ```
-● CLOCKWORK                              3m  ↗  ×
-Fix the flaky timezone test
+● CLOCKWORK  Timezone test flakiness       3m  ↗  ×
+It parses in local time and compares in UTC —
+that is the bug. Rewriting the assertion.
 Editing · 42 actions · 3m
 ```
 
 | Line | Source | Changes |
 | --- | --- | --- |
-| Project | the git repository the session belongs to | never |
-| Headline | your prompt, then Claude's answer when the turn ends | once per turn |
+| Project and chat | the repository, and the chat's title in the desktop app | never |
+| The live line | what Claude last said or thought, read from the transcript | every 20s or so |
 | Status | the *category* of work, plus counters | on category change |
+
+The middle line gets the space because it is the one that moves. A chat's
+subject is settled in the first minute and then never changes again; what the
+session is doing right now is the reason you looked up.
 
 Nothing on the card strobes. Several tools share one status word on
 purpose. `Read`, `Glob` and `Grep` are all `Reading`, so the only thing moving

@@ -5,7 +5,16 @@
 // is a monitor on legs.
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ROW_NAMES, Layer, drawWisp, drawSparkle, drawSweat, wave, writePet } from './pixel.mjs'
+import {
+  ROW_NAMES,
+  Layer,
+  drawWisp,
+  drawSparkle,
+  drawSweat,
+  lookDirection,
+  wave,
+  writePet
+} from './pixel.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const OUT_DIR = resolve(HERE, '..', 'public', 'pets', 'byte')
@@ -101,13 +110,26 @@ function drawFace(layer, kind, colour, dx = 0, dy = 0) {
   }
 }
 
-/** Code-ish lines scrolling behind the face while it works. */
-function drawScanlines(layer, frame, colour) {
-  const dim = [colour[0], colour[1], colour[2], 90]
-  for (let i = 0; i < 3; i++) {
-    const y = SCREEN_BOX.y + 2 + ((frame + i * 4) % SCREEN_BOX.h)
-    if (y > SCREEN_BOX.y + SCREEN_BOX.h - 2) continue
-    layer.rect(SCREEN_BOX.x + 2, y, 6 + ((frame + i) % 8), 1, dim)
+/**
+ * Text scrolling under the face while it works.
+ *
+ * Three things keep it from reading as a broken screen. It stays below the
+ * eyes, because a line crossing them looks like damage rather than reading. It
+ * is mixed into the screen colour rather than drawn semi-transparent: these
+ * pixels replace the dark panel, so an alpha here would end up blended against
+ * the *shell* behind it and come out brighter than the screen it is supposed to
+ * be inside. And it drifts at half the frame rate, because two pixels of travel
+ * per frame at this size is a flicker, not a scroll.
+ */
+function drawScanlines(layer, frame, colour, dx = 0, dy = 0) {
+  const dim = colour.map((channel, i) => Math.round(SCREEN[i] + (channel - SCREEN[i]) * 0.28))
+  dim[3] = 255
+  const top = SCREEN_BOX.y + 10 + dy
+  const travel = 3
+  const drift = Math.floor(frame / 2)
+  for (let i = 0; i < 2; i++) {
+    const y = top + ((drift + i * 2) % travel)
+    layer.rect(SCREEN_BOX.x + 3 + dx, y, 5 + ((drift + i) % 5), 1, dim)
   }
 }
 
@@ -158,8 +180,10 @@ function drawByte(p) {
     BEZEL
   )
   glass.roundRect(SCREEN_BOX.x + headDx, SCREEN_BOX.y + headDy, SCREEN_BOX.w, SCREEN_BOX.h, 2, SCREEN)
-  if (p.scan !== undefined) drawScanlines(glass, p.scan, p.light)
-  drawFace(glass, p.face ?? 'open', p.light, headDx + (p.faceDx ?? 0), headDy)
+  // Offset with the head, or the lines drift off the panel and onto the bezel
+  // whenever the pet leans.
+  if (p.scan !== undefined) drawScanlines(glass, p.scan, p.light, headDx, headDy)
+  drawFace(glass, p.face ?? 'open', p.light, headDx + (p.faceDx ?? 0), headDy + (p.faceDy ?? 0))
 
   // A status lamp on the body, so the colour still reads if the screen is busy.
   const lamp = new Layer()
@@ -202,8 +226,25 @@ function stepPose(f, n, light) {
 }
 
 function poseFor(row, f) {
-  const light = LIGHT[ROW_NAMES[row]]
+  const light = LIGHT[ROW_NAMES[row]] ?? LIGHT.idle
   switch (ROW_NAMES[row]) {
+    // The sixteen look poses. Byte has no neck and no pupils, so a direction
+    // can only come from where on the screen the eyes sit: the ordinary open
+    // face, slid two pixels, with the head leaning one and the halo drifting
+    // after it. Three small agreements read as attention where one large
+    // movement would read as a glitch.
+    case 'look-a':
+    case 'look-b': {
+      const { dx, dy } = lookDirection(row, f)
+      return {
+        light,
+        halo: { x: 40 + Math.round(dx * 2), y: 10 + Math.round(dy * 2), i: 0.75 },
+        headDx: Math.round(dx),
+        headDy: Math.round(dy),
+        faceDx: Math.round(dx * 2),
+        faceDy: Math.round(dy * 2)
+      }
+    }
     case 'idle': {
       const bob = wave(f, 6, 1)
       return { light, halo: { x: 40, y: 10 + bob, i: 0.75 }, headDy: bob, face: f === 4 ? 'blink' : 'open' }

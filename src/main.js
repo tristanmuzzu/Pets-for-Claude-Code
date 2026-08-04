@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { PetRenderer, GREETING_ROW } from './pet.js'
+import { PetRenderer, GREETING_ROW, JUMP_ROW } from './pet.js'
 import {
   ACTIVE,
   DONE_LINGER_MS,
@@ -24,8 +24,10 @@ const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in windo
 /** Replaced at build time from package.json. See vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
 
-/** How many project cards are shown at once before the rest become chips. */
+/** How many project cards are shown in full before the stack collapses. */
 const SLOT_LIMIT = 3
+/** How many projects fit once they are one line each. */
+const DENSE_LIMIT = 6
 
 const el = {
   stack: document.getElementById('stack'),
@@ -51,6 +53,8 @@ let config = {
   alertOnWaiting: false,
   flashOnFinish: true,
   quiet: false,
+  /** off | speech | thoughts. See narration.rs. */
+  narrate: 'thoughts',
   welcomed: false,
   updateCheck: false,
   updateDismissed: ''
@@ -73,6 +77,29 @@ const views = new Map()
 const collapsed = new Set()
 const cards = new Map()
 const chipNodes = new Map()
+
+/**
+ * Completions that have been seen.
+ *
+ * A finished card has no timer on it: it says "Done" until somebody
+ * acknowledges it, and then it goes away entirely rather than shrinking to a
+ * chip, because a chip is a thing that is still going on. Keyed by the turn
+ * rather than the project, so the *next* completion in the same project is
+ * news again.
+ */
+const acknowledged = new Set()
+/**
+ * The project holding the one full card while the stack is collapsed.
+ *
+ * Null means "whichever is nearest the pet", which is the busiest or most
+ * urgent one. Clicking a collapsed line hands it the card, because the thing
+ * you just clicked is by definition the thing you want to read.
+ */
+let promoted = null
+const outcomeKey = (session) => `${session.session_id}@${session.outcome_ms || 0}`
+const settled = (state) => state === 'done' || state === 'failed'
+/** Recent enough that finishing is still news rather than a standing fact. */
+const isFresh = (session) => Date.now() - (session.outcome_ms || 0) < DONE_LINGER_MS
 
 // --- data ---------------------------------------------------------------
 function viewFor(key) {
@@ -126,7 +153,62 @@ function effectiveState(key, session) {
   const view = viewFor(key)
   const raw = displayState(session) || view.lastStable
   view.lastStable = RUNNING.has(raw) || raw === 'idle' ? raw : view.lastStable
+  // Acknowledged means gone, immediately and without a farewell: holding the
+  // state for another two seconds would make the click feel unheard.
+  if (settled(raw) && acknowledged.has(outcomeKey(session))) {
+    view.heldState = ''
+    view.heldUntil = 0
+    return 'idle'
+  }
   return holdState(view, session, raw)
+}
+
+/**
+ * Keeps a line on screen long enough to be read.
+ *
+ * The tool line can change three times in a second during a burst of reads.
+ * Codex's overlay gets away without this because a model narrating itself
+ * changes its mind every twenty seconds; ours falls back to tool calls, which
+ * do not. A floor of a second is the difference between a line and a flicker.
+ */
+const LINE_HOLD_MS = 1000
+
+/**
+ * What the main line says when the session has said nothing at all.
+ *
+ * Rare, and worth handling anyway: a session that has only just started, or one
+ * whose transcript the overlay cannot read, would otherwise leave the biggest
+ * text on the card blank.
+ */
+function restingLine(state) {
+  if (state === 'waiting') return 'Waiting for you'
+  if (state === 'done') return 'Finished'
+  if (state === 'failed') return 'The turn failed'
+  if (state === 'idle') return 'Nothing running'
+  return 'Working…'
+}
+
+function holdLine(view, line, now = Date.now()) {
+  if (!line) return view.line ?? ''
+  if (view.line === line) return line
+  if (view.line && now < (view.lineUntil ?? 0)) return view.line
+  view.line = line
+  view.lineUntil = now + LINE_HOLD_MS
+  return line
+}
+
+/** Marks a finished turn as seen, which is what removes its card. */
+function acknowledge(key) {
+  const group = groupByProject(sessions).find((candidate) => candidate.key === key)
+  if (!group || !settled(group.state)) return false
+  // Every session in the project, not just the one that speaks for it: one
+  // click means "I have seen this card", and the card stands for all of them.
+  for (const session of sessions) {
+    const project = session.project || session.session_id.slice(0, 8)
+    if (project === key && session.outcome) acknowledged.add(outcomeKey(session))
+  }
+  viewFor(key).unread = false
+  return true
 }
 
 // --- rendering ----------------------------------------------------------
@@ -134,21 +216,32 @@ function buildCard(key) {
   const node = el.template.content.firstElementChild.cloneNode(true)
   node.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation()
-    collapsed.add(key)
+    // Closing a finished card dismisses it outright. Leaving a chip behind
+    // would keep a project in the row that means "still going on".
+    if (!acknowledge(key)) collapsed.add(key)
     render()
   })
   node.querySelector('.focus').addEventListener('click', (event) => {
     event.stopPropagation()
     const group = groupByProject(sessions).find((candidate) => candidate.key === key)
-    invoke('focus_project', {
+    invoke('focus_session', {
+      sessionId: group?.session.session_id ?? '',
       project: key,
       workspace: group?.session.workspace ?? ''
     }).catch(() => {})
   })
   node.addEventListener('click', () => {
     const view = viewFor(key)
-    view.expanded = !view.expanded
-    // Clicking a card is the one unambiguous signal that you have seen it.
+    // Three things one click can mean, in order of how sure we are of it.
+    // Finished: you have seen it, so it goes. Collapsed to a line: you want to
+    // read this one, so it takes the card. Otherwise: open the detail.
+    if (acknowledge(key)) {
+      // Nothing else to do; the card is on its way out.
+    } else if (node.dataset.density === 'compact') {
+      promoted = key
+    } else {
+      view.expanded = !view.expanded
+    }
     view.unread = false
     invoke('clear_attention').catch(() => {})
     render()
@@ -156,10 +249,11 @@ function buildCard(key) {
   return node
 }
 
-function paintCard(node, group) {
+function paintCard(node, group, compact = false) {
   const { session, key, count, state } = group
 
   node.dataset.state = state
+  node.dataset.density = compact ? 'compact' : 'full'
   node.querySelector('.project').textContent = key
   node.querySelector('.age').textContent = relativeTime(session.updated_ms)
 
@@ -174,8 +268,20 @@ function paintCard(node, group) {
   const view = viewFor(key)
   node.querySelector('.unread').hidden = !view.unread
 
-  node.querySelector('.headline').textContent =
-    session.headline || session.activity || 'Working…'
+  // What the app itself calls this chat, when it knows: the title in its own
+  // sidebar, written by the thing that has read the whole conversation. A
+  // prompt's first line is a fair guess at the subject; this is the answer.
+  node.querySelector('.title').textContent =
+    session.chat_title || session.headline || ''
+
+  // What it is doing right now, which is the line the card is really for. Its
+  // own sentence when it has said one, and the tool line when it has not:
+  // "Editing render.js" is the category of the work, "Now the frontend: chat
+  // titles and the done card" is the point of it. Written twice because a
+  // collapsed card shows it on the head row instead of under it.
+  const said = holdLine(view, session.narration || session.activity || '') || restingLine(state)
+  node.querySelector('.narration').textContent = said
+  node.querySelector('.line').textContent = said
 
   // What it is blocked on, in its own row. This is the only text on the card
   // that is worth interrupting something else to read.
@@ -222,8 +328,9 @@ function paintCard(node, group) {
     node.querySelector('.actions').textContent = `${actions} ${actions === 1 ? 'action' : 'actions'}`
     node.querySelector('.elapsed').textContent = duration(turnStarted)
   }
-  // The exact call is still one hover away, without occupying a row.
-  node.title = session.activity || ''
+  // The exact call, and what the turn was asked for, are both still one hover
+  // away without occupying a row.
+  node.title = [session.headline, session.activity].filter(Boolean).join(' — ')
 
   const more = node.querySelector('.more')
   more.hidden = !view.expanded
@@ -255,6 +362,10 @@ function kindLabel(state, session) {
   if (state === 'failed') return 'Failed'
   if (state === 'done') return 'Done'
   if (state === 'compacting') return 'Compacting'
+  // `kind` describes work in progress, so it is only true while there is some.
+  // Falling back to it once the session went quiet is how a card that had
+  // finished ended up saying "Delegating" with nothing running.
+  if (state === 'idle') return session.outcome === 'done' ? 'Done' : 'Idle'
   return session.kind || 'Working'
 }
 
@@ -290,16 +401,16 @@ function render() {
     if (urgent && !view.wasUrgent) {
       collapsed.delete(group.key)
       slots = [group.key, ...slots.filter((key) => key !== group.key)]
+      // Something needing you outranks whatever you were reading, so it takes
+      // the full card back off it.
+      promoted = null
       if (group.state === 'waiting' && config.alertOnWaiting) invoke('alert').catch(() => {})
     }
     view.wasUrgent = urgent
 
     // Finishing while you were looking at something else is the thing this
-    // whole overlay exists to tell you about, and a 30s linger is no use if
-    // the 30s happened during a video. The mark outlives the card.
-    const settled = group.state === 'done' || group.state === 'failed'
-    const fresh = Date.now() - (group.session.outcome_ms || 0) < DONE_LINGER_MS
-    if (settled && view.lastShown !== group.state && fresh) {
+    // whole overlay exists to tell you about. The mark outlives the card.
+    if (settled(group.state) && view.lastShown !== group.state && isFresh(group.session)) {
       view.unread = true
       invoke('flash_tray').catch(() => {})
     }
@@ -308,20 +419,36 @@ function render() {
     view.lastShown = group.state
   }
 
+  // The card waits for you; the pet does not. A completion is worth a little
+  // celebration, not an hour of one, so once the news has gone stale the pet
+  // settles back even though the card is still sitting there saying "Done".
   const leader = byKey.get(slots[0])
-  renderer.setState(notice ? 'idle' : leader ? leader.state : 'idle')
+  const celebrating = leader && settled(leader.state) && !isFresh(leader.session)
+  renderer.setState(notice || !leader || celebrating ? 'idle' : leader.state)
 
   // A pet that visibly dozes is doing real work: it says "nothing is running
   // and I will not interrupt you", which is different from an overlay that has
   // silently stopped receiving events. Do Not Disturb looks the same on
   // purpose, because it is the same promise.
-  if (groups.some((group) => group.live)) lastLiveAt = Date.now()
+  const busy = groups.some(
+    (group) => group.live && (!settled(group.state) || isFresh(group.session))
+  )
+  if (busy) lastLiveAt = Date.now()
   const dozing = config.quiet || Date.now() - lastLiveAt > SLEEP_AFTER_MS
   el.pet.classList.toggle('asleep', dozing)
 
-  const visible = stackHidden
-    ? []
-    : slots.filter((key) => !collapsed.has(key)).slice(0, SLOT_LIMIT)
+  // Three projects fit as cards. Past that the stack would own the screen, so
+  // it collapses: one card for the project being watched, one line each for the
+  // rest, which is enough to see what every project is doing and to close any
+  // of them. More projects than that fit *because* they are lines.
+  const wanted = stackHidden ? [] : slots.filter((key) => !collapsed.has(key))
+  const dense = wanted.length > SLOT_LIMIT
+  const visible = wanted.slice(0, dense ? DENSE_LIMIT : SLOT_LIMIT)
+  const detailed = dense
+    ? visible.includes(promoted)
+      ? promoted
+      : visible[0]
+    : null
   const visibleKeys = new Set(visible)
 
   for (const [key, node] of cards) {
@@ -342,7 +469,7 @@ function render() {
       node = buildCard(key)
       cards.set(key, node)
     }
-    paintCard(node, group)
+    paintCard(node, group, detailed !== null && key !== detailed)
     if (previous) {
       if (previous.nextElementSibling !== node) previous.after(node)
     } else if (el.stack.firstElementChild !== node) {
@@ -729,6 +856,25 @@ async function openMenu() {
       config.showScratch
     )
   )
+  // A three-way cycle rather than a checkbox: "what it said" and "what it was
+  // thinking" are different promises about how much of a session ends up on
+  // screen, and somebody screen-sharing wants to choose between them.
+  const narration = {
+    off: 'Say nothing while working',
+    speech: 'Say what Claude tells you',
+    thoughts: 'Say what Claude is thinking'
+  }
+  children.push(
+    button(
+      narration[config.narrate] ?? narration.thoughts,
+      async () => {
+        const order = ['off', 'speech', 'thoughts']
+        config.narrate = order[(order.indexOf(config.narrate) + 1) % order.length]
+        await saveConfig()
+      },
+      config.narrate !== 'off'
+    )
+  )
   children.push(
     button(
       'Sound when a project needs you',
@@ -845,6 +991,7 @@ async function saveConfig() {
       alert_on_waiting: config.alertOnWaiting,
       flash_on_finish: config.flashOnFinish,
       quiet: config.quiet,
+      narrate: config.narrate,
       welcomed: config.welcomed,
       update_check: config.updateCheck,
       update_dismissed: config.updateDismissed,
@@ -886,6 +1033,9 @@ function wireInteraction() {
     origin = null
   })
 
+  // Poking it should do something. Cheap, and the first thing anyone tries.
+  el.pet.addEventListener('pointerenter', () => renderer.playOnce(JUMP_ROW))
+
   el.pet.addEventListener('contextmenu', (event) => {
     event.preventDefault()
     if (el.menu.hidden) openMenu()
@@ -918,6 +1068,7 @@ async function boot() {
       alertOnWaiting: Boolean(stored.alert_on_waiting),
       flashOnFinish: stored.flash_on_finish !== false,
       quiet: Boolean(stored.quiet),
+      narrate: stored.narrate || 'thoughts',
       welcomed: Boolean(stored.welcomed),
       updateCheck: Boolean(stored.update_check),
       updateDismissed: stored.update_dismissed ?? '',
@@ -968,7 +1119,14 @@ async function boot() {
   }
 
   sessions = await invoke('get_sessions').catch(() => [])
-  sessions.forEach((s) => seenSessions.add(s.session_id))
+  sessions.forEach((session) => {
+    seenSessions.add(session.session_id)
+    // Whatever finished before the overlay started is history, not news. A
+    // completion still inside its news window is shown, so restarting the pet
+    // in the middle of a turn does not swallow the answer.
+    const stale = Date.now() - (session.outcome_ms || 0) > DONE_LINGER_MS
+    if (session.outcome && stale) acknowledged.add(outcomeKey(session))
+  })
   render()
 
   await listen('pipsqueak://sessions', (event) => {
@@ -981,12 +1139,30 @@ async function boot() {
     }
     const live = new Set(incoming.map((s) => s.session_id))
     seenSessions = new Set([...seenSessions].filter((id) => live.has(id)))
+    // A session that is gone can never show its card again, so remembering
+    // that it was acknowledged is just a leak.
+    for (const key of acknowledged) {
+      if (!live.has(key.slice(0, key.lastIndexOf('@')))) acknowledged.delete(key)
+    }
     const kept = notice ? sessions.filter((s) => s.session_id === 'notice') : []
     sessions = [...kept, ...incoming]
     render()
   })
 
   await listen('pipsqueak://notice', (event) => showNotice(String(event.payload)))
+
+  // The cursor, in this window's own coordinates, while it is somewhere near.
+  // Pets drawn with the two look rows turn to face it; the rest never hear
+  // about it, because the renderer drops it.
+  await listen('pipsqueak://cursor', (event) => {
+    const at = event.payload
+    if (!Array.isArray(at)) {
+      renderer.lookAt(null, null)
+      return
+    }
+    const rect = el.pet.getBoundingClientRect()
+    renderer.lookAt(at[0] - (rect.x + rect.width / 2), at[1] - (rect.y + rect.height / 2))
+  })
 
   // `pipsqueak control <pet>` changes the config from outside the window.
   await listen('pipsqueak://pet', async (event) => {
@@ -1013,8 +1189,43 @@ async function loadPetPayload(id) {
   return invoke('load_pet', { id })
 }
 
+/** What each demo project is "saying", so the main line has real sentences. */
+const DEMO_LINES = {
+  clockwork: [
+    'Reading the formatter to see which clock it trusts.',
+    'It parses in local time and compares in UTC — that is the bug.',
+    'Rewriting the assertion to fix the timezone at the boundary.',
+    'Both suites pass; nothing left to check.'
+  ],
+  orchestrator: [
+    'Adding the twelve tier C scenarios to the eval set.',
+    'The runner times out at eight; raising the budget.',
+    'Added 12 scenarios; suite passes in 41s.'
+  ],
+  ledger: [
+    'Checking how finance rounds a half cent.',
+    'Half-up, and only at the invoice total.',
+    'Rewriting the totals to round once, at the end.'
+  ],
+  atlas: [
+    'Tiles are re-fetched every hour for no reason.',
+    'Setting a week of cache with a content hash in the path.'
+  ]
+}
+
 /** Cycles states in a browser tab so the UI can be designed without a build. */
 function startBrowserDemo() {
+  // The desktop app supplies the chat title in a real session; here it is
+  // written down so the card can be designed with the line it will actually
+  // have to fit.
+  const titles = {
+    clockwork: 'Timezone test flakiness',
+    orchestrator: 'Tier C eval coverage',
+    ledger: 'Invoice rounding rules',
+    atlas: 'Tile server cache headers'
+  }
+  // Four projects rather than two: three is where the stack collapses, and a
+  // layout whose rule you cannot see is a layout you cannot design.
   const scripts = {
     clockwork: [
       ['thinking', 'Thinking', 'Fix the flaky timezone test'],
@@ -1029,8 +1240,30 @@ function startBrowserDemo() {
       ['running', 'Running', 'Add tier C eval scenarios'],
       ['failed', 'Failed', 'Add tier C eval scenarios'],
       ['done', 'Done', 'Added 12 scenarios; suite passes in 41s.']
+    ],
+    ledger: [
+      ['running', 'Reading', 'Round invoice totals the way finance does'],
+      ['running', 'Editing', 'Round invoice totals the way finance does'],
+      ['running', 'Running', 'Round invoice totals the way finance does']
+    ],
+    atlas: [
+      ['running', 'Running', 'Cache tiles for a week, not an hour'],
+      ['thinking', 'Thinking', 'Cache tiles for a week, not an hour'],
+      ['running', 'Editing', 'Cache tiles for a week, not an hour']
     ]
   }
+  // In the app the cursor arrives from the window manager, because the overlay
+  // is click-through and never sees a pointer event it is not under. In a
+  // browser tab the pointer is all there is, so the look poses can still be
+  // designed without a build.
+  document.addEventListener('pointermove', (event) => {
+    const rect = el.pet.getBoundingClientRect()
+    renderer.lookAt(event.clientX - (rect.x + rect.width / 2), event.clientY - (rect.y + rect.height / 2))
+  })
+  // The renderer, for poking at from the console while designing. Only ever in
+  // a browser tab: the app takes this branch never.
+  window.pet = renderer
+
   let tick = 0
   const started = Date.now() - 143_000
   const advance = () => {
@@ -1047,6 +1280,7 @@ function startBrowserDemo() {
       return {
         session_id: project,
         project,
+        chat_title: titles[project] ?? '',
         workspace: i === 1 ? 'feature-x' : '',
         scratch: false,
         state: durable,
@@ -1065,6 +1299,9 @@ function startBrowserDemo() {
         subagents: want === 'running' && i === 0 ? 3 : 0,
         kind,
         headline,
+        // In a real session this is whatever Claude last said or thought; the
+        // demo needs one so the line can be designed at its real length.
+        narration: DEMO_LINES[project]?.[tick % DEMO_LINES[project].length] ?? '',
         activity: `${kind} something`,
         detail: want === 'failed' ? 'expected 03:00 to be 02:00' : '',
         updated_ms: now,

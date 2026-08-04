@@ -126,6 +126,22 @@ pub struct Session {
     pub kind: String,
     /// Longer text for the expanded panel (assistant summary, error body).
     pub detail: String,
+    /// The last thing the session said out loud, in its own words. Read from
+    /// the transcript by the overlay, never by a hook: a hook only ever runs
+    /// between tool calls, which is exactly when nothing is being said.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub narration: String,
+    /// Where Claude Code is writing this session's transcript. Straight from
+    /// the hook payload, because guessing the path from the working directory
+    /// is right until somebody's project has an em dash in its name.
+    pub transcript: String,
+    /// What the Claude Code desktop app calls this chat, and the id it opens it
+    /// by. Filled in by the overlay from the app's own records, never by a
+    /// hook, so both are absent for a session running anywhere else.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chat_title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chat_id: String,
     /// Display name of the owning project: the git repository, not the folder
     /// the session happens to be sitting in.
     pub project: String,
@@ -261,6 +277,10 @@ pub struct Config {
     pub flash_on_finish: bool,
     /// Do not disturb: no sound, no tray flash. The pet still updates.
     pub quiet: bool,
+    /// How much of itself a session narrates on its card: `off`, `speech`
+    /// (only what Claude said to you) or `thoughts` (and the line it was
+    /// thinking, which is most of what makes the card feel live).
+    pub narrate: String,
     /// The chord that shows and hides the pet, e.g. "Ctrl+Alt+P". "off"
     /// disables it. If the chord is already claimed by something else,
     /// Pipsqueak falls back to the next one it can get and says which.
@@ -306,6 +326,7 @@ impl Default for Config {
             alert_on_waiting: false,
             flash_on_finish: true,
             quiet: false,
+            narrate: "thoughts".to_string(),
             hotkey: "Ctrl+Alt+P".to_string(),
             update_check: false,
             update_dismissed: String::new(),

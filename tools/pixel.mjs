@@ -9,9 +9,25 @@ import { encodePng } from './png.mjs'
 
 export const FRAME = 48
 export const COLS = 8
-export const ROWS = 9
-/** Matches the Codex pet contract exactly, so pets are interchangeable. */
-export const FRAME_COUNTS = [6, 8, 8, 4, 5, 8, 6, 6, 6]
+/**
+ * Eleven rows: the nine animation states, then two rows of look directions.
+ *
+ * That is version 2 of the Codex pet contract, which Pipsqueak both reads and
+ * writes so pets are interchangeable in either direction. Rows 9 and 10 are not
+ * an animation — they are sixteen still poses, one every 22.5° clockwise from
+ * straight up, and the app picks the one facing the cursor.
+ */
+export const ROWS = 11
+export const FRAME_COUNTS = [6, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8]
+export const LOOK_ROWS = [9, 10]
+export const LOOK_STEPS = 16
+
+/** The direction row `row`, frame `f` is drawn facing. Up is (0, -1). */
+export function lookDirection(row, f) {
+  const step = (row - LOOK_ROWS[0]) * 8 + f
+  const radians = (step * (360 / LOOK_STEPS) * Math.PI) / 180
+  return { dx: Math.sin(radians), dy: -Math.cos(radians), step }
+}
 
 /**
  * How long each frame is held, in milliseconds.
@@ -27,8 +43,8 @@ export const FRAME_DURATIONS = [
   // Idle: a long settle, then a quick blink and back.
   [520, 120, 90, 90, 120, 420],
   // Walking is a gait: even, or it limps.
-  [110, 110, 110, 110, 110, 110, 110, 110],
-  [110, 110, 110, 110, 110, 110, 110, 110],
+  [135, 135, 135, 135, 135, 135, 135, 135],
+  [135, 135, 135, 135, 135, 135, 135, 135],
   // A wave lands on the up-beat and holds there.
   [110, 90, 260, 110],
   // Anticipate, launch, hang, land.
@@ -37,13 +53,17 @@ export const FRAME_DURATIONS = [
   [90, 90, 90, 90, 110, 140, 200, 380],
   // Waiting has to stay legible from across the room, so it stays slow.
   [300, 220, 300, 220, 300, 380],
-  // Working: busy, with one held frame so it does not blur into itself.
-  [110, 110, 110, 200, 110, 110],
-  [180, 140, 140, 260, 140, 180]
+  // Working: busy, with one held frame so it does not blur into itself. Slow
+  // enough to be watchable, because this is the loop that runs for minutes at
+  // a time in the corner of someone's eye.
+  [150, 150, 150, 250, 150, 150],
+  [200, 165, 165, 300, 165, 200]
+  // Nine rows, not eleven: the look rows are stills, held for exactly as long
+  // as the cursor points that way, so a duration for them would never be read.
 ]
 export const ROW_NAMES = [
   'idle', 'running-right', 'running-left', 'waving', 'jumping',
-  'failed', 'waiting', 'running', 'review'
+  'failed', 'waiting', 'running', 'review', 'look-a', 'look-b'
 ]
 
 /** Colours for things that are not part of the character. */
@@ -225,6 +245,14 @@ export function drawEyes(layer, cx, cy, kind, palette) {
     layer.circle(ex + pdx, cy + pdy, pupilRadius, pupil)
     layer.set(ex + pdx - 1, cy + pdy - 1, glint)
   }
+  // A gaze is the ordinary open eye with the pupil moved, which is all a
+  // direction ever is on a face this size.
+  if (kind && typeof kind === 'object' && kind.gaze) {
+    eye(lx, kind.gaze.dx, kind.gaze.dy)
+    eye(rx, kind.gaze.dx, kind.gaze.dy)
+    return
+  }
+
   switch (kind) {
     case 'blink':
       layer.rect(lx - 2, cy, 5, 1, pupil)
@@ -345,6 +373,8 @@ export function writePet({ dir, id, displayName, description, drawFrame, iconPat
         frameHeight: FRAME,
         columns: COLS,
         rows: ROWS,
+        /** Version 2 of the Codex contract: nine states plus the look rows. */
+        spriteVersionNumber: 2,
         frameCounts: FRAME_COUNTS,
         frameDurations: FRAME_DURATIONS,
         /** The fallback for any row a pet does not time explicitly. */
