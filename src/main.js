@@ -38,6 +38,7 @@ const el = {
   panelBody: document.getElementById('panel-body'),
   panelClose: document.getElementById('panel-close'),
   pet: document.getElementById('pet'),
+  hint: document.getElementById('hint'),
   template: document.getElementById('card-template')
 }
 
@@ -64,6 +65,14 @@ let sessions = []
 let lastLiveAt = Date.now()
 let notice = null
 let noticeTimer = null
+/**
+ * How long the cursor has to rest on the pet before it explains itself.
+ *
+ * The operating system's own tooltips wait about half a second, which is short
+ * enough to fire while you are reaching past the pet for something behind it.
+ */
+const HINT_DELAY_MS = 2500
+let hintTimer = null
 let stackHidden = false
 let seenSessions = new Set()
 
@@ -787,6 +796,16 @@ async function showDoctor() {
 }
 
 // --- context menu -------------------------------------------------------
+/**
+ * The right-click menu.
+ *
+ * Everything used more than once a week is on it; everything used once, when
+ * the app is first set up, is behind "More". A menu with twenty items in it is
+ * one nobody reads, and it had grown tall enough to run off the top of the
+ * screen.
+ */
+let menuExpanded = false
+
 async function openMenu() {
   const pets = await invoke('list_pets').catch(() => [])
   const installed = await invoke('hooks_installed').catch(() => false)
@@ -794,75 +813,62 @@ async function openMenu() {
   const chord = await invoke('hotkey_binding').catch(() => '')
   const children = []
 
-  const heading = (text) => {
-    const node = document.createElement('div')
-    node.className = 'heading'
-    node.textContent = text
-    return node
-  }
-  const button = (text, onClick, pressed) => {
+  /** A click closes the menu unless it changed the menu itself. */
+  const button = (text, onClick, pressed, keepOpen = false) => {
     const node = document.createElement('button')
     node.type = 'button'
     node.textContent = text
     if (pressed !== undefined) node.setAttribute('aria-pressed', String(pressed))
     node.addEventListener('click', async () => {
-      el.menu.hidden = true
+      if (!keepOpen) el.menu.hidden = true
       await onClick()
       render()
     })
     return node
   }
-
-  children.push(heading('Pet'))
-  for (const pet of pets) {
-    const label = pet.source === 'codex' ? `${pet.displayName} (Codex)` : pet.displayName
-    children.push(button(label, () => selectPet(pet.id), pet.id === config.pet))
+  const row = (buttons) => {
+    const node = document.createElement('div')
+    node.className = 'row'
+    node.append(...buttons)
+    return node
+  }
+  const rule = () => {
+    const node = document.createElement('div')
+    node.className = 'rule'
+    return node
   }
 
-  children.push(heading('Size'))
-  for (const [label, value] of [['Small', 1.5], ['Medium', 2], ['Large', 3]]) {
-    children.push(
-      button(
-        label,
-        async () => {
-          config.scale = value
-          renderer.setScale(value)
-          await saveConfig()
-        },
-        config.scale === value
+  // Pets and sizes are picks from a short list, so they are chips on one line
+  // rather than six full-width rows.
+  children.push(
+    row(
+      pets.map((pet) =>
+        button(pet.displayName, () => selectPet(pet.id), pet.id === config.pet, true)
       )
     )
-  }
-
-  children.push(heading('Cards'))
-  children.push(
-    button('Show all projects', () => {
-      stackHidden = false
-      collapsed.clear()
-    })
   )
   children.push(
-    button('Hide all cards', () => {
-      stackHidden = true
-    })
-  )
-  children.push(
-    button(
-      'Include scratch/temp sessions',
-      async () => {
-        config.showScratch = !config.showScratch
-        await saveConfig()
-      },
-      config.showScratch
+    row(
+      [['S', 1.5], ['M', 2], ['L', 3]].map(([label, value]) =>
+        button(
+          label,
+          async () => {
+            config.scale = value
+            renderer.setScale(value)
+            await saveConfig()
+          },
+          config.scale === value,
+          true
+        )
+      )
     )
   )
-  // A three-way cycle rather than a checkbox: "what it said" and "what it was
-  // thinking" are different promises about how much of a session ends up on
-  // screen, and somebody screen-sharing wants to choose between them.
+  children.push(rule())
+
   const narration = {
-    off: 'Say nothing while working',
-    speech: 'Say what Claude tells you',
-    thoughts: 'Say what Claude is thinking'
+    off: 'Saying nothing while working',
+    speech: 'Saying what Claude tells you',
+    thoughts: 'Saying what Claude is thinking'
   }
   children.push(
     button(
@@ -872,27 +878,8 @@ async function openMenu() {
         config.narrate = order[(order.indexOf(config.narrate) + 1) % order.length]
         await saveConfig()
       },
-      config.narrate !== 'off'
-    )
-  )
-  children.push(
-    button(
-      'Sound when a project needs you',
-      async () => {
-        config.alertOnWaiting = !config.alertOnWaiting
-        await saveConfig()
-      },
-      config.alertOnWaiting
-    )
-  )
-  children.push(
-    button(
-      'Blink the tray when a project finishes',
-      async () => {
-        config.flashOnFinish = !config.flashOnFinish
-        await saveConfig()
-      },
-      config.flashOnFinish
+      config.narrate !== 'off',
+      true
     )
   )
   children.push(
@@ -907,60 +894,107 @@ async function openMenu() {
     )
   )
   children.push(
-    button(
-      'Click through the pet',
-      async () => {
-        config.clickThrough = !config.clickThrough
-        await saveConfig()
-      },
-      config.clickThrough
-    )
-  )
-
-  children.push(heading('Setup'))
-  // The chord shown is the one that registered, which is not always the one
-  // that was asked for: another program may already own it.
-  children.push(
-    button(chord ? `Show or hide with ${chord}` : 'No global hotkey available', () =>
-      showNotice(
-        chord
-          ? `${chord} shows and hides the pet. Change it with "hotkey" in ~/.pipsqueak/config.json.`
-          : 'Every candidate hotkey is already taken. Set "hotkey" in ~/.pipsqueak/config.json to a free one.'
-      )
-    )
-  )
-  children.push(button('Check my setup…', () => showDoctor()))
-  children.push(button('Check for updates', () => checkForUpdate(true)))
-  children.push(
-    button(
-      'Check for updates automatically',
-      async () => {
-        config.updateCheck = !config.updateCheck
-        await saveConfig()
-        if (config.updateCheck) checkForUpdate(true)
-      },
-      config.updateCheck
-    )
-  )
-  children.push(
-    button(
-      'Start with Windows',
-      async () => {
-        const result = await invoke('set_autostart', { enabled: !autostart }).catch((e) =>
-          String(e)
-        )
-        if (typeof result === 'string') showNotice(result)
-      },
-      autostart
-    )
-  )
-  children.push(
-    button(installed ? 'Reinstall Claude Code hooks' : 'Install Claude Code hooks', async () => {
-      const message = await invoke('install_hooks').catch((e) => String(e))
-      showNotice(message)
+    button(stackHidden ? 'Show the cards' : 'Hide the cards', () => {
+      stackHidden = !stackHidden
+      collapsed.clear()
     })
   )
-  children.push(button('Open pets folder', () => invoke('open_pets_dir').catch(() => {})))
+
+  children.push(rule())
+  children.push(
+    button(menuExpanded ? 'Less' : 'More…', () => {
+      menuExpanded = !menuExpanded
+      openMenu()
+    })
+  )
+
+  if (menuExpanded) {
+    children.push(
+      button(
+        'Include scratch/temp sessions',
+        async () => {
+          config.showScratch = !config.showScratch
+          await saveConfig()
+        },
+        config.showScratch
+      )
+    )
+    children.push(
+      button(
+        'Sound when a project needs you',
+        async () => {
+          config.alertOnWaiting = !config.alertOnWaiting
+          await saveConfig()
+        },
+        config.alertOnWaiting
+      )
+    )
+    children.push(
+      button(
+        'Blink the tray when a project finishes',
+        async () => {
+          config.flashOnFinish = !config.flashOnFinish
+          await saveConfig()
+        },
+        config.flashOnFinish
+      )
+    )
+    children.push(
+      button(
+        'Click through the pet',
+        async () => {
+          config.clickThrough = !config.clickThrough
+          await saveConfig()
+        },
+        config.clickThrough
+      )
+    )
+    children.push(rule())
+    // The chord shown is the one that registered, which is not always the one
+    // that was asked for: another program may already own it.
+    children.push(
+      button(chord ? `Show or hide with ${chord}` : 'No global hotkey available', () =>
+        showNotice(
+          chord
+            ? `${chord} shows and hides the pet. Change it with "hotkey" in ~/.pipsqueak/config.json.`
+            : 'Every candidate hotkey is already taken. Set "hotkey" in ~/.pipsqueak/config.json to a free one.'
+        )
+      )
+    )
+    children.push(button('Check my setup…', () => showDoctor()))
+    children.push(
+      button(
+        'Check for updates automatically',
+        async () => {
+          config.updateCheck = !config.updateCheck
+          await saveConfig()
+          if (config.updateCheck) checkForUpdate(true)
+        },
+        config.updateCheck
+      )
+    )
+    children.push(
+      button(
+        'Start with Windows',
+        async () => {
+          const result = await invoke('set_autostart', { enabled: !autostart }).catch((e) =>
+            String(e)
+          )
+          if (typeof result === 'string') showNotice(result)
+        },
+        autostart
+      )
+    )
+    children.push(
+      button(installed ? 'Reinstall Claude Code hooks' : 'Install Claude Code hooks', async () => {
+        const message = await invoke('install_hooks').catch((e) => String(e))
+        showNotice(message)
+      })
+    )
+    children.push(button('Open pets folder', () => invoke('open_pets_dir').catch(() => {})))
+  }
+
+  children.push(rule())
   children.push(button('Quit Pipsqueak', () => invoke('quit')))
 
   el.menu.replaceChildren(...children)
@@ -1034,7 +1068,24 @@ function wireInteraction() {
   })
 
   // Poking it should do something. Cheap, and the first thing anyone tries.
-  el.pet.addEventListener('pointerenter', () => renderer.playOnce(JUMP_ROW))
+  el.pet.addEventListener('pointerenter', () => {
+    renderer.playOnce(JUMP_ROW)
+    // Long enough that reaching past the pet for something else never brings
+    // it up. It is only useful to someone who has stopped and is wondering.
+    clearTimeout(hintTimer)
+    // Not added to the hit rects on purpose: it cannot be clicked, so the
+    // window stays click-through underneath it.
+    hintTimer = setTimeout(() => {
+      el.hint.hidden = false
+    }, HINT_DELAY_MS)
+  })
+
+  const hideHint = () => {
+    clearTimeout(hintTimer)
+    el.hint.hidden = true
+  }
+  el.pet.addEventListener('pointerleave', hideHint)
+  el.pet.addEventListener('pointerdown', hideHint)
 
   el.pet.addEventListener('contextmenu', (event) => {
     event.preventDefault()

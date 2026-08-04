@@ -74,8 +74,8 @@ knows more: it keeps one record per chat under
 that record has both the chat's title and the id the app routes by, keyed by the
 same session id the hooks write.
 
-The overlay reads those records — head of the file only, skipping anything it
-has already seen unchanged — and joins them on. So a card shows the title you
+The overlay reads those records (head of the file only, skipping anything it
+has already seen unchanged) and joins them on. So a card shows the title you
 see in the app's own sidebar, and **↗** asks the app to open that exact chat
 (`claude://resume?session=<id>`, which for an id the app already holds is a
 navigation, not an import).
@@ -89,7 +89,7 @@ paths shortened to filenames, and **↗** falls back to matching a window title.
 Hooks fire at tool boundaries, so on their own they can only report a category:
 "Editing render.js" says what kind of thing is happening, never the point of it.
 The point is in the sentence Claude writes just before it reaches for the tool,
-and Claude Code appends that to the session transcript as it happens — the path
+and Claude Code appends that to the session transcript as it happens. The path
 comes in on every hook payload as `transcript_path`.
 
 So the overlay follows the transcript: only the bytes appended since the last
@@ -103,7 +103,7 @@ Three settings, from the right-click menu:
 | --- | --- |
 | Say nothing while working | the tool line, as before |
 | Say what Claude tells you | the last thing it said to you, roughly every 80s |
-| Say what Claude is thinking | that, plus the last line of each thought — roughly every 20s, which is the one that feels alive |
+| Say what Claude is thinking | that, plus the last line of each thought, roughly every 20s. The one that feels alive |
 
 Greetings and one-word acknowledgements are skipped, so a reply that opens
 "Tristan," narrates the line after it.

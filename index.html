@@ -24,7 +24,13 @@
         <div id="panel-body"></div>
       </section>
 
-      <canvas id="pet" width="96" height="96" title="Pipsqueak: click to hide the cards, right-click for options, drag to move"></canvas>
+      <!--
+        The hint is ours rather than a `title`, because the operating system
+        shows one of those after half a second, and half a second is short
+        enough that it fires every time the cursor merely passes the pet.
+      -->
+      <p id="hint" class="hint" hidden>Click to hide the cards · right-click for options · drag to move</p>
+      <canvas id="pet" width="96" height="96"></canvas>
     </main>
 
     <template id="card-template">
