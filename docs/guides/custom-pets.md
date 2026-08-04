@@ -69,6 +69,8 @@ it is resting:
 | 9 | look, 0° to 157.5° | 8 |
 | 10 | look, 180° to 337.5° | 8 |
 
+![Byte drawn facing sixteen directions, clockwise from straight up](../../assets/look-byte.png)
+
 Sixteen still poses, one every 22.5°, going clockwise from **0° = straight up**.
 They are not an animation: the app holds whichever one points at the cursor, and
 falls back to the idle loop when the cursor is far away or right on top of the

@@ -241,7 +241,10 @@ function poseFor(row, f) {
         halo: { x: 40 + Math.round(dx * 2), y: 10 + Math.round(dy * 2), i: 0.75 },
         headDx: Math.round(dx),
         headDy: Math.round(dy),
-        faceDx: Math.round(dx * 2),
+        // The screen is 22 wide and 15 tall, so the face has more room to move
+        // sideways than up: three pixels across still leaves the eyes inside
+        // the glass, three down would push them through the bottom bezel.
+        faceDx: Math.round(dx * 3),
         faceDy: Math.round(dy * 2)
       }
     }
