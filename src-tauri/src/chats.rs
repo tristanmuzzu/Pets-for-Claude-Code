@@ -243,7 +243,11 @@ fn field(head: &str, key: &str) -> Option<String> {
                 'n' | 't' | 'r' => out.push(' '),
                 'u' => {
                     let hex: String = (0..4).filter_map(|_| chars.next()).collect();
-                    out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)?);
+                    out.push(
+                        u32::from_str_radix(&hex, 16)
+                            .ok()
+                            .and_then(char::from_u32)?,
+                    );
                 }
                 other => out.push(other),
             },
@@ -260,7 +264,10 @@ mod tests {
     #[test]
     fn reads_the_fields_the_app_writes_first() {
         let head = r#"{"sessionId": "local_abc", "cliSessionId": "5bb53f69-9c6c", "cwd": "C:\\code", "title": "Pet UI animations", "titleSource": "auto""#;
-        assert_eq!(field(head, "cliSessionId").as_deref(), Some("5bb53f69-9c6c"));
+        assert_eq!(
+            field(head, "cliSessionId").as_deref(),
+            Some("5bb53f69-9c6c")
+        );
         assert_eq!(field(head, "title").as_deref(), Some("Pet UI animations"));
     }
 

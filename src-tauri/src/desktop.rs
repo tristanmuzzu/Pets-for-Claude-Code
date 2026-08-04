@@ -246,4 +246,3 @@ mod windows_impl {
         }
     }
 }
-

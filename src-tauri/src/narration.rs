@@ -236,7 +236,11 @@ fn spoken(line: &str, mode: Mode) -> Option<String> {
 /// and started deciding, and "now check whether the poller still runs" is worth
 /// a card line in a way that "hmm, several things could be wrong here" is not.
 fn last_thought(raw: &str) -> Option<String> {
-    let mut lines: Vec<&str> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let mut lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     lines.reverse();
     for line in lines {
         // Whole sentences only. A trailing fragment mid-thought reads as a
@@ -317,8 +321,9 @@ mod tests {
         })
         .to_string();
         assert_eq!(spoken(&line, Mode::Thoughts), None);
-        let result = json!({ "type": "user", "message": { "content": [{ "type": "tool_result" }] } })
-            .to_string();
+        let result =
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result" }] } })
+                .to_string();
         assert_eq!(spoken(&result, Mode::Thoughts), None);
     }
 
@@ -354,7 +359,11 @@ mod tests {
         let mut watch = Watch::default();
         follow(&path, &mut watch, Mode::Speech);
         assert_eq!(watch.line, "First thing done.");
-        assert_eq!(watch.offset, whole.len() as u64 + 1, "the partial line is not consumed");
+        assert_eq!(
+            watch.offset,
+            whole.len() as u64 + 1,
+            "the partial line is not consumed"
+        );
 
         // The rest of it arrives, and is read exactly once.
         let second = entry("text", "Second thing done.");
@@ -364,4 +373,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-

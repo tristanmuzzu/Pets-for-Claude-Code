@@ -53,6 +53,29 @@ and `Win` plus a letter, digit or function key works. A chord with no modifier
 is refused, since it would take that key away from everything else on the
 machine.
 
+## When it stops behaving
+
+`~/.pipsqueak/log.txt` records what the overlay did: when it started and from
+which path, which hotkey it registered, when the page had to be reloaded, and
+when a session was retired. It is capped at a quarter of a megabyte and keeps
+the newest half.
+
+The failure worth knowing about is the quiet one. The window can be present,
+visible, correctly positioned and painting nothing, which looks exactly like
+the pet having vanished. Hiding and showing it does not help, because an empty
+page is empty either way. The overlay now notices this itself: the frontend
+reports in on every render, and 45 seconds of silence triggers a reload, logged.
+
+**Reload the overlay** in the right-click menu does the same thing on demand,
+and `pipsqueak control on` reloads as well, so the first thing anyone tries
+actually works.
+
+If the pet is running but Claude Code events never arrive, the program may have
+been removed from disk while it was still running. Windows keeps a deleted
+program running, so it looks healthy while every hook points at a path that no
+longer exists. The overlay checks for this and says so, and **Check my setup**
+reports it under "Hook program".
+
 ## CLI
 
 ```bash

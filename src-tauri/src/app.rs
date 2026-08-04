@@ -7,6 +7,7 @@ use crate::desktop;
 use crate::doctor;
 use crate::hotkey::{self, Binding};
 use crate::install;
+use crate::log;
 use crate::narration;
 use crate::state::{
     self, codex_pets_dir, load_config, pets_dir, read_sessions, root, sessions_dir, Config, Session,
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -42,6 +43,15 @@ const LOOK_INTERVAL: Duration = Duration::from_millis(60);
 /// Often enough that a crashed session disappears while you are still looking
 /// at the card, rare enough that it costs nothing.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// How long the frontend may go quiet before we assume the page is dead.
+///
+/// It reports its clickable regions at least once a second. Generous anyway,
+/// because Windows throttles timers hard for an occluded window and a needless
+/// reload is still a visible flicker.
+const FRONTEND_SILENT_MS: u64 = 45_000;
+/// A rescue that fails leaves the page just as dead, so retrying in a tight
+/// loop only fills the log.
+const RESCUE_INTERVAL_MS: u64 = 60_000;
 const WINDOW_LABEL: &str = "pet";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -67,6 +77,18 @@ impl Rect {
 
 #[derive(Default)]
 struct Interactive(Mutex<Vec<Rect>>);
+
+/// When the frontend last spoke to us.
+///
+/// It reports its clickable regions on every render, and it renders at least
+/// once a second, so silence means the page has stopped running. A window can
+/// be present, visible and correctly placed while painting nothing, and this
+/// is the only thing that can tell the difference.
+#[derive(Default)]
+struct Frontend {
+    last_seen_ms: AtomicU64,
+    last_rescue_ms: AtomicU64,
+}
 
 /// Mirrors `config.click_through` so the hit-test loop never touches the disk.
 #[derive(Default)]
@@ -125,7 +147,14 @@ fn set_config(app: AppHandle, config: Config) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_hit_rects(rects: Vec<Rect>, interactive: State<'_, Interactive>) {
+fn set_hit_rects(
+    rects: Vec<Rect>,
+    interactive: State<'_, Interactive>,
+    frontend: State<'_, Frontend>,
+) {
+    frontend
+        .last_seen_ms
+        .store(state::now_ms(), Ordering::Relaxed);
     if let Ok(mut guard) = interactive.0.lock() {
         *guard = rects;
     }
@@ -148,8 +177,8 @@ fn list_pets() -> Vec<PetInfo> {
         PetInfo {
             id: "byte".into(),
             display_name: "Byte".into(),
-            description: "A CRT-headed bot. Its screen shows the state, so the pet reads on its own."
-                .into(),
+            description:
+                "A CRT-headed bot. Its screen shows the state, so the pet reads on its own.".into(),
             source: "builtin",
         },
         PetInfo {
@@ -664,6 +693,8 @@ fn spawn_poller(app: AppHandle) {
                 // Same cadence, different job: catch an undock or an unplugged
                 // monitor that left the overlay somewhere you cannot reach it.
                 ensure_on_screen(&app);
+                watch_frontend(&app);
+                check_own_binary(&app);
                 next_sweep = Instant::now() + SWEEP_INTERVAL;
             }
             let sessions = current_sessions();
@@ -677,6 +708,85 @@ fn spawn_poller(app: AppHandle) {
             std::thread::sleep(POLL_INTERVAL);
         }
     });
+}
+
+/// Notices that the program has been deleted out from under itself.
+///
+/// Windows keeps a running image mapped after its file is gone, so the overlay
+/// carries on looking healthy while every hook Claude Code fires is pointing
+/// at a path that no longer exists. Nothing recovers from this on its own, and
+/// the only honest thing to do is say so once, loudly, and keep the record.
+fn check_own_binary(app: &AppHandle) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if exe.exists() {
+        REPORTED.store(false, Ordering::Relaxed);
+        return;
+    }
+    if REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    log::write(&format!(
+        "our own program is gone from {} — hooks will do nothing until it is reinstalled",
+        exe.display()
+    ));
+    let _ = app.emit(
+        "pipsqueak://notice",
+        "Pipsqueak has been removed from disk. Reinstall it: the hooks now point at a program that is not there.",
+    );
+}
+
+/// Notices when the page has stopped running, and reloads it.
+///
+/// The failure this exists for: the window is present, visible, correctly
+/// positioned and painting nothing. Hiding and showing it does not help,
+/// because an empty page is empty either way, and there is no error anywhere
+/// to suggest what happened. The frontend reports its clickable regions on
+/// every render, so silence is the signal.
+fn watch_frontend(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    // A hidden window is supposed to be quiet.
+    if !window.is_visible().unwrap_or(false) {
+        return;
+    }
+    let frontend = app.state::<Frontend>();
+    let last_seen = frontend.last_seen_ms.load(Ordering::Relaxed);
+    // Nothing heard yet at all: the page may still be loading.
+    if last_seen == 0 {
+        return;
+    }
+    let now = state::now_ms();
+    if now.saturating_sub(last_seen) < FRONTEND_SILENT_MS {
+        return;
+    }
+    if now.saturating_sub(frontend.last_rescue_ms.load(Ordering::Relaxed)) < RESCUE_INTERVAL_MS {
+        return;
+    }
+    frontend.last_rescue_ms.store(now, Ordering::Relaxed);
+    log::write(&format!(
+        "frontend silent for {}s, reloading the page",
+        now.saturating_sub(last_seen) / 1000
+    ));
+    reload_frontend(app);
+}
+
+/// Reloads the page in the overlay window.
+pub fn reload_frontend(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    match window.url() {
+        Ok(url) => {
+            if let Err(err) = window.navigate(url) {
+                log::write(&format!("reload failed: {err}"));
+            }
+        }
+        Err(err) => log::write(&format!("reload could not read the current url: {err}")),
+    }
 }
 
 /// Tells other invocations of the binary that an overlay is already up.
@@ -710,6 +820,10 @@ fn drain_commands(app: &AppHandle) {
     match action.as_str() {
         "show" => {
             let _ = window.show();
+            // "off then on" is what everyone tries first when the overlay is
+            // misbehaving, so it had better be able to fix the case where the
+            // window is fine and the page inside it is not.
+            reload_frontend(app);
         }
         "hide" => {
             let _ = window.hide();
@@ -758,6 +872,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         config.quiet,
         None::<&str>,
     )?;
+    let reload = MenuItem::with_id(app, "reload", "Reload the overlay", true, None::<&str>)?;
     let pets = MenuItem::with_id(app, "pets", "Open pets folder", true, None::<&str>)?;
     let hooks = MenuItem::with_id(
         app,
@@ -774,6 +889,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             &click_through,
             &quiet,
             &PredefinedMenuItem::separator(app)?,
+            &reload,
             &pets,
             &hooks,
             &PredefinedMenuItem::separator(app)?,
@@ -806,6 +922,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     attention::clear(app);
                 }
                 let _ = app.emit("pipsqueak://config", ());
+            }
+            "reload" => {
+                log::write("reload requested from the tray");
+                reload_frontend(app);
             }
             "pets" => {
                 let _ = open_pets_dir();
@@ -850,6 +970,7 @@ pub fn run() {
         .manage(Interactive::default())
         .manage(Attention::default())
         .manage(Binding::default())
+        .manage(Frontend::default())
         .manage(ClickThrough::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
@@ -890,15 +1011,25 @@ pub fn run() {
                 let _ = window.show();
             }
             build_tray(&handle)?;
+            log::write(&format!(
+                "started {} pid {} from {}",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id(),
+                std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "an unknown path".into())
+            ));
+
             // Whatever chord we actually got, so the menu can show it rather
             // than the one that was asked for.
             match hotkey::start(handle.clone()) {
                 Ok(chord) => {
+                    log::write(&format!("hotkey registered as {chord}"));
                     if let Ok(mut held) = handle.state::<Binding>().0.lock() {
                         *held = chord;
                     }
                 }
-                Err(reason) => eprintln!("no global hotkey: {reason}"),
+                Err(reason) => log::write(&format!("no global hotkey: {reason}")),
             }
 
             spawn_poller(handle.clone());

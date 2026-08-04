@@ -6,9 +6,9 @@
 //! would be parsed by Claude Code as hook output.
 
 use crate::process;
-use crate::text::{basename_or, first_line, summary_of, truncate};
 use crate::project;
 use crate::state::{now_ms, sanitize, sessions_dir, write_atomic, FileLock, Session};
+use crate::text::{basename_or, first_line, summary_of, truncate};
 use serde_json::Value;
 use std::fs;
 use std::io::Read;
@@ -290,7 +290,9 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 kind: "Thinking".into(),
                 activity: "Thinking…".into(),
                 detail: truncate(&prompt, 400),
-                headline: Some(summary_of(&prompt).unwrap_or_else(|| truncate(&first_line(&prompt), 90))),
+                headline: Some(
+                    summary_of(&prompt).unwrap_or_else(|| truncate(&first_line(&prompt), 90)),
+                ),
                 ..Default::default()
             }
         }
@@ -643,8 +645,6 @@ fn pretty_tool(tool: &str) -> String {
         tool.to_string()
     }
 }
-
-
 
 fn host_of(url: &str) -> String {
     let without_scheme = url.split("//").last().unwrap_or(url);

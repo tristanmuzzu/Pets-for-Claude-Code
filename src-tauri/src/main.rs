@@ -9,6 +9,7 @@ mod doctor;
 mod hook;
 mod hotkey;
 mod install;
+mod log;
 mod narration;
 mod process;
 mod project;
