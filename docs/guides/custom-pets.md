@@ -59,6 +59,26 @@ The atlas is one row per state, one column per frame:
 | 7 | running | 6 |
 | 8 | review | 6 |
 
+## Looking at the cursor
+
+A pet can have two more rows, and if it does, it turns to face the cursor while
+it is resting:
+
+| Row | State | Frames |
+| --- | --- | --- |
+| 9 | look, 0° to 157.5° | 8 |
+| 10 | look, 180° to 337.5° | 8 |
+
+Sixteen still poses, one every 22.5°, going clockwise from **0° = straight up**.
+They are not an animation: the app holds whichever one points at the cursor, and
+falls back to the idle loop when the cursor is far away or right on top of the
+pet. Say so in the manifest with `"spriteVersionNumber": 2`, `"rows": 11`, and
+frame counts `[6, 8, 8, 4, 5, 8, 6, 6, 6, 8, 8]`.
+
+The three built-in pets ship with them. It costs sixteen frames and it is the
+single biggest difference between a sprite on your desktop and something that
+appears to have noticed you.
+
 ## Timing
 
 `fps` gives every frame the same duration, which is what makes a short loop read
@@ -83,6 +103,12 @@ cells, `spritesheet.webp`), so **pets built for the Codex app work here
 unchanged**, including ones already installed in `~/.codex/pets`, which show up
 in the menu automatically. It works in the other direction too: copy
 `~/.pipsqueak/pets/*` into `~/.codex/pets/` and they run there.
+
+That contract has two versions and Pipsqueak reads both. A manifest saying
+`"spriteVersionNumber": 2` means an 8×11 atlas whose last two rows are the look
+directions above; anything else is read as the older 8×9 layout, which simply
+never looks anywhere. Pipsqueak's own pets are written as version 2, so they
+work in either app and turn their heads in both.
 
 ## The built-in ones
 

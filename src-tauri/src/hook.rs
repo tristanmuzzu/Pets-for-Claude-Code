@@ -6,6 +6,7 @@
 //! would be parsed by Claude Code as hook output.
 
 use crate::process;
+use crate::text::{basename_or, first_line, summary_of, truncate};
 use crate::project;
 use crate::state::{now_ms, sanitize, sessions_dir, write_atomic, FileLock, Session};
 use serde_json::Value;
@@ -61,9 +62,22 @@ pub fn run(fallback_event: Option<String>) {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
 
-    let Some(update) = classify(&event, &payload) else {
+    let Some(mut update) = classify(&event, &payload) else {
         return;
     };
+
+    // A subagent reporting in after the turn ended is bookkeeping, not new
+    // work. Taking it at face value cleared the outcome and relabelled a
+    // finished card "Delegating", so the turn that had just been announced as
+    // done went back to looking busy with nothing running.
+    let trailing_subagent = is_trailing_subagent(&event, &session.outcome);
+    if trailing_subagent {
+        update.state = "";
+        update.kind.clear();
+        update.activity.clear();
+        update.headline = None;
+        update.silent = true;
+    }
 
     let now = now_ms();
     if session.started_ms == 0 {
@@ -89,6 +103,12 @@ pub fn run(fallback_event: Option<String>) {
             session.scratch = resolved.scratch;
         }
     }
+    // Where the overlay can read what this session is saying while it works.
+    if let Some(transcript) = payload.get("transcript_path").and_then(Value::as_str) {
+        if !transcript.is_empty() {
+            session.transcript = transcript.to_string();
+        }
+    }
     if event == "PreToolUse" {
         session.tools += 1;
         session.turn_tools += 1;
@@ -100,7 +120,7 @@ pub fn run(fallback_event: Option<String>) {
         session.subagents = 0;
     }
 
-    if PROGRESS_EVENTS.contains(&event.as_str()) {
+    if PROGRESS_EVENTS.contains(&event.as_str()) && !trailing_subagent {
         session.clear_pending();
     }
     // Anything other than the prompt itself means the prompt is over.
@@ -266,7 +286,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 kind: "Thinking".into(),
                 activity: "Thinking…".into(),
                 detail: truncate(&prompt, 400),
-                headline: Some(truncate(&first_line(&prompt), 90)),
+                headline: Some(summary_of(&prompt).unwrap_or_else(|| truncate(&first_line(&prompt), 90))),
                 ..Default::default()
             }
         }
@@ -350,7 +370,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
         }
         "Stop" => {
             let message = text("last_assistant_message");
-            let summary = first_line(&message);
+            let summary = summary_of(&message);
             match stop_disposition(payload, &message) {
                 // Claude is not finished; it is about to carry on. Announcing
                 // "Done" here is the single easiest way for the pet to lie,
@@ -371,11 +391,10 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                     // The turn is over: a live line would only show a stale
                     // tool call.
                     detail: truncate(&message, 600),
-                    headline: Some(if summary.is_empty() {
-                        "Finished".into()
-                    } else {
-                        truncate(&summary, 140)
-                    }),
+                    // Nothing worth reading in the answer leaves the headline
+                    // alone, and what is already there is what the turn was
+                    // asked to do, which is still true.
+                    headline: summary,
                     outcome: "done",
                     settle_ms,
                     ..Default::default()
@@ -617,20 +636,7 @@ fn pretty_tool(tool: &str) -> String {
     }
 }
 
-fn basename(path: &str) -> String {
-    path.rsplit(['/', '\\'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(path)
-        .to_string()
-}
 
-fn basename_or(path: &str, fallback: &str) -> String {
-    if path.is_empty() {
-        fallback.to_string()
-    } else {
-        basename(path)
-    }
-}
 
 fn host_of(url: &str) -> String {
     let without_scheme = url.split("//").last().unwrap_or(url);
@@ -650,22 +656,12 @@ fn short(value: &str, fallback: &str) -> String {
     }
 }
 
-fn first_line(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn truncate(text: &str, limit: usize) -> String {
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= limit {
-        return trimmed.to_string();
-    }
-    let mut out: String = trimmed.chars().take(limit.saturating_sub(1)).collect();
-    out.push('…');
-    out
+/// A subagent event that arrives after the turn it belonged to has ended.
+///
+/// Claude Code sends `SubagentStop` for work that outlives the answer, so this
+/// is routine rather than exceptional, and it must not restart the turn.
+fn is_trailing_subagent(event: &str, outcome: &str) -> bool {
+    matches!(event, "SubagentStart" | "SubagentStop") && !outcome.is_empty()
 }
 
 #[cfg(test)]
@@ -903,6 +899,60 @@ mod tests {
                 "{event} should leave the headline alone"
             );
         }
+    }
+
+    /// The opening line of a reply is often a greeting, and a card that says
+    /// "Tristan," has spent its only line saying nothing.
+    #[test]
+    fn a_greeting_is_not_a_summary() {
+        let update = classify(
+            "Stop",
+            &json!({ "last_assistant_message": "Tristan,\n\nFixed the timezone bug." }),
+        )
+        .unwrap();
+        assert_eq!(update.headline.as_deref(), Some("Fixed the timezone bug."));
+    }
+
+    /// An answer with nothing quotable in it leaves the headline alone rather
+    /// than replacing what the turn was about with "Finished".
+    #[test]
+    fn an_answer_with_nothing_to_say_keeps_the_question() {
+        let update = classify("Stop", &json!({ "last_assistant_message": "Tristan," })).unwrap();
+        assert_eq!(update.outcome, "done");
+        assert!(update.headline.is_none());
+    }
+
+    /// A dragged-in file arrives as an absolute path, and the path is the
+    /// least useful part of it.
+    #[test]
+    fn a_dropped_file_is_named_not_pathed() {
+        let update = classify(
+            "UserPromptSubmit",
+            &json!({ "prompt": "@\"C:\\Users\\acer\\Downloads\\CLAUDE 1.md\"" }),
+        )
+        .unwrap();
+        assert_eq!(update.headline.as_deref(), Some("CLAUDE 1.md"));
+
+        let mentioned = classify(
+            "UserPromptSubmit",
+            &json!({ "prompt": "compare @src/derive.js with ./tools/pixel.mjs please" }),
+        )
+        .unwrap();
+        assert_eq!(
+            mentioned.headline.as_deref(),
+            Some("compare derive.js with pixel.mjs please")
+        );
+    }
+
+    /// The `SubagentStop` for work that outlived the answer used to clear the
+    /// outcome, which turned a card that had just said "Done" back into
+    /// "Delegating" with nothing running.
+    #[test]
+    fn a_late_subagent_does_not_unfinish_a_turn() {
+        assert!(is_trailing_subagent("SubagentStop", "done"));
+        assert!(is_trailing_subagent("SubagentStart", "failed"));
+        assert!(!is_trailing_subagent("SubagentStop", ""));
+        assert!(!is_trailing_subagent("PreToolUse", "done"));
     }
 
     #[test]

@@ -37,6 +37,27 @@ pub fn focus_window_titled(fragments: &[String]) -> bool {
     }
 }
 
+/// Hands a URL to whatever is registered for its scheme.
+///
+/// Deliberately not `explorer`, which is right for a folder and wrong for a
+/// URL: given a scheme it does not recognise it falls back to treating the
+/// string as a path and opens a file window, which is what the ↗ arrow did
+/// before this existed.
+pub fn open_url(url: &str) -> bool {
+    #[cfg(windows)]
+    {
+        windows_impl::shell_open(url)
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let opener = "xdg-open";
+        quiet_command(opener).arg(url).spawn().is_ok()
+    }
+}
+
 pub fn alert() {
     #[cfg(windows)]
     unsafe {
@@ -114,12 +135,49 @@ mod windows_impl {
         fn EnumWindows(callback: extern "system" fn(Hwnd, isize) -> Bool, data: isize) -> Bool;
         fn GetWindowTextW(window: Hwnd, buffer: *mut u16, max: i32) -> i32;
         fn IsWindowVisible(window: Hwnd) -> Bool;
+        fn IsIconic(window: Hwnd) -> Bool;
         fn SetForegroundWindow(window: Hwnd) -> Bool;
         fn ShowWindow(window: Hwnd, command: i32) -> Bool;
         pub fn MessageBeep(kind: u32) -> Bool;
     }
 
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(
+            window: Hwnd,
+            operation: *const u16,
+            file: *const u16,
+            parameters: *const u16,
+            directory: *const u16,
+            show: i32,
+        ) -> Hwnd;
+    }
+
     const SW_RESTORE: i32 = 9;
+    const SW_SHOWNORMAL: i32 = 1;
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// The same call the shell makes when you type a URL into Run. Anything
+    /// over 32 is success; the error codes below it are all "nothing is
+    /// registered for this", which is not worth reporting to a pet.
+    pub fn shell_open(target: &str) -> bool {
+        let operation = wide("open");
+        let file = wide(target);
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        result as isize > 32
+    }
 
     struct Search {
         fragments: Vec<String>,
@@ -178,8 +236,14 @@ mod windows_impl {
             return false;
         }
         unsafe {
-            ShowWindow(search.best, SW_RESTORE);
+            // Only a *minimised* window is restored. `SW_RESTORE` on a
+            // maximised one un-maximises it, which is why bringing an editor
+            // forward used to shrink it to half the screen on the way.
+            if IsIconic(search.best) != 0 {
+                ShowWindow(search.best, SW_RESTORE);
+            }
             SetForegroundWindow(search.best) != 0
         }
     }
 }
+

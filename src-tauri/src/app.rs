@@ -2,10 +2,12 @@
 //! and animates the pet.
 
 use crate::attention::{self, Attention};
+use crate::chats;
 use crate::desktop;
 use crate::doctor;
 use crate::hotkey::{self, Binding};
 use crate::install;
+use crate::narration;
 use crate::state::{
     self, codex_pets_dir, load_config, pets_dir, read_sessions, root, sessions_dir, Config, Session,
 };
@@ -32,6 +34,11 @@ const HIT_TEST_FAR: Duration = Duration::from_millis(220);
 /// before it lands.
 const NEAR_PX: f64 = 90.0;
 const APPROACHING_PX: f64 = 320.0;
+/// How far outside the window a cursor is still worth telling the pet about,
+/// and how often to say so. A pet that can look at things wants this often
+/// enough to track a moving cursor and rarely enough to be free.
+const LOOK_RADIUS_PX: f64 = 420.0;
+const LOOK_INTERVAL: Duration = Duration::from_millis(60);
 /// Often enough that a crashed session disappears while you are still looking
 /// at the card, rare enough that it costs nothing.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
@@ -85,7 +92,19 @@ struct PetPayload {
 // --- commands ----------------------------------------------------------
 #[tauri::command]
 fn get_sessions() -> Vec<Session> {
-    read_sessions()
+    current_sessions()
+}
+
+/// Everything the overlay shows, with each session's desktop chat attached.
+///
+/// The hooks cannot supply the title: they run inside the session and know
+/// nothing about the window it is displayed in. It is joined on here instead,
+/// where a missing answer costs a nicer label and nothing else.
+fn current_sessions() -> Vec<Session> {
+    let mut sessions = read_sessions();
+    chats::decorate(&mut sessions);
+    narration::decorate(&mut sessions, narration::mode());
+    sessions
 }
 
 #[tauri::command]
@@ -101,6 +120,7 @@ fn set_config(app: AppHandle, config: Config) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
         let _ = window.set_ignore_cursor_events(config.click_through);
     }
+    narration::set_mode(narration::Mode::parse(&config.narrate));
     state::save_config(&config).map_err(|e| e.to_string())
 }
 
@@ -229,9 +249,27 @@ fn open_pets_dir() -> Result<(), String> {
     open_path(&dir)
 }
 
+/// Opens the chat a card is about.
+///
+/// The desktop app is a single window with the chats inside it, so "bring this
+/// forward" is two different actions: ask the app to show *that chat*, then
+/// raise the window. The first needs the id the app routes by, which only its
+/// own records have; without one there is nothing to aim at but a window title,
+/// and every chat shares the same one.
+#[tauri::command]
+fn focus_session(session_id: String, project: String, workspace: String) -> bool {
+    if let Some(chat) = chats::lookup(&session_id) {
+        if chats::open(&chat.id) {
+            // The app raises itself when it handles the link. Matching a title
+            // as well would only find the same window and risk fighting it.
+            return true;
+        }
+    }
+    focus_project(project, workspace)
+}
+
 /// Brings the window for a project forward. Matching is by window title, so it
 /// is best-effort: `false` means nothing recognisable was open.
-#[tauri::command]
 fn focus_project(project: String, workspace: String) -> bool {
     let mut fragments = Vec::new();
     if !workspace.is_empty() {
@@ -511,19 +549,14 @@ fn spawn_hit_test(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
         let mut interval = HIT_TEST_FAR;
+        let mut last_look: Option<Instant> = None;
+        let mut watching = false;
         loop {
             std::thread::sleep(interval);
             let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
                 continue;
             };
-            if app.state::<ClickThrough>().0.load(Ordering::Relaxed) {
-                if last != Some(true) {
-                    let _ = window.set_ignore_cursor_events(true);
-                    last = Some(true);
-                }
-                interval = HIT_TEST_FAR;
-                continue;
-            }
+            let click_through = app.state::<ClickThrough>().0.load(Ordering::Relaxed);
             let (Ok(cursor), Ok(origin), Ok(scale)) = (
                 window.cursor_position(),
                 window.outer_position(),
@@ -533,6 +566,40 @@ fn spawn_hit_test(app: AppHandle) {
             };
             let local_x = (cursor.x - origin.x as f64) / scale;
             let local_y = (cursor.y - origin.y as f64) / scale;
+
+            // Where the cursor is, for a pet that was drawn able to look at it.
+            // Rate-limited, and dropped entirely once the cursor is far away,
+            // because this is the one message in the app that could otherwise
+            // fire every frame.
+            let size = window
+                .inner_size()
+                .map(|size| (size.width as f64 / scale, size.height as f64 / scale))
+                .unwrap_or((0.0, 0.0));
+            let near = local_x > -LOOK_RADIUS_PX
+                && local_y > -LOOK_RADIUS_PX
+                && local_x < size.0 + LOOK_RADIUS_PX
+                && local_y < size.1 + LOOK_RADIUS_PX;
+            if last_look
+                .map(|at: Instant| at.elapsed() >= LOOK_INTERVAL)
+                .unwrap_or(true)
+                && (near || watching)
+            {
+                // `None` on the way out, once: the pet faces front again rather
+                // than staring at wherever the cursor was last seen.
+                let payload = near.then_some((local_x, local_y));
+                let _ = app.emit("pipsqueak://cursor", payload);
+                last_look = Some(Instant::now());
+                watching = near;
+            }
+
+            if click_through {
+                if last != Some(true) {
+                    let _ = window.set_ignore_cursor_events(true);
+                    last = Some(true);
+                }
+                interval = HIT_TEST_FAR;
+                continue;
+            }
             let (over, distance) = app
                 .state::<Interactive>()
                 .0
@@ -578,7 +645,7 @@ fn spawn_poller(app: AppHandle) {
                 ensure_on_screen(&app);
                 next_sweep = Instant::now() + SWEEP_INTERVAL;
             }
-            let sessions = read_sessions();
+            let sessions = current_sessions();
             let encoded = serde_json::to_string(&sessions).unwrap_or_default();
             if encoded != last {
                 last = encoded;
@@ -774,7 +841,7 @@ pub fn run() {
             install_hooks,
             hooks_installed,
             open_pets_dir,
-            focus_project,
+            focus_session,
             alert,
             flash_tray,
             run_doctor,
@@ -794,6 +861,7 @@ pub fn run() {
                 .state::<ClickThrough>()
                 .0
                 .store(config.click_through, Ordering::Relaxed);
+            narration::set_mode(narration::Mode::parse(&config.narrate));
             place_window(&handle, &config);
             if let Some(window) = handle.get_webview_window(WINDOW_LABEL) {
                 let _ = window.set_ignore_cursor_events(true);

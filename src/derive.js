@@ -15,10 +15,15 @@
  * is worth telling anyone about.
  */
 export const WAITING_DEBOUNCE_MS = 800
-/** How long a finished project keeps its card before collapsing to a chip. */
+/**
+ * How recently a turn must have ended for its card to count as news.
+ *
+ * A finished card is not on a timer: it stays until it is acknowledged, which
+ * is the only thing that proves anyone saw it. This is the separate question of
+ * whether a *newly seen* completion is worth a tray blink, so that starting the
+ * overlay does not announce everything that finished this morning.
+ */
 export const DONE_LINGER_MS = 30_000
-/** A failed turn is something you need to see, so it waits around longer. */
-export const FAILED_LINGER_MS = 5 * 60_000
 /** Quiet for this long and the pet visibly dozes off. */
 export const SLEEP_AFTER_MS = 60_000
 
@@ -95,11 +100,9 @@ export function displayState(session, now = Date.now()) {
     // Claude Code sends Stop while background work is still finishing. Until
     // the result settles it is still a running turn.
     if (now < (session.settles_ms || 0)) return session.state || 'running'
-    return now - (session.outcome_ms || 0) > DONE_LINGER_MS ? 'idle' : 'done'
+    return 'done'
   }
-  if (outcome === 'failed') {
-    return now - (session.outcome_ms || 0) > FAILED_LINGER_MS ? 'idle' : 'failed'
-  }
+  if (outcome === 'failed') return 'failed'
   return session.state || 'idle'
 }
 

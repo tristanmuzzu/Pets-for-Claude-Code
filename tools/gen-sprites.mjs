@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import {
   ROW_NAMES, Layer,
   drawEyes, drawWisp, drawLaptop, drawMagnifier, drawBang, drawSweat, drawSparkle,
-  wave, writePet
+  lookDirection, wave, writePet
 } from './pixel.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -171,8 +171,22 @@ function walkPose(f, n, colour) {
 }
 
 function poseFor(row, f) {
-  const colour = WISP[ROW_NAMES[row]]
+  const colour = WISP[ROW_NAMES[row]] ?? WISP.idle
   switch (ROW_NAMES[row]) {
+    // Sixteen directions: pupils lead, head follows by a pixel, wisp drifts
+    // the other way like something being watched.
+    case 'look-a':
+    case 'look-b': {
+      const { dx, dy } = lookDirection(row, f)
+      return {
+        wispColour: colour,
+        wisp: { x: 38 + Math.round(dx * 2), y: 11 + Math.round(dy * 2), i: 0.85 },
+        headDx: Math.round(dx),
+        headDy: Math.round(dy),
+        tail: -dx,
+        eyes: { gaze: { dx: Math.round(dx * 1.8), dy: Math.round(dy * 1.8) } }
+      }
+    }
     case 'idle': {
       const bob = wave(f, 6, 1)
       return {

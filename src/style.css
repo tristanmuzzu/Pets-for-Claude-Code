@@ -322,6 +322,24 @@ body {
 }
 
 /*
+ * What it is doing right now, in its own words.
+ *
+ * One line, always one line: it is replaced every time the session says
+ * something new, and a line that reflows the card each time it changes is a
+ * line you cannot ignore. Dimmer and smaller than the headline, because the
+ * headline is what the whole chat is about and this is only the current step.
+ */
+.narration {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
  * The status line. The word changes only when the *kind* of work changes; the
  * counters tick. That is the whole trick: you can watch it without reading it.
  */

@@ -42,8 +42,17 @@ for (const id of pets) {
 
     // Timings are optional, but a row that has them must have one per frame or
     // the loop silently falls back to a flat rate partway through.
+    // A version 2 atlas ends with two rows of look directions, which are still
+    // poses rather than animations and so are timed by the cursor, not here.
     if (manifest.frameDurations) {
-      assert.equal(manifest.frameDurations.length, manifest.rows, 'one timing row per atlas row')
+      assert.ok(
+        manifest.frameDurations.length <= manifest.rows,
+        'more timing rows than the atlas has'
+      )
+      assert.ok(
+        manifest.frameDurations.length >= manifest.rows - 2,
+        'animated rows must all be timed'
+      )
       for (const [row, durations] of manifest.frameDurations.entries()) {
         assert.equal(
           durations.length,
