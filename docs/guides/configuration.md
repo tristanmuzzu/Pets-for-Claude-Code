@@ -39,6 +39,12 @@ been pressed. Registering a chord and receiving one are separate things: a
 program with a low-level keyboard hook can swallow the keypress on its way
 past, and from inside Pipsqueak that looks exactly like nobody pressing it.
 
+The chord belongs to the running app, which makes **Hide** and **Quit** two
+different things. Hiding puts the pet away and leaves the process alive, so the
+chord and the tray icon still work. Quitting stops it, and nothing on the
+keyboard can bring back a program that is not running: start it from the Start
+menu again, or run `pipsqueak control on`, which starts it if it has to.
+
 Windows gives a chord to whichever program asks for it first, so if something
 else already owns `Ctrl+Alt+P`, Pipsqueak takes the next one it can get and the
 right-click menu shows which. Set `hotkey` in `config.json` to pick your own, or

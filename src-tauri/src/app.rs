@@ -362,6 +362,18 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Puts the pet away without stopping it.
+///
+/// The distinction matters more than it sounds: the global hotkey and the tray
+/// icon belong to this process, so quitting takes them with it and nothing on
+/// the keyboard can bring the pet back. Hiding leaves both alive.
+#[tauri::command]
+fn hide_window(app: AppHandle) {
+    if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
+        let _ = window.hide();
+    }
+}
+
 // --- helpers -----------------------------------------------------------
 fn find_pet_folder(id: &str) -> Option<PathBuf> {
     for dir in [pets_dir(), codex_pets_dir()] {
@@ -861,7 +873,8 @@ pub fn run() {
             hotkey_binding,
             autostart_enabled,
             set_autostart,
-            quit
+            quit,
+            hide_window
         ])
         .setup(|app| {
             let handle = app.handle().clone();

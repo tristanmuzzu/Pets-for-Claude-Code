@@ -995,7 +995,17 @@ async function openMenu() {
   }
 
   children.push(rule())
-  children.push(button('Quit Pipsqueak', () => invoke('quit')))
+  // Two different doors, and it was worth making the difference obvious. The
+  // hotkey and the tray icon belong to this process, so quitting takes them
+  // with it: nothing on the keyboard brings the pet back afterwards.
+  children.push(
+    button(chord ? `Hide the pet (${chord})` : 'Hide the pet', () => invoke('hide_window'))
+  )
+  const quit = button('Quit Pipsqueak', () => invoke('quit'))
+  quit.title = chord
+    ? `Stops Pipsqueak. ${chord} will not bring it back; start it again from the Start menu.`
+    : 'Stops Pipsqueak. Start it again from the Start menu.'
+  children.push(quit)
 
   el.menu.replaceChildren(...children)
   el.menu.hidden = false
