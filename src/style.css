@@ -710,12 +710,36 @@ body {
   cursor: pointer;
 }
 
+/*
+ * What the pet is for, shown only to someone who has stopped on it.
+ *
+ * Never in the way: it cannot be clicked, and it waits long enough that
+ * crossing the pet on the way somewhere else never summons it.
+ */
+.hint {
+  position: absolute;
+  right: 112px;
+  bottom: 26px;
+  margin: 0;
+  max-width: 200px;
+  padding: 5px 8px;
+  border: 1px solid var(--edge);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+  pointer-events: none;
+  animation: rise 140ms ease-out;
+}
+
 /* --- right-click menu ------------------------------------------------- */
 .menu {
   position: absolute;
   right: 10px;
   bottom: 106px;
-  width: 200px;
+  width: 210px;
   padding: 6px;
   display: flex;
   flex-direction: column;
@@ -724,6 +748,46 @@ body {
   border-radius: 10px;
   background: var(--surface);
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42);
+  /* However long the menu gets, it stops at the top of the window instead of
+     running off it, which used to clip the first few items. */
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* Choices that belong together sit on one line as chips, which is the
+   difference between a menu you read and a menu you scroll. */
+.menu .row {
+  display: flex;
+  gap: 3px;
+}
+
+.menu .row button {
+  flex: 1 1 0;
+  /* Without this a flex item refuses to shrink below its own text, so a third
+     chip is pushed off the edge of the menu instead of the three sharing it. */
+  min-width: 0;
+  text-align: center;
+  padding: 5px 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu .row button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: var(--edge);
+}
+
+.menu .row button[aria-pressed="true"]::after {
+  content: none;
+}
+
+.menu .rule {
+  height: 1px;
+  margin: 3px 2px;
+  background: var(--edge);
 }
 
 .menu .heading {

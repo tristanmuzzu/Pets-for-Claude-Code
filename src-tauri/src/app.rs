@@ -143,16 +143,25 @@ fn save_position(app: AppHandle, x: i32, y: i32) -> Result<(), String> {
 #[tauri::command]
 fn list_pets() -> Vec<PetInfo> {
     let mut pets = vec![
+        // Byte is the default, and was missing from this list, so the menu
+        // could switch away from it and never back.
         PetInfo {
-            id: "ember".into(),
-            display_name: "Ember".into(),
-            description: "A clay pebble with a spark for a status light.".into(),
+            id: "byte".into(),
+            display_name: "Byte".into(),
+            description: "A CRT-headed bot. Its screen shows the state, so the pet reads on its own."
+                .into(),
             source: "builtin",
         },
         PetInfo {
             id: "pip".into(),
             display_name: "Pip".into(),
             description: "An ember-fox with a status wisp.".into(),
+            source: "builtin",
+        },
+        PetInfo {
+            id: "ember".into(),
+            display_name: "Ember".into(),
+            description: "A clay pebble with a spark for a status light.".into(),
             source: "builtin",
         },
     ];
@@ -198,7 +207,7 @@ fn list_pets() -> Vec<PetInfo> {
 
 #[tauri::command]
 fn load_pet(id: String) -> Result<PetPayload, String> {
-    if id == "ember" || id == "pip" {
+    if id == "byte" || id == "ember" || id == "pip" {
         return Ok(PetPayload {
             manifest: Value::Null,
             image_data_url: None,
