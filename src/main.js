@@ -1198,7 +1198,6 @@ async function boot() {
     const stale = Date.now() - (session.outcome_ms || 0) > DONE_LINGER_MS
     if (session.outcome && stale) acknowledged.add(outcomeKey(session))
   })
-  render()
 
   await listen('pipsqueak://sessions', (event) => {
     const incoming = event.payload ?? []
@@ -1247,6 +1246,30 @@ async function boot() {
       showNotice(String(error))
     }
   })
+
+  // The backend asking whether the page is alive. Timers are throttled hard
+  // for an occluded window, so the render loop can go quiet without the page
+  // being broken; event delivery is not throttled, so answer directly and let
+  // the watchdog stand down instead of reloading a healthy page.
+  await listen('pipsqueak://ping', () => {
+    invoke('frontend_pong').catch(() => {})
+  })
+
+  // A config change made from the tray. Merge only the fields the tray owns:
+  // taking the whole object would clobber an in-flight change on this side,
+  // and ignoring it meant the next save here silently reverted the tray's.
+  await listen('pipsqueak://config', (event) => {
+    const stored = event.payload
+    if (!stored || typeof stored !== 'object') return
+    config.clickThrough = Boolean(stored.click_through)
+    config.quiet = Boolean(stored.quiet)
+    render()
+  })
+
+  // Listeners are attached: anything emitted before this moment was lost, so
+  // ask the poller to send the current state again.
+  await invoke('frontend_ready').catch(() => {})
+  render()
 
   scheduleUpdateChecks()
 
