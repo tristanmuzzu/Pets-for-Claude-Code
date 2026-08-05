@@ -462,12 +462,16 @@ impl FileLock {
                     // event for this session forever.
                     if attempt == 0 {
                         if let Ok(meta) = fs::metadata(&path) {
+                            // Only steal a lock that is *provably* old. An
+                            // unreadable age (clock skew, metadata failure)
+                            // used to count as expired, which deleted a live
+                            // holder's lock and let two writers interleave.
                             let expired = meta
                                 .modified()
                                 .ok()
                                 .and_then(|t| t.elapsed().ok())
                                 .map(|age| age.as_secs() >= 2)
-                                .unwrap_or(true);
+                                .unwrap_or(false);
                             if expired {
                                 let _ = fs::remove_file(&path);
                                 continue;
@@ -500,7 +504,15 @@ pub fn read_sessions() -> Vec<Session> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Some(session) = fs::read_to_string(&path)
+        // One transient read failure (an AV scanner holding the file for a
+        // moment) must not drop the session from this emit: the frontend
+        // tears a missing card all the way down and rebuilds it on the next
+        // tick, which reads as a flash.
+        let raw = fs::read_to_string(&path).or_else(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            fs::read_to_string(&path)
+        });
+        if let Some(session) = raw
             .ok()
             .and_then(|raw| serde_json::from_str::<Session>(&raw).ok())
         {
@@ -550,11 +562,23 @@ pub fn sweep() -> usize {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Some(mut session) = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Session>(&raw).ok())
-        else {
-            // Unreadable or from an incompatible build: it can only mislead.
+        // The same lock the hooks hold for their read-modify-write. Without
+        // it, the sweep could read a snapshot, lose the race to a fresh
+        // event, and then write its stale verdict (or a deletion) over the
+        // new turn — a card flashing "Stopped responding" seconds after work
+        // began.
+        let _lock = FileLock::acquire(&path);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            // Could not read: an AV scanner or indexer briefly holding the
+            // file. Deleting on that verdict removed live sessions, and the
+            // next hook event recreated them as brand-new cards. Leave it for
+            // the next sweep to look at again.
+            Err(_) => continue,
+        };
+        let Some(mut session) = serde_json::from_str::<Session>(&raw).ok() else {
+            // Read fine but does not parse: genuinely corrupt or from an
+            // incompatible build. It can only mislead.
             let _ = fs::remove_file(&path);
             changed += 1;
             continue;
