@@ -48,7 +48,7 @@ time you're paying for twice.
 
 A status line doesn't fix it, because it lives in the window you're not looking
 at. So the status moved out of the window. A pet on top of everything, one card
-per project, and a line that says what's happening, near enough to your cursor
+per chat, and a line that says what's happening, near enough to your cursor
 that you read it without meaning to.
 
 ## What you actually see

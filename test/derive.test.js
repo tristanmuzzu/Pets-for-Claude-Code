@@ -8,7 +8,6 @@ import {
   displayState,
   holdState,
   isNewer,
-  rank,
   relativeTime
 } from '../src/derive.js'
 
@@ -78,16 +77,6 @@ test('a session the sweep gave up on reads as idle, not finished', () => {
   // failure, and it must not outrank either.
   const session = quiet({ state: 'running', stalled: true })
   assert.equal(displayState(session, NOW), 'idle')
-})
-
-test('the busiest session speaks for a project', () => {
-  const blocked = quiet({ pending_since: NOW })
-  const working = quiet({ state: 'running' })
-  const finished = quiet({ state: 'idle', outcome: 'done' })
-  const asleep = quiet({ state: 'idle' })
-  assert.ok(rank(blocked) > rank(working))
-  assert.ok(rank(working) > rank(finished))
-  assert.ok(rank(finished) > rank(asleep))
 })
 
 test('a state holds long enough to be read', () => {

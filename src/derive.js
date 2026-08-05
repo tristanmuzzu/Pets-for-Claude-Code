@@ -53,15 +53,6 @@ export const DISPLAY = {
 
 export const priority = (state) => DISPLAY[state]?.rank ?? 1
 
-/** Which of a project's sessions gets to speak for it. */
-export function rank(session) {
-  if (session.waiting_since || session.pending_since) return 4
-  if (session.outcome === 'failed') return 3
-  if (RUNNING.has(session.state)) return 2
-  if (session.outcome === 'done') return 1
-  return 0
-}
-
 /**
  * What the session is blocked on, once it has been blocked long enough to be
  * worth saying. Empty while the prompt is still inside the debounce.

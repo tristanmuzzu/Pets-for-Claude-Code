@@ -14,7 +14,6 @@ import {
   duration,
   holdState,
   isNewer,
-  rank,
   relativeTime
 } from './derive.js'
 
@@ -24,9 +23,9 @@ const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in windo
 /** Replaced at build time from package.json. See vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
 
-/** How many project cards are shown in full before the stack collapses. */
+/** How many chat cards are shown in full before the stack collapses. */
 const SLOT_LIMIT = 3
-/** How many projects fit once they are one line each. */
+/** How many chats fit once they are one line each. */
 const DENSE_LIMIT = 6
 
 const el = {
@@ -79,7 +78,7 @@ let seenSessions = new Set()
 /**
  * Card order is a property of the UI, not of the data. Sorting by "most
  * recently updated" on every hook event made the visible set churn every few
- * hundred milliseconds. A project keeps its slot until it goes quiet.
+ * hundred milliseconds. A chat keeps its slot until it goes quiet.
  */
 let slots = []
 const views = new Map()
@@ -98,7 +97,7 @@ const chipNodes = new Map()
  */
 const acknowledged = new Set()
 /**
- * The project holding the one full card while the stack is collapsed.
+ * The chat holding the one full card while the stack is collapsed.
  *
  * Null means "whichever is nearest the pet", which is the busiest or most
  * urgent one. Clicking a collapsed line hands it the card, because the thing
@@ -130,31 +129,37 @@ function viewFor(key) {
   return view
 }
 
+/** What to call a session when it has no chat title of its own yet. */
+const projectName = (session) => session.project || session.session_id.slice(0, 8)
+
 /**
- * One card per project. Several sessions can share a project (worktrees,
- * subagents); the busiest one speaks for it.
+ * One card per chat.
+ *
+ * These used to be grouped by project, with the busiest session speaking for
+ * the rest. Two chats open on the same repository are both busy, so the card
+ * swapped identity every time the other one ran a tool: title, narration,
+ * subagent count and elapsed time all belonged to whichever chat had moved
+ * last. It read as one card flickering between two chats, or as a chat being
+ * removed. A chat is the thing a person has open, so a chat is what gets a
+ * card; the project name stays on it as context.
  */
-function groupByProject(list) {
-  const groups = []
-  const index = new Map()
+function cardsFor(list) {
+  const out = []
   for (const session of list) {
     if (session.scratch && !config.showScratch) continue
-    const key = session.project || session.session_id.slice(0, 8)
-    const existing = index.get(key)
-    if (existing) {
-      existing.count += 1
-      if (rank(session) > rank(existing.session)) existing.session = session
-      continue
-    }
-    const group = { key, session, count: 1 }
-    index.set(key, group)
-    groups.push(group)
+    const key = session.session_id
+    const state = effectiveState(key, session)
+    out.push({
+      key,
+      session,
+      state,
+      live: ACTIVE.has(state),
+      // The chat's own name when the desktop app knows it, and the project
+      // otherwise: what a one-line chip has room to say.
+      label: session.chat_title || projectName(session)
+    })
   }
-  for (const group of groups) {
-    group.state = effectiveState(group.key, group.session)
-    group.live = ACTIVE.has(group.state)
-  }
-  return groups
+  return out
 }
 
 
@@ -208,14 +213,9 @@ function holdLine(view, line, now = Date.now()) {
 
 /** Marks a finished turn as seen, which is what removes its card. */
 function acknowledge(key) {
-  const group = groupByProject(sessions).find((candidate) => candidate.key === key)
-  if (!group || !settled(group.state)) return false
-  // Every session in the project, not just the one that speaks for it: one
-  // click means "I have seen this card", and the card stands for all of them.
-  for (const session of sessions) {
-    const project = session.project || session.session_id.slice(0, 8)
-    if (project === key && session.outcome) acknowledged.add(outcomeKey(session))
-  }
+  const card = cardsFor(sessions).find((candidate) => candidate.key === key)
+  if (!card || !settled(card.state)) return false
+  if (card.session.outcome) acknowledged.add(outcomeKey(card.session))
   viewFor(key).unread = false
   return true
 }
@@ -232,11 +232,13 @@ function buildCard(key) {
   })
   node.querySelector('.focus').addEventListener('click', (event) => {
     event.stopPropagation()
-    const group = groupByProject(sessions).find((candidate) => candidate.key === key)
+    const card = cardsFor(sessions).find((candidate) => candidate.key === key)
+    // The key *is* the session, so this always opens the chat on the card
+    // rather than whichever chat in the project happened to move last.
     invoke('focus_session', {
-      sessionId: group?.session.session_id ?? '',
-      project: key,
-      workspace: group?.session.workspace ?? ''
+      sessionId: key,
+      project: card ? projectName(card.session) : '',
+      workspace: card?.session.workspace ?? ''
     }).catch(() => {})
   })
   node.addEventListener('click', () => {
@@ -258,21 +260,17 @@ function buildCard(key) {
   return node
 }
 
-function paintCard(node, group, compact = false) {
-  const { session, key, count, state } = group
+function paintCard(node, card, compact = false) {
+  const { session, key, state } = card
 
   node.dataset.state = state
   node.dataset.density = compact ? 'compact' : 'full'
-  node.querySelector('.project').textContent = key
+  node.querySelector('.project').textContent = projectName(session)
   node.querySelector('.age').textContent = relativeTime(session.updated_ms)
 
   const workspace = node.querySelector('.workspace')
   workspace.hidden = !session.workspace
   workspace.textContent = session.workspace || ''
-
-  const countNode = node.querySelector('.count')
-  countNode.hidden = count < 2
-  countNode.textContent = `${count}×`
 
   const view = viewFor(key)
   node.querySelector('.unread').hidden = !view.unread
@@ -384,6 +382,7 @@ function buildChip(key) {
   const dot = document.createElement('span')
   dot.className = 'dot'
   const text = document.createElement('span')
+  text.className = 'label'
   button.append(dot, text)
   button.addEventListener('click', () => {
     stackHidden = false
@@ -395,10 +394,18 @@ function buildChip(key) {
 }
 
 function render() {
-  const groups = groupByProject(sessions)
+  const groups = cardsFor(sessions)
   const byKey = new Map(groups.map((group) => [group.key, group]))
 
-  // Slots only change when a project starts or stops being active, or when one
+  // A chat that is gone is never coming back under the same id, so anything
+  // remembered about it is a leak. Keyed by session rather than by project,
+  // these maps would otherwise grow for the life of the overlay.
+  const known = new Set(sessions.map((session) => session.session_id))
+  for (const key of [...views.keys()]) if (!known.has(key)) views.delete(key)
+  for (const key of [...collapsed]) if (!known.has(key)) collapsed.delete(key)
+  if (promoted && !known.has(promoted)) promoted = null
+
+  // Slots only change when a chat starts or stops being active, or when one
   // starts needing attention. Ordinary progress never reorders anything.
   const liveKeys = groups.filter((group) => group.live).map((group) => group.key)
   slots = slots.filter((key) => liveKeys.includes(key))
@@ -446,10 +453,10 @@ function render() {
   const dozing = config.quiet || Date.now() - lastLiveAt > SLEEP_AFTER_MS
   el.pet.classList.toggle('asleep', dozing)
 
-  // Three projects fit as cards. Past that the stack would own the screen, so
-  // it collapses: one card for the project being watched, one line each for the
-  // rest, which is enough to see what every project is doing and to close any
-  // of them. More projects than that fit *because* they are lines.
+  // Three chats fit as cards. Past that the stack would own the screen, so it
+  // collapses: one card for the chat being watched, one line each for the rest,
+  // which is enough to see what every chat is doing and to close any of them.
+  // More chats than that fit *because* they are lines.
   const wanted = stackHidden ? [] : slots.filter((key) => !collapsed.has(key))
   const dense = wanted.length > SLOT_LIMIT
   const visible = wanted.slice(0, dense ? DENSE_LIMIT : SLOT_LIMIT)
@@ -509,7 +516,10 @@ function renderChips(groups) {
       el.chips.append(node)
     }
     node.querySelector('.dot').style.background = `var(--${group.state})`
-    node.lastElementChild.textContent = group.key
+    // A chat title is longer than a project name was, and a chip is a pill:
+    // the row clips it and the tooltip carries the rest.
+    node.lastElementChild.textContent = group.label
+    node.title = group.label
   }
   el.chips.hidden = chipNodes.size === 0
 }
@@ -1250,7 +1260,7 @@ async function loadPetPayload(id) {
   return invoke('load_pet', { id })
 }
 
-/** What each demo project is "saying", so the main line has real sentences. */
+/** What each demo chat is "saying", so the main line has real sentences. */
 const DEMO_LINES = {
   clockwork: [
     'Reading the formatter to see which clock it trusts.',
@@ -1271,6 +1281,10 @@ const DEMO_LINES = {
   atlas: [
     'Tiles are re-fetched every hour for no reason.',
     'Setting a week of cache with a content hash in the path.'
+  ],
+  migration: [
+    'Writing the backfill for the invoices already issued.',
+    'Batching it at a thousand rows so the table stays writable.'
   ]
 }
 
@@ -1283,9 +1297,13 @@ function startBrowserDemo() {
     clockwork: 'Timezone test flakiness',
     orchestrator: 'Tier C eval coverage',
     ledger: 'Invoice rounding rules',
-    atlas: 'Tile server cache headers'
+    atlas: 'Tile server cache headers',
+    migration: 'Backfill for issued invoices'
   }
-  // Four projects rather than two: three is where the stack collapses, and a
+  // Two chats on the same repository, because that is the case the card layout
+  // has to survive: they get a card each, and the project name on both.
+  const projects = { migration: 'ledger' }
+  // Five chats rather than two: three is where the stack collapses, and a
   // layout whose rule you cannot see is a layout you cannot design.
   const scripts = {
     clockwork: [
@@ -1311,6 +1329,11 @@ function startBrowserDemo() {
       ['running', 'Running', 'Cache tiles for a week, not an hour'],
       ['thinking', 'Thinking', 'Cache tiles for a week, not an hour'],
       ['running', 'Editing', 'Cache tiles for a week, not an hour']
+    ],
+    migration: [
+      ['running', 'Editing', 'Backfill the invoices already issued'],
+      ['running', 'Running', 'Backfill the invoices already issued'],
+      ['thinking', 'Thinking', 'Backfill the invoices already issued']
     ]
   }
   // In the app the cursor arrives from the window manager, because the overlay
@@ -1329,7 +1352,7 @@ function startBrowserDemo() {
   const started = Date.now() - 143_000
   const advance = () => {
     const now = Date.now()
-    sessions = Object.entries(scripts).map(([project, steps], i) => {
+    sessions = Object.entries(scripts).map(([chat, steps], i) => {
       const [want, kind, headline] = steps[(tick + i) % steps.length]
       // The demo speaks in display states; the real files speak in the three
       // separate fields, so translate rather than special-case the renderer.
@@ -1339,9 +1362,9 @@ function startBrowserDemo() {
       // Being blocked does not change what the session was doing.
       else if (want === 'waiting') durable = 'running'
       return {
-        session_id: project,
-        project,
-        chat_title: titles[project] ?? '',
+        session_id: chat,
+        project: projects[chat] ?? chat,
+        chat_title: titles[chat] ?? '',
         workspace: i === 1 ? 'feature-x' : '',
         scratch: false,
         state: durable,
@@ -1362,7 +1385,7 @@ function startBrowserDemo() {
         headline,
         // In a real session this is whatever Claude last said or thought; the
         // demo needs one so the line can be designed at its real length.
-        narration: DEMO_LINES[project]?.[tick % DEMO_LINES[project].length] ?? '',
+        narration: DEMO_LINES[chat]?.[tick % DEMO_LINES[chat].length] ?? '',
         activity: `${kind} something`,
         detail: want === 'failed' ? 'expected 03:00 to be 02:00' : '',
         updated_ms: now,

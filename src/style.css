@@ -259,21 +259,11 @@ body {
   white-space: nowrap;
 }
 
-.count,
 .age {
   font-size: 10.5px;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
   flex: none;
-}
-
-.count {
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.age {
   margin-left: auto;
 }
 
@@ -586,6 +576,15 @@ body {
 .chips .dot {
   width: 6px;
   height: 6px;
+}
+
+/* A chip names a chat now, and a chat title is a sentence. Clipped rather than
+   allowed to set the width of the row it sits in. */
+.chips .label {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- welcome / setup check ------------------------------------------- */
