@@ -58,6 +58,16 @@ test('a completion that has not settled is still a running turn', () => {
   assert.equal(displayState(session, NOW + 2001), 'done')
 })
 
+test('a settling turn stays on screen even though the producer wrote idle', () => {
+  // The hook writes `state: "idle"` together with the outcome. Reporting that
+  // idle during the settle window took the card out of the DOM for two
+  // seconds and popped it back in as "done" — the flicker this window exists
+  // to prevent.
+  const session = quiet({ state: 'idle', outcome: 'done', outcome_ms: NOW, settles_ms: NOW + 2000 })
+  assert.equal(displayState(session, NOW), 'running')
+  assert.equal(displayState(session, NOW + 2001), 'done')
+})
+
 test('a finished turn stays finished until somebody looks at it', () => {
   // No timer: a card that removes itself after 30s is a card that finished
   // while you were in a meeting and never told you.

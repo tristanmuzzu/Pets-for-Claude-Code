@@ -89,8 +89,13 @@ export function displayState(session, now = Date.now()) {
   const outcome = session.outcome || ''
   if (outcome === 'done') {
     // Claude Code sends Stop while background work is still finishing. Until
-    // the result settles it is still a running turn.
-    if (now < (session.settles_ms || 0)) return session.state || 'running'
+    // the result settles it is still a running turn. The producer writes
+    // `state: "idle"` alongside the outcome, so falling back to the stored
+    // state here made the card leave the screen for the whole settle window
+    // and pop back in as "done" — report a running turn instead.
+    if (now < (session.settles_ms || 0)) {
+      return RUNNING.has(session.state) ? session.state : 'running'
+    }
     return 'done'
   }
   if (outcome === 'failed') return 'failed'
