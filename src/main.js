@@ -285,23 +285,25 @@ function buildCard(key) {
   })
   node.addEventListener('click', () => {
     const view = viewFor(key)
-    // Two things one click can mean, and neither of them destroys anything.
-    // Collapsed to a line: you want to read this one, so it takes the card.
-    // Otherwise: open the detail.
+    // Three things one click can mean, in order of how sure we are of it.
     //
-    // A finished card used to be dismissed by this click, which made the one
-    // moment a card holds the most worth reading — the turn is over, the final
-    // message and the last two dozen actions are right there — the one moment
-    // clicking it threw all of that away, unrecoverably. Coming back from
-    // lunch, seeing green and clicking to find out *what* finished is the
-    // obvious thing to do, and it was the one thing that could not be undone.
-    // Dismissal belongs to ×, which is aimed.
-    if (node.dataset.density === 'compact') {
+    // Finished — genuinely finished, with nothing the turn started still
+    // running — means you have seen it, so it goes, and it goes completely
+    // rather than shrinking to a chip: a chip is a thing that is still going
+    // on. Swatting a green card away without aiming at anything is the whole
+    // gesture, and it is the one the pet is used with most.
+    //
+    // Nothing is lost that the card was still holding: the session file keeps
+    // its last two dozen actions, and the card comes back on its own the
+    // moment that chat starts working again. This deliberately does not apply
+    // while a card reads "Finishing", because that turn is not over.
+    if (acknowledge(key)) {
+      // Nothing else to do; the card is on its way out.
+    } else if (node.dataset.density === 'compact') {
       promoted = key
     } else {
       view.expanded = !view.expanded
     }
-    // Looking at it settles the debt either way.
     view.unread = false
     invoke('clear_attention').catch(() => {})
     render()
