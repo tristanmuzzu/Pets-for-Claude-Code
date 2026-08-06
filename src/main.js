@@ -232,13 +232,18 @@ function buildCard(key) {
   // replayed from opacity 0 whenever the card was reordered, because moving a
   // connected node re-inserts it and re-insertion restarts its animations.
   node.classList.add('card-enter')
-  node.addEventListener('animationend', (event) => {
-    if (event.target !== node) return
+  const entered = () => {
     node.classList.remove('card-enter')
     // The rect measured mid-rise is a few pixels off; measure again now that
     // the card is where it will stay.
     syncHitRects()
+  }
+  node.addEventListener('animationend', (event) => {
+    if (event.target === node) entered()
   })
+  // A hidden window pauses animations, so animationend may never come; the
+  // class must still die or every queued entrance replays on unhide.
+  setTimeout(entered, 1000)
   node.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation()
     // Closing a finished card dismisses it outright. Leaving a chip behind
@@ -323,7 +328,9 @@ function paintCard(node, card, compact = false) {
   // must play when the row appears, not every time the card moves.
   if (askWasHidden && !ask.hidden) {
     ask.classList.add('ask-enter')
-    ask.addEventListener('animationend', () => ask.classList.remove('ask-enter'), { once: true })
+    const entered = () => ask.classList.remove('ask-enter')
+    ask.addEventListener('animationend', entered, { once: true })
+    setTimeout(entered, 1000)
   }
   node.querySelector('.ask-what').textContent = reason
   // Cleared rather than left behind: a stale warning that reappears with the
