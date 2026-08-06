@@ -383,11 +383,15 @@ function paintCard(node, card, compact = false) {
   subagentChip.hidden = outstanding < 1 || state === 'finishing'
   subagentChip.textContent = `${outstanding} running`
   subagentChip.title = 'Background commands and subagents this turn started and has not been told are finished'
-  const hiccups = session.hiccups ?? 0
-  const hiccupChip = node.querySelector('.hiccups')
-  hiccupChip.hidden = hiccups < 1
-  hiccupChip.textContent = `${hiccups} retried`
-  hiccupChip.title = `${hiccups} tool ${hiccups === 1 ? 'call' : 'calls'} failed and were worked around`
+  // Calls auto-mode refused this turn. Tool calls that merely failed used to
+  // be counted here instead, which read as "Claude keeps getting things
+  // wrong" — noise, and not something anyone can act on. A refusal is: it
+  // means the permission rules are the thing in the way.
+  const blocked = session.blocked ?? 0
+  const blockedChip = node.querySelector('.blocked')
+  blockedChip.hidden = blocked < 1
+  blockedChip.textContent = `${blocked} blocked`
+  blockedChip.title = `Auto-mode refused ${blocked} tool ${blocked === 1 ? 'call' : 'calls'} this turn`
 
   // Status line: a coarse word plus counters. The detail that used to live here
   // moved to the expanded panel, where fast-changing text is fine.
@@ -1580,8 +1584,11 @@ function startBrowserDemo() {
         pending_tool: want === 'waiting' ? 'Bash' : '',
         pending_detail: want === 'waiting' ? 'run: git push --force origin main' : '',
         pending_risk: want === 'waiting' ? 'Force-pushes over remote history' : '',
-        hiccups: i === 1 ? 2 : 0,
-        subagents: want === 'running' && i === 0 ? 3 : 0,
+        blocked: i === 1 ? 2 : 0,
+        // The card counts work from the transcript now, not from the hooks, so
+        // the demo has to speak in the same field or the "3 running" chip
+        // silently disappears from every screenshot taken of it.
+        outstanding: want === 'running' && i === 0 ? 3 : 0,
         kind,
         headline,
         // In a real session this is whatever Claude last said or thought; the

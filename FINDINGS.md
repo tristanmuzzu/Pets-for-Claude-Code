@@ -136,6 +136,26 @@ Root causes found, in order of contribution:
   one level so a dangerous inner command is still seen.
 - **I-17** `.gitignore` — `.harness/` ignored.
 
+## After v0.7.2 — the counting the last release introduced
+
+- **N-1** `narration.rs:245` — only `<status>completed</status>` drained the
+  outstanding set, and a real transcript ends work four ways. Across this
+  machine's transcripts: 1156 `completed`, 65 `failed`, 22 `stopped`, 10
+  `killed`. One failed subagent therefore left the count permanently one too
+  high, so every later turn in that session read **Finishing · 1 running**,
+  never went green, and never blinked the tray — the five-minute write-off only
+  starts once the session goes *entirely* quiet, which a working session never
+  does. All four terminal statuses now drain; `running` deliberately does not.
+  FIXED, with a test per status.
+- **N-2** `main.js:1588` — the browser demo still populated `subagents`, which
+  nothing has read since the count moved to the transcript, so the "3 running"
+  chip was missing from every demo run and from anything recorded off it.
+  FIXED (`outstanding`).
+- **N-3** the red chip counted `PostToolUseFailure` and read "N retried". A
+  tool that errored is not something anyone can act on, and Claude usually
+  just tries something else. It now counts `PermissionDenied` — documented as
+  "denied by the auto mode classifier" — and reads "N blocked". FIXED.
+
 ## Parked (recorded, not fixed — reasons given)
 
 - **H-1/S-6 (general event-ordering guard)** — hook payloads carry no fire

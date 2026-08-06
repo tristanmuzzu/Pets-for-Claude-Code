@@ -122,8 +122,9 @@ fn classify_segment(segment: &str) -> Option<&'static str> {
         // flag. One level is deliberate: the common wrappers on Windows are
         // exactly one deep, and unbounded unwrapping is how a hint module
         // grows an interpreter.
-        "bash" | "sh" | "zsh" | "dash" => interpreter_payload(&words[1..], &["-c"])
-            .and_then(|inner| classify_segment(&inner)),
+        "bash" | "sh" | "zsh" | "dash" => {
+            interpreter_payload(&words[1..], &["-c"]).and_then(|inner| classify_segment(&inner))
+        }
         "cmd" => interpreter_payload(&words[1..], &["/c", "/k"])
             .and_then(|inner| classify_segment(&inner)),
         "powershell" | "pwsh" => interpreter_payload(&words[1..], &["-command", "-c"])

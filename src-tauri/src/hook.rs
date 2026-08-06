@@ -137,7 +137,7 @@ pub fn run(fallback_event: Option<String>) {
     if event == "UserPromptSubmit" {
         session.turn_started_ms = now;
         session.turn_tools = 0;
-        session.hiccups = 0;
+        session.blocked = 0;
         session.subagents = 0;
     }
 
@@ -145,9 +145,8 @@ pub fn run(fallback_event: Option<String>) {
     // it was blocked on. Without this, a denied permission followed by the
     // turn ending left "Needs you" on the card for hours — the outcome the
     // same event carries is applied just below, after the slate is clean.
-    let resolves = PROGRESS_EVENTS.contains(&event.as_str())
-        || event == "Stop"
-        || event == "StopFailure";
+    let resolves =
+        PROGRESS_EVENTS.contains(&event.as_str()) || event == "Stop" || event == "StopFailure";
     if resolves && !trailing_subagent {
         session.clear_pending();
     }
@@ -200,8 +199,8 @@ pub fn run(fallback_event: Option<String>) {
         }
         session.waiting_reason = update.waiting.clone();
     }
-    if update.hiccup {
-        session.hiccups += 1;
+    if update.blocked {
+        session.blocked += 1;
     }
     session.subagents = session
         .subagents
@@ -232,6 +231,8 @@ pub fn run(fallback_event: Option<String>) {
             update.outcome
         } else if !update.waiting.is_empty() {
             "waiting"
+        } else if update.blocked {
+            "blocked"
         } else if update.hiccup {
             "failed"
         } else if update.state.is_empty() {
@@ -271,7 +272,12 @@ fn capture(raw: &str) {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "unknown".into());
-    let name = format!("{}-{}-{}.json", now_ms(), sanitize(&event), std::process::id());
+    let name = format!(
+        "{}-{}-{}.json",
+        now_ms(),
+        sanitize(&event),
+        std::process::id()
+    );
     let _ = fs::write(dir.join(name), raw);
 }
 
@@ -300,8 +306,11 @@ struct Update {
     waiting: String,
     /// Change to the live subagent count.
     subagents: i64,
-    /// A tool failed mid-turn. Not a failed turn.
+    /// A tool failed mid-turn. Not a failed turn, and not counted anywhere:
+    /// it only decides how this line is coloured in the log.
     hiccup: bool,
+    /// The auto-mode classifier refused a tool call. Counted on the card.
+    blocked: bool,
     /// A permission prompt was raised for this tool. Empty means "no change".
     permission: String,
     permission_detail: String,
@@ -418,12 +427,18 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 .unwrap_or_default(),
             ..Default::default()
         },
-        // Auto-mode declining a call is routine policy, not a failure.
-        "PermissionDenied" => live(
-            "running",
-            &kind_of(&tool),
-            format!("Auto-mode declined: {}", phrase(&tool, input).infinitive),
-        ),
+        // Auto-mode declining a call is routine policy, not a failure — the
+        // documented meaning of this event is "denied by the auto mode
+        // classifier", so it is exactly the thing worth counting: it says the
+        // permission rules, not Claude, are what this turn is fighting.
+        "PermissionDenied" => Update {
+            blocked: true,
+            ..live(
+                "running",
+                &kind_of(&tool),
+                format!("Auto-mode blocked: {}", phrase(&tool, input).infinitive),
+            )
+        },
         "Notification" => {
             let notification = text("notification_type");
             let message = truncate(&text("message"), 200);
@@ -869,17 +884,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_declining_a_call_is_not_a_failure() {
-        let update = classify(
-            "PermissionDenied",
-            &json!({ "tool_name": "Bash", "tool_input": { "command": "curl example.com" } }),
-        )
-        .unwrap();
-        assert_eq!(update.state, "running");
-        assert!(update.activity.starts_with("Auto-mode declined"));
-    }
-
-    #[test]
     fn related_tools_share_one_status_word() {
         for tool in ["Read", "Glob", "Grep"] {
             assert_eq!(kind_of(tool), "Reading");
@@ -991,6 +995,30 @@ mod tests {
         assert!(update.hiccup);
         assert!(update.outcome.is_empty());
         assert_eq!(update.state, "running");
+        // A tool that merely failed is not a tool that was refused. Counting
+        // both under one number is what made the card's red chip meaningless.
+        assert!(!update.blocked);
+    }
+
+    /// The only thing the red chip counts: the auto-mode classifier refusing a
+    /// call. It is policy pushing back, which is worth a number, unlike a
+    /// command that simply errored.
+    #[test]
+    fn an_auto_mode_refusal_is_counted_and_named() {
+        let update = classify(
+            "PermissionDenied",
+            &json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "git push --force" }
+            }),
+        )
+        .unwrap();
+        assert!(update.blocked);
+        assert!(update.activity.starts_with("Auto-mode blocked:"));
+        // Still running: a refused call is not a failed turn, and the card
+        // must not go red over one.
+        assert_eq!(update.state, "running");
+        assert!(update.outcome.is_empty());
     }
 
     #[test]
@@ -1084,7 +1112,11 @@ mod tests {
     fn even_a_clean_stop_is_held_provisional() {
         let update = classify("Stop", &json!({ "last_assistant_message": "Fixed." })).unwrap();
         assert_eq!(update.outcome, "done");
-        assert!(update.settle_ms >= 1_000, "settle_ms was {}", update.settle_ms);
+        assert!(
+            update.settle_ms >= 1_000,
+            "settle_ms was {}",
+            update.settle_ms
+        );
     }
 
     /// Auto-compaction fires `SessionStart` again mid-session with

@@ -968,11 +968,7 @@ fn drain_commands(app: &AppHandle) {
     // page's listeners attach is dropped while the CLI has already printed
     // "Pet switched". Leave the command for a later tick instead.
     if action.starts_with("pet:")
-        && app
-            .state::<Frontend>()
-            .last_seen_ms
-            .load(Ordering::Relaxed)
-            == 0
+        && app.state::<Frontend>().last_seen_ms.load(Ordering::Relaxed) == 0
     {
         return;
     }

@@ -194,10 +194,13 @@ pub struct Session {
     /// Why the pending command looks irreversible. A hint for the card only.
     /// Nothing here approves, denies, or blocks anything.
     pub pending_risk: String,
-    /// Tool failures inside the current turn. A failed grep is not a failed
-    /// turn, since Claude usually just tries something else, so this is a
-    /// marker rather than a state.
-    pub hiccups: u64,
+    /// Tool calls the auto-mode classifier refused inside the current turn.
+    ///
+    /// Policy, not failure, and the one number here a person can act on: it
+    /// says the permission rules are getting in this turn's way. Tool calls
+    /// that merely errored are deliberately not counted — Claude retries
+    /// something else and nobody needs a tally of that.
+    pub blocked: u64,
     /// Subagents started but not yet finished, as the hooks saw them.
     pub subagents: u64,
     /// Work the turn started and has not been told is over: background shell

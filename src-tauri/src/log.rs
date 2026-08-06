@@ -138,7 +138,10 @@ mod tests {
         let after = fs::read(&path).unwrap();
         assert!(after.len() < text.len(), "the file should have been halved");
         let decoded = String::from_utf8(after).expect("rotation must cut on a character boundary");
-        assert!(decoded.starts_with('—'), "the cut should land on a line start");
+        assert!(
+            decoded.starts_with('—'),
+            "the cut should land on a line start"
+        );
         let _ = fs::remove_file(&path);
     }
 

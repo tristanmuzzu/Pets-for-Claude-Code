@@ -353,7 +353,10 @@ mod tests {
     #[test]
     fn an_emoji_title_survives_as_a_pair() {
         let escaped = "{\"title\": \"Fix \\uD83D\\uDE00 bug\"}";
-        assert_eq!(field(escaped, "title").as_deref(), Some("Fix \u{1F600} bug"));
+        assert_eq!(
+            field(escaped, "title").as_deref(),
+            Some("Fix \u{1F600} bug")
+        );
         // A lone half is not a character; give up rather than guess.
         assert_eq!(field(r#"{"title": "bad \uD83D end"}"#, "title"), None);
     }

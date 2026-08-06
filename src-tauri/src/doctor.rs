@@ -173,9 +173,9 @@ fn binary_check() -> Check {
                 .zip(fs::canonicalize(&current).ok())
                 .map(|(a, b)| a == b)
                 .unwrap_or_else(|| {
-                    registered.replace('/', "\\").eq_ignore_ascii_case(
-                        &current.to_string_lossy().replace('/', "\\"),
-                    )
+                    registered
+                        .replace('/', "\\")
+                        .eq_ignore_ascii_case(&current.to_string_lossy().replace('/', "\\"))
                 });
             if !path.exists() {
                 fail(
