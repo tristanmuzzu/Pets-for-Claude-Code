@@ -11,3 +11,6 @@ assets/row-check.png
 *.local
 .DS_Store
 Thumbs.db
+
+# Run-to-done harness state, session-local
+.harness/

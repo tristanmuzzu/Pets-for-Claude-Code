@@ -116,6 +116,18 @@ fn classify_segment(segment: &str) -> Option<&'static str> {
         |sub: &[&str]| rest.iter().zip(sub).all(|(w, s)| w == s) && rest.len() >= sub.len();
 
     match program.as_str() {
+        // One level of interpreter indirection. The tokenizer has already
+        // flattened a quoted payload into words, so `bash -c "rm -rf x"`
+        // carries the same words `rm -rf x` would; classify what follows the
+        // flag. One level is deliberate: the common wrappers on Windows are
+        // exactly one deep, and unbounded unwrapping is how a hint module
+        // grows an interpreter.
+        "bash" | "sh" | "zsh" | "dash" => interpreter_payload(&words[1..], &["-c"])
+            .and_then(|inner| classify_segment(&inner)),
+        "cmd" => interpreter_payload(&words[1..], &["/c", "/k"])
+            .and_then(|inner| classify_segment(&inner)),
+        "powershell" | "pwsh" => interpreter_payload(&words[1..], &["-command", "-c"])
+            .and_then(|inner| classify_segment(&inner)),
         "rm" => {
             let recursive = rest
                 .iter()
@@ -131,7 +143,8 @@ fn classify_segment(segment: &str) -> Option<&'static str> {
             let forced = rest.iter().any(|w| w.starts_with("-force"));
             (recursive && forced).then_some("Deletes a directory tree")
         }
-        "git" => git(&rest),
+        // Original-case words: `git branch -D` and `-d` are different flags.
+        "git" => git(&words[1..]),
         "npm" | "pnpm" | "yarn" | "bun" if starts(&["publish"]) => Some("Publishes a package"),
         "cargo" if starts(&["publish"]) => Some("Publishes a package"),
         "twine" if starts(&["upload"]) => Some("Publishes a package"),
@@ -155,9 +168,11 @@ fn classify_segment(segment: &str) -> Option<&'static str> {
     }
 }
 
-fn git(rest: &[String]) -> Option<&'static str> {
+fn git(raw: &[String]) -> Option<&'static str> {
+    let rest: Vec<String> = raw.iter().map(|w| w.to_lowercase()).collect();
     let sub = rest.first()?.as_str();
     let args = &rest[1..];
+    let raw_args = &raw[1..];
     let has = |flag: &str| args.iter().any(|w| w == flag);
     match sub {
         "push" => {
@@ -175,9 +190,31 @@ fn git(rest: &[String]) -> Option<&'static str> {
         "reset" if has("--hard") => Some("Discards uncommitted work"),
         "clean" => (has("-f") || has("-fd") || has("-fdx") || has("--force"))
             .then_some("Deletes untracked files"),
-        "branch" if has("-d") => Some("Force-deletes a branch"),
+        // Case matters here and nowhere else in git's flags we care about:
+        // `-D` force-deletes, `-d` refuses unmerged work and is the safe
+        // form. Lowercasing conflated them and badged the safe one.
+        "branch"
+            if raw_args.iter().any(|w| w == "-D")
+                || (has("--delete") && (has("--force") || has("-f"))) =>
+        {
+            Some("Force-deletes a branch")
+        }
         "filter-branch" | "filter-repo" => Some("Rewrites history"),
         _ => None,
+    }
+}
+
+/// The command an interpreter was asked to run: everything after the flag,
+/// rejoined. `None` when the flag is absent or nothing follows it.
+fn interpreter_payload(args: &[String], flags: &[&str]) -> Option<String> {
+    let at = args
+        .iter()
+        .position(|w| flags.iter().any(|f| w.eq_ignore_ascii_case(f)))?;
+    let rest = &args[at + 1..];
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.join(" "))
     }
 }
 
@@ -197,10 +234,15 @@ mod tests {
             "sudo rm -r -f /var/tmp/cache",
             "git push --force origin main",
             "git reset --hard HEAD~3",
+            "git branch -D feature",
             "npm publish",
             "terraform destroy -auto-approve",
             "kubectl delete deployment api",
             "gh repo delete acme/thing",
+            // One level of interpreter indirection, the common Windows shapes.
+            "cmd /c rmdir /s /q build",
+            "powershell -NoProfile -Command Remove-Item -Recurse -Force C:\\x",
+            "bash -c \"rm -rf /tmp/x\"",
         ] {
             assert!(
                 irreversible(command).is_some(),
@@ -215,10 +257,14 @@ mod tests {
             "npm test",
             "git push origin main",
             "git status",
+            // Lowercase -d refuses unmerged work; only -D force-deletes.
+            "git branch -d merged-branch",
             "rm build/tmp.txt",
             "cargo build --release",
             "kubectl get pods",
             "docker compose up -d",
+            "bash -c \"ls -la\"",
+            "powershell -Command Get-ChildItem",
         ] {
             assert!(
                 irreversible(command).is_none(),
