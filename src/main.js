@@ -215,7 +215,12 @@ function holdLine(view, line, now = Date.now()) {
 function acknowledge(key) {
   const card = cardsFor(sessions).find((candidate) => candidate.key === key)
   if (!card || !settled(card.state)) return false
-  if (card.session.outcome) acknowledged.add(outcomeKey(card.session))
+  // The display hold can keep "done" on screen after a new turn already
+  // cleared the outcome. There is nothing to acknowledge then, and claiming
+  // success anyway made the click do nothing at all: not dismissed, not
+  // expanded, not collapsed.
+  if (!card.session.outcome) return false
+  acknowledged.add(outcomeKey(card.session))
   viewFor(key).unread = false
   return true
 }
@@ -223,6 +228,17 @@ function acknowledge(key) {
 // --- rendering ----------------------------------------------------------
 function buildCard(key) {
   const node = el.template.content.firstElementChild.cloneNode(true)
+  // The entrance animation rides a one-shot class: kept on the .card rule it
+  // replayed from opacity 0 whenever the card was reordered, because moving a
+  // connected node re-inserts it and re-insertion restarts its animations.
+  node.classList.add('card-enter')
+  node.addEventListener('animationend', (event) => {
+    if (event.target !== node) return
+    node.classList.remove('card-enter')
+    // The rect measured mid-rise is a few pixels off; measure again now that
+    // the card is where it will stay.
+    syncHitRects()
+  })
   node.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation()
     // Closing a finished card dismisses it outright. Leaving a chip behind
@@ -301,7 +317,14 @@ function paintCard(node, card, compact = false) {
   if (live) view.lastReason = live
   const reason = state === 'waiting' ? live || view.lastReason || '' : ''
   const risk = node.querySelector('.risk')
+  const askWasHidden = ask.hidden
   ask.hidden = !reason
+  // The unfold is a one-shot for the same reason as the card entrance: it
+  // must play when the row appears, not every time the card moves.
+  if (askWasHidden && !ask.hidden) {
+    ask.classList.add('ask-enter')
+    ask.addEventListener('animationend', () => ask.classList.remove('ask-enter'), { once: true })
+  }
   node.querySelector('.ask-what').textContent = reason
   // Cleared rather than left behind: a stale warning that reappears with the
   // next prompt would be attached to the wrong command.
@@ -426,7 +449,14 @@ function render() {
 
     // Finishing while you were looking at something else is the thing this
     // whole overlay exists to tell you about. The mark outlives the card.
-    if (settled(group.state) && view.lastShown !== group.state && isFresh(group.session)) {
+    // A notice is the overlay talking about itself, not a completion: it
+    // neither blinks the tray nor wears an unread dot.
+    if (
+      group.key !== 'notice' &&
+      settled(group.state) &&
+      view.lastShown !== group.state &&
+      isFresh(group.session)
+    ) {
       view.unread = true
       invoke('flash_tray').catch(() => {})
     }
@@ -457,8 +487,14 @@ function render() {
   // collapses: one card for the chat being watched, one line each for the rest,
   // which is enough to see what every chat is doing and to close any of them.
   // More chats than that fit *because* they are lines.
+  // A notice always shows, at the front, and never counts toward the density
+  // flip: letting it take a fourth slot collapsed the whole stack to one-line
+  // cards for six seconds and popped it back when the notice expired.
+  if (byKey.has('notice')) {
+    slots = ['notice', ...slots.filter((key) => key !== 'notice')]
+  }
   const wanted = stackHidden ? [] : slots.filter((key) => !collapsed.has(key))
-  const dense = wanted.length > SLOT_LIMIT
+  const dense = wanted.filter((key) => key !== 'notice').length > SLOT_LIMIT
   const visible = wanted.slice(0, dense ? DENSE_LIMIT : SLOT_LIMIT)
   const detailed = dense
     ? visible.includes(promoted)
@@ -494,8 +530,12 @@ function render() {
     previous = node
   }
 
-  renderChips(groups.filter((group) => !visibleKeys.has(group.key) && (group.live || collapsed.has(group.key))))
-  el.stack.append(el.chips)
+  // Live chats only: a chip for a chat that has gone idle restores nothing
+  // when clicked, so it was a button whose only behavior was to vanish.
+  renderChips(groups.filter((group) => !visibleKeys.has(group.key) && group.live))
+  // Re-appending an element that is already last still re-inserts it, which
+  // restarts any animation in its subtree on every render tick.
+  if (el.stack.lastElementChild !== el.chips) el.stack.append(el.chips)
   syncHitRects()
 }
 
@@ -615,12 +655,22 @@ async function checkForUpdate(manual) {
   }
 }
 
+let updateTimersStarted = false
+
+/**
+ * The timers always run; the setting is checked when they fire. Gating the
+ * scheduling on the setting meant enabling it did nothing until the next
+ * launch, and disabling it left an already-scheduled check to fire anyway.
+ */
 function scheduleUpdateChecks() {
-  if (!config.updateCheck) return
+  if (updateTimersStarted) return
+  updateTimersStarted = true
   const first = FIRST_CHECK_MS + Math.random() * FIRST_CHECK_JITTER_MS
   setTimeout(() => {
-    checkForUpdate(false)
-    setInterval(() => checkForUpdate(false), CHECK_EVERY_MS)
+    if (config.updateCheck) checkForUpdate(false)
+    setInterval(() => {
+      if (config.updateCheck) checkForUpdate(false)
+    }, CHECK_EVERY_MS)
   }, first)
 }
 
@@ -641,7 +691,19 @@ function openPanel(title, build) {
   syncHitRects()
 }
 
+/** Timers owned by the doctor's connection test. Without this they outlived
+ * the panel, mutating detached nodes and stacking overlapping tests. */
+let doctorTimers = []
+function clearDoctorTimers() {
+  for (const id of doctorTimers) {
+    clearInterval(id)
+    clearTimeout(id)
+  }
+  doctorTimers = []
+}
+
 function closePanel() {
+  clearDoctorTimers()
   el.panel.hidden = true
   syncHitRects()
 }
@@ -736,6 +798,7 @@ function showWelcome() {
  * when someone says nothing is happening.
  */
 async function showDoctor() {
+  clearDoctorTimers()
   const report = await invoke('run_doctor').catch(() => null)
   openPanel('Setup check', () => {
     if (!report) return [para('Could not run the check.')]
@@ -782,13 +845,14 @@ async function showDoctor() {
           const left = Math.ceil((deadline - Date.now()) / 1000)
           if (left > 0) status.textContent = `Go and run anything in Claude Code now… ${left}s`
         }, 250)
-        setTimeout(async () => {
+        const finish = setTimeout(async () => {
           clearInterval(tick)
           const [, detail] = await invoke('watch_result', { since }).catch(() => ['none', 'Check failed.'])
           status.textContent = detail
           button.disabled = false
           button.textContent = 'Test again'
         }, WATCH_MS)
+        doctorTimers.push(tick, finish)
       }),
       status,
       action('Copy report', async (button) => {

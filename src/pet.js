@@ -155,6 +155,15 @@ export class PetRenderer {
   setState(state) {
     const next = state in ROW_FOR_STATE ? state : 'idle'
     if (next === this.state) return
+    if (this.oneShot) {
+      // The one-shot owns the canvas until it finishes. Recording a
+      // crossfade from its row, or resetting the frame counter it is using,
+      // made the sequence visibly jump (…3, 0, 5). The new state simply
+      // takes over when the one-shot ends.
+      this.state = next
+      this.wake()
+      return
+    }
     const from = this.row
     this.state = next
     if (from !== this.row) {
@@ -168,6 +177,10 @@ export class PetRenderer {
   /** Play a row once, then fall back to the current state's row. */
   playOnce(row) {
     this.oneShot = { row, frame: 0 }
+    // `draw` reads `this.frame`, so without this reset the one-shot's first
+    // visible frame was whatever frame the previous row happened to be on.
+    this.frame = 0
+    this.elapsed = 0
     this.wake()
   }
 
