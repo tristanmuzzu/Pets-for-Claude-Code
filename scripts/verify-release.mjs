@@ -1,6 +1,6 @@
 // Refuses to build a release whose version numbers disagree.
 //
-// The version lives in three files that nothing keeps in step, plus the tag
+// The version lives in five files that nothing keeps in step, plus the tag
 // that triggers the build. Any two of them drifting produces an installer that
 // reports the wrong version, which is only ever discovered later, by someone
 // trying to work out which build they are running.
@@ -29,6 +29,21 @@ if (cargo !== version) {
 const tauri = JSON.parse(read('src-tauri/tauri.conf.json')).version
 if (tauri !== version) {
   problems.push(`src-tauri/tauri.conf.json is ${tauri}, package.json is ${version}`)
+}
+
+// Shipped from this repository and installed by its own version number, so a
+// stale one advertises the wrong release to anyone adding the marketplace. It
+// had drifted three releases behind before anything noticed.
+const plugin = JSON.parse(read('claude-plugin/.claude-plugin/plugin.json')).version
+if (plugin !== version) {
+  problems.push(`claude-plugin/.claude-plugin/plugin.json is ${plugin}, package.json is ${version}`)
+}
+
+// npm writes this one, which is exactly why it gets forgotten when the version
+// is bumped by hand: `npm install --package-lock-only` fixes it.
+const lock = JSON.parse(read('package-lock.json')).version
+if (lock !== version) {
+  problems.push(`package-lock.json is ${lock}, package.json is ${version}`)
 }
 
 const notes = `docs/releases/v${version}.md`
