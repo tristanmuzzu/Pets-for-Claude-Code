@@ -79,6 +79,7 @@ pub fn run(hotkey: &str) -> Report {
         storage_check(),
         overlay_check(),
         hotkey_check(hotkey),
+        autostart_check(),
         traffic_check(),
     ];
     let status = if checks.iter().any(|c| c.status == "fail") {
@@ -297,6 +298,48 @@ fn fired_summary() -> String {
     let at = value.get("at").and_then(Value::as_u64).unwrap_or(0);
     let ago = now_ms().saturating_sub(at) / 1000;
     format!("Pressed {count} time(s), last {ago}s ago.")
+}
+
+/// Will the pet still be here after a reboot?
+///
+/// "It was gone this morning and the shortcut did nothing" is the same
+/// complaint as "the hooks are not firing" from the outside, and this check is
+/// where somebody looks for the answer. A setup that will lose the pet at the
+/// next restart used to pass with every light green.
+fn autostart_check() -> Check {
+    let current = std::env::current_exe().unwrap_or_default();
+    match crate::desktop::autostart_command() {
+        None => warn(
+            "autostart",
+            "After a reboot",
+            "Will not start with Windows. Turn it back on from the menu, or run `pipsqueak autostart on`.".into(),
+        ),
+        Some(registered) => {
+            let same = std::path::Path::new(&registered)
+                .canonicalize()
+                .ok()
+                .zip(current.canonicalize().ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or_else(|| {
+                    registered
+                        .replace('/', "\\")
+                        .eq_ignore_ascii_case(&current.to_string_lossy().replace('/', "\\"))
+                });
+            if same {
+                ok(
+                    "autostart",
+                    "After a reboot",
+                    "Starts with Windows.".into(),
+                )
+            } else {
+                warn(
+                    "autostart",
+                    "After a reboot",
+                    format!("Starts {registered}, which is not this program. Reinstalling corrects it."),
+                )
+            }
+        }
+    }
 }
 
 fn traffic_check() -> Check {
