@@ -15,14 +15,16 @@ use std::io::Read;
 
 /// Events that mean the session moved forward, and so cannot still be blocked
 /// on a human or finished.
-const PROGRESS_EVENTS: [&str; 9] = [
+/// Subagent events are deliberately absent. They say something about work the
+/// *turn* delegated, not about the turn itself, so a subagent finishing must
+/// never clear an outcome or resolve a prompt — which is what used to relabel
+/// a finished card "Delegating" with nothing running.
+const PROGRESS_EVENTS: [&str; 7] = [
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
     "PermissionDenied",
-    "SubagentStart",
-    "SubagentStop",
     "PreCompact",
     "PostCompact",
 ];
@@ -30,6 +32,7 @@ const PROGRESS_EVENTS: [&str; 9] = [
 pub fn run(fallback_event: Option<String>) {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
+    capture(&raw);
     let payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
 
     let event = payload
@@ -183,7 +186,11 @@ pub fn run(fallback_event: Option<String>) {
         session.outcome = update.outcome.to_string();
         session.outcome_ms = now;
         session.settles_ms = now + update.settle_ms;
-        session.subagents = 0;
+        // The subagent count deliberately survives the outcome. Zeroing it
+        // here destroyed the one piece of evidence that contradicts "Done":
+        // the turn yielded the floor, but the work it delegated is still
+        // running, and the card went green anyway. It drains on the
+        // `SubagentStop` events that are already arriving.
     }
     if !update.waiting.is_empty() {
         // Keep the first timestamp. A second Notification about the same
@@ -238,6 +245,34 @@ pub fn run(fallback_event: Option<String>) {
     if let Ok(bytes) = serde_json::to_vec(&session) {
         let _ = write_atomic(&path, &bytes);
     }
+}
+
+/// Keeps a copy of a raw hook payload, when asked to.
+///
+/// Off unless `~/.pipsqueak/payloads` exists, which makes turning it on a
+/// `mkdir` and turning it off a delete — no setting, no restart, and nothing
+/// to leave switched on by accident. It exists because the hook payload is
+/// the one contract here that is not ours: fields the pet leans on are absent
+/// from the published schema, and "does this event actually carry that?" is
+/// otherwise unanswerable without guessing.
+///
+/// Payloads contain prompts and assistant text, so this is deliberately
+/// awkward to enable and never on by default.
+fn capture(raw: &str) {
+    let dir = crate::state::root().join("payloads");
+    if !dir.is_dir() {
+        return;
+    }
+    let event = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| {
+            v.get("hook_event_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let name = format!("{}-{}-{}.json", now_ms(), sanitize(&event), std::process::id());
+    let _ = fs::write(dir.join(name), raw);
 }
 
 /// One state change.

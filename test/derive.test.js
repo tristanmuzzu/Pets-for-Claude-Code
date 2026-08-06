@@ -8,7 +8,11 @@ import {
   displayState,
   holdState,
   isNewer,
-  relativeTime
+  relativeTime,
+  stillWorking,
+  worthCelebrating,
+  CELEBRATE_AFTER_MS,
+  OUTSTANDING_STALE_MS
 } from '../src/derive.js'
 
 const NOW = 1_000_000
@@ -66,6 +70,52 @@ test('a settling turn stays on screen even though the producer wrote idle', () =
   const session = quiet({ state: 'idle', outcome: 'done', outcome_ms: NOW, settles_ms: NOW + 2000 })
   assert.equal(displayState(session, NOW), 'running')
   assert.equal(displayState(session, NOW + 2001), 'done')
+})
+
+test('a turn that ended over running work is not done', () => {
+  // The complaint this exists for: the assistant yields the floor while five
+  // subagents run and its last words are that it is waiting for them. `Stop`
+  // fires anyway, and no hook will ever fire for those finishing.
+  const session = quiet({
+    state: 'idle',
+    outcome: 'done',
+    outcome_ms: NOW,
+    settles_ms: NOW,
+    outstanding: 5,
+    updated_ms: NOW
+  })
+  assert.equal(displayState(session, NOW + 3000), 'finishing')
+  assert.equal(stillWorking(session, NOW + 3000), true)
+  // Not worth a tray blink either: nothing has finished.
+  assert.equal(worthCelebrating(session, NOW + 60_000), false)
+
+  // The last one reports back, and only then is it done.
+  const drained = { ...session, outstanding: 0 }
+  assert.equal(displayState(drained, NOW + 3000), 'done')
+})
+
+test('outstanding work is written off once the session goes quiet', () => {
+  // The overlay can start watching halfway through and see a launch whose
+  // completion it already missed. A card stuck on "finishing" forever would
+  // be its own kind of lie.
+  const session = quiet({
+    state: 'idle',
+    outcome: 'done',
+    outcome_ms: NOW,
+    settles_ms: NOW,
+    outstanding: 2,
+    updated_ms: NOW
+  })
+  assert.equal(displayState(session, NOW + OUTSTANDING_STALE_MS - 1000), 'finishing')
+  assert.equal(displayState(session, NOW + OUTSTANDING_STALE_MS + 1000), 'done')
+})
+
+test('a completion is announced only once it has held', () => {
+  // A blocking stop hook can veto a stop seconds later and send the turn back
+  // to work. The card can correct itself; a tray blink cannot.
+  const session = quiet({ state: 'idle', outcome: 'done', outcome_ms: NOW, updated_ms: NOW })
+  assert.equal(worthCelebrating(session, NOW + 2000), false)
+  assert.equal(worthCelebrating(session, NOW + CELEBRATE_AFTER_MS + 1), true)
 })
 
 test('a finished turn stays finished until somebody looks at it', () => {

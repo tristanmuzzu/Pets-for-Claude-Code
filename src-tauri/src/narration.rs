@@ -14,16 +14,21 @@
 use crate::state::Session;
 use crate::text::{summary_within, truncate};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-/// How much of a transcript to read the first time one is seen. Enough to find
-/// the last thing said in a busy turn, small enough to be one disk read.
-const FIRST_READ: u64 = 256 * 1024;
+/// How much of a transcript to read the first time one is seen.
+///
+/// Far more than the last thing said needs, because the other question asked
+/// of this file reaches further back: a monitor or a subagent started twenty
+/// minutes ago is still running, and its launch is only in the transcript at
+/// the point it happened. Missing one under-counts, which fails towards the
+/// old behaviour rather than towards a card stuck on "still working".
+const FIRST_READ: u64 = 2 * 1024 * 1024;
 /// A single appended chunk this large means something unusual happened (a
 /// resumed session, a pasted file); read the tail of it rather than all of it.
 const MAX_CHUNK: u64 = 4 * 1024 * 1024;
@@ -86,6 +91,15 @@ struct Watch {
     /// How far into the file we have already read.
     offset: u64,
     line: String,
+    /// Work the turn started and has not been told is over: background shell
+    /// commands, monitors, and subagents, by the id Claude Code gave each one.
+    ///
+    /// This is the difference between "the assistant stopped talking" and "the
+    /// work is finished", and nothing else on disk records it — there is no
+    /// pending-tasks file anywhere. The transcript has both halves though: an
+    /// id when the thing is launched, and the same id in the notification when
+    /// it completes. Keeping the set is just subtracting one from the other.
+    outstanding: BTreeSet<String>,
 }
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, Watch>> {
@@ -93,11 +107,13 @@ fn cache() -> &'static Mutex<HashMap<PathBuf, Watch>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Attaches the newest line each session has said to the session itself.
+/// Attaches the newest line each session has said, and how much of the work it
+/// started is still running, to the session itself.
+///
+/// Both come from the same file and the same read. Narration can be switched
+/// off; the outstanding count cannot, because it is not decoration — it is
+/// what stops the card saying "Done" over five running subagents.
 pub fn decorate(sessions: &mut [Session], mode: Mode) {
-    if mode == Mode::Off {
-        return;
-    }
     let Ok(mut watches) = cache().lock() else {
         return;
     };
@@ -110,9 +126,10 @@ pub fn decorate(sessions: &mut [Session], mode: Mode) {
         live.push(path.clone());
         let watch = watches.entry(path.clone()).or_default();
         follow(&path, watch, mode);
-        if !watch.line.is_empty() {
+        if mode != Mode::Off && !watch.line.is_empty() {
             session.narration = watch.line.clone();
         }
+        session.outstanding = watch.outstanding.len() as u64;
     }
 
     // A transcript nobody is watching any more is just a stale offset.
@@ -188,6 +205,10 @@ fn follow(path: &Path, watch: &mut Watch, mode: Mode) {
     let text = String::from_utf8_lossy(&buffer[..complete]);
 
     for line in text.lines() {
+        track_tasks(line, &mut watch.outstanding);
+        if mode == Mode::Off {
+            continue;
+        }
         // A cheap reject before the expensive parse: most of a transcript is
         // tool results, which are the one thing this never shows.
         if !line.contains("\"assistant\"") {
@@ -197,6 +218,73 @@ fn follow(path: &Path, watch: &mut Watch, mode: Mode) {
             watch.line = said;
         }
     }
+}
+
+/// Adds work this line launched, and removes work it reported finished.
+///
+/// Claude Code hands every asynchronous thing an id at launch — a background
+/// shell command, a monitor, a subagent — and quotes that same id back when it
+/// completes. Neither half is a documented API, so this reads them as the
+/// strings they are and treats absence as "nothing launched", which is the
+/// answer the pet had anyway before it could see any of this.
+fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
+    // Launched. Background shells and monitors carry their id directly; a
+    // subagent's launch is only distinguishable from its later mentions by
+    // sitting next to the status the tool result was given.
+    for key in ["\"backgroundTaskId\":\"", "\"taskId\":\""] {
+        if let Some(id) = quoted_after(line, key) {
+            outstanding.insert(id);
+        }
+    }
+    if line.contains("\"async_launched\"") {
+        if let Some(id) = quoted_after(line, "\"agentId\":\"") {
+            outstanding.insert(id);
+        }
+    }
+
+    // Finished. The completion notification names the id and says so plainly;
+    // an id can be notified more than once (a resumable agent), which a set
+    // handles without caring.
+    if line.contains("<status>completed</status>") {
+        if let Some(id) = between(line, "<task-id>", "</task-id>") {
+            outstanding.remove(&id);
+        }
+    }
+    // Stopped by hand, which is an ending like any other.
+    if let Some(rest) = line.split_once("Successfully stopped task: ") {
+        let id: String = rest
+            .1
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            outstanding.remove(&id);
+        }
+    }
+}
+
+/// The quoted string that follows `key`, if it looks like an id.
+fn quoted_after(line: &str, key: &str) -> Option<String> {
+    let rest = line.split_once(key)?.1;
+    let id: String = rest.chars().take_while(|c| *c != '"').collect();
+    plausible_id(&id).then_some(id)
+}
+
+fn between(line: &str, open: &str, close: &str) -> Option<String> {
+    let rest = line.split_once(open)?.1;
+    let id = rest.split_once(close)?.0.to_string();
+    plausible_id(&id).then_some(id)
+}
+
+/// Ids are short, opaque and alphanumeric. Anything else is a field that
+/// happens to share a name, and counting it would strand a card on "still
+/// working" forever.
+fn plausible_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// The line an assistant entry is worth, if any.
@@ -273,6 +361,67 @@ fn last_thought(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn tracked(lines: &[&str]) -> Vec<String> {
+        let mut out = BTreeSet::new();
+        for line in lines {
+            track_tasks(line, &mut out);
+        }
+        out.into_iter().collect()
+    }
+
+    /// The shapes below are copied from a real transcript. They are not a
+    /// documented API, so if Claude Code changes them these tests are the
+    /// thing that notices.
+    #[test]
+    fn a_background_command_is_outstanding_until_it_reports_back() {
+        let launched = r#"{"type":"user","toolUseResult":{"stdout":"","backgroundTaskId":"bix46i2qi"}}"#;
+        assert_eq!(tracked(&[launched]), vec!["bix46i2qi"]);
+
+        let finished = r#"{"type":"queue-operation","content":"<task-notification><task-id>bix46i2qi</task-id><status>completed</status><summary>Background command finished</summary>"}"#;
+        assert!(tracked(&[launched, finished]).is_empty());
+    }
+
+    /// A subagent's tool result arrives immediately and means "launched", not
+    /// "finished" — believing it is how the pet came to say Done over five
+    /// running agents.
+    #[test]
+    fn a_subagent_is_outstanding_from_launch_until_its_notification() {
+        let launched = r#"{"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a971514006ea69ef6"}}"#;
+        assert_eq!(tracked(&[launched]), vec!["a971514006ea69ef6"]);
+
+        let finished = r#"{"type":"queue-operation","content":"<task-notification><task-id>a971514006ea69ef6</task-id><status>completed</status>"}"#;
+        assert!(tracked(&[launched, finished]).is_empty());
+    }
+
+    #[test]
+    fn several_at_once_drain_one_at_a_time() {
+        let a = r#"{"toolUseResult":{"status":"async_launched","agentId":"aaa111"}}"#;
+        let b = r#"{"toolUseResult":{"status":"async_launched","agentId":"bbb222"}}"#;
+        let monitor = r#"{"toolUseResult":{"taskId":"ba7xghdk0","timeoutMs":3000000}}"#;
+        let done_a = r#"{"content":"<task-notification><task-id>aaa111</task-id><status>completed</status>"}"#;
+        assert_eq!(tracked(&[a, b, monitor]).len(), 3);
+        assert_eq!(tracked(&[a, b, monitor, done_a]), vec!["ba7xghdk0", "bbb222"]);
+    }
+
+    #[test]
+    fn stopping_a_task_by_hand_ends_it_too() {
+        let monitor = r#"{"toolUseResult":{"taskId":"ba7xghdk0","timeoutMs":3000}}"#;
+        let stopped = r#"{"content":"Successfully stopped task: ba7xghdk0 (prev=…)"}"#;
+        assert!(tracked(&[monitor, stopped]).is_empty());
+    }
+
+    /// An ordinary turn must not leave anything behind, or every card would
+    /// eventually be stuck reporting work that never existed.
+    #[test]
+    fn ordinary_lines_launch_nothing() {
+        let said = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"taskId is a field name"}]}}"#;
+        let tool = r#"{"type":"user","toolUseResult":{"stdout":"ok","interrupted":false}}"#;
+        // A mention with no id, and an id-shaped value that is not one.
+        let empty = r#"{"toolUseResult":{"backgroundTaskId":""}}"#;
+        let sentence = r#"{"toolUseResult":{"taskId":"not an id, but a sentence with spaces"}}"#;
+        assert!(tracked(&[said, tool, empty, sentence]).is_empty());
+    }
 
     fn entry(kind: &str, text: &str) -> String {
         let mut part = serde_json::Map::new();

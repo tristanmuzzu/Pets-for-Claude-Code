@@ -55,6 +55,9 @@ const ROW_FOR_STATE = {
   idle: 0,
   thinking: 7,
   running: 7,
+  // The turn is over but what it started is not. The pet is still working,
+  // because something still is.
+  finishing: 7,
   waiting: 6,
   failed: 5,
   done: 8,
