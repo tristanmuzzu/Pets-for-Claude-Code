@@ -202,7 +202,13 @@ seconds:
 - Nothing at all for twelve hours → deleted.
 
 A session that is genuinely *waiting on you* is never retired by age. That claim
-stays true no matter how long you take.
+stays true no matter how long you take — and the five-minute rule above
+explicitly exempts it, because a session blocked on a human produces no events
+*by definition*. Until v0.7.4 it did not, so a prompt you walked away from for
+five minutes came back reading "Stopped responding" with the question still on
+the card. The two claims came from the same silence and only one of them was
+checkable. An agent that has actually died is caught by the process check
+above, which is evidence rather than inference.
 
 ## When it isn't working
 
