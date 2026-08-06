@@ -45,8 +45,14 @@ fn main() {
         Some("sessions") => report(sessions()),
         Some("install") | Some("--install") => report(install::install()),
         Some("uninstall") | Some("--uninstall") => report(install::uninstall()),
-        Some("--version") | Some("-v") => println!("pipsqueak {}", env!("CARGO_PKG_VERSION")),
-        Some("--help") | Some("-h") => println!("{HELP}"),
+        // Through `report` like everything else. A bare `println!` panics when
+        // there is no usable stdout — which for a GUI-subsystem binary depends
+        // entirely on who launched it — and `panic = "abort"` turns that into
+        // the version command killing the process instead of answering.
+        Some("--version") | Some("-v") => {
+            report(Ok(format!("pipsqueak {}", env!("CARGO_PKG_VERSION"))))
+        }
+        Some("--help") | Some("-h") => report(Ok(HELP.to_string())),
         _ => app::run(),
     }
 }

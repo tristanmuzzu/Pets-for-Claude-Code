@@ -448,6 +448,18 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
 
 #[tauri::command]
 fn quit(app: AppHandle) {
+    shutdown(&app);
+}
+
+/// Stops the overlay, and stops it claiming to be running.
+///
+/// The heartbeat is what tells the next launch somebody is already home, and
+/// it is believed for a few seconds after it was last written. Leaving it
+/// behind meant quitting and immediately starting again did nothing at all,
+/// silently — the single-instance guard causing the complaint it exists to
+/// prevent.
+fn shutdown(app: &AppHandle) {
+    let _ = fs::remove_file(state::heartbeat_path());
     app.exit(0);
 }
 
@@ -988,7 +1000,7 @@ fn drain_commands(app: &AppHandle) {
             let _ = window.hide();
         }
         "toggle" => toggle_window(app),
-        "quit" => app.exit(0),
+        "quit" => shutdown(app),
         other => {
             if let Some(pet) = other.strip_prefix("pet:") {
                 let _ = window.show();
@@ -1099,7 +1111,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 };
                 let _ = app.emit("pipsqueak://notice", message);
             }
-            "quit" => app.exit(0),
+            "quit" => shutdown(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

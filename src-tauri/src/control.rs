@@ -71,12 +71,30 @@ pub fn run(action: Option<String>) -> Result<String, String> {
 }
 
 pub fn is_running() -> bool {
-    fs::read_to_string(heartbeat_path())
+    let Some(beat) = fs::read_to_string(heartbeat_path())
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .and_then(|value| value.get("ms").and_then(serde_json::Value::as_u64))
+    else {
+        return false;
+    };
+    let fresh = beat
+        .get("ms")
+        .and_then(serde_json::Value::as_u64)
         .map(|ms| now_ms().saturating_sub(ms) < HEARTBEAT_TIMEOUT_MS)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !fresh {
+        return false;
+    }
+    // Recent is not the same as alive. An overlay that was killed leaves its
+    // last heartbeat behind, and for the next few seconds that file claims
+    // somebody is home: starting the pet again in that window did nothing at
+    // all, silently, which is the exact complaint the single-instance guard
+    // exists to prevent rather than cause.
+    match beat.get("pid").and_then(serde_json::Value::as_u64) {
+        Some(pid) if pid > 0 => crate::process::is_alive(pid as u32, 0),
+        // An older build's heartbeat had no pid; trust its freshness.
+        _ => true,
+    }
 }
 
 fn send(action: &str) -> Result<(), String> {
