@@ -388,7 +388,8 @@ mod tests {
     /// thing that notices.
     #[test]
     fn a_background_command_is_outstanding_until_it_reports_back() {
-        let launched = r#"{"type":"user","toolUseResult":{"stdout":"","backgroundTaskId":"bix46i2qi"}}"#;
+        let launched =
+            r#"{"type":"user","toolUseResult":{"stdout":"","backgroundTaskId":"bix46i2qi"}}"#;
         assert_eq!(tracked(&[launched]), vec!["bix46i2qi"]);
 
         let finished = r#"{"type":"queue-operation","content":"<task-notification><task-id>bix46i2qi</task-id><status>completed</status><summary>Background command finished</summary>"}"#;
@@ -414,7 +415,10 @@ mod tests {
         let monitor = r#"{"toolUseResult":{"taskId":"ba7xghdk0","timeoutMs":3000000}}"#;
         let done_a = r#"{"content":"<task-notification><task-id>aaa111</task-id><status>completed</status>"}"#;
         assert_eq!(tracked(&[a, b, monitor]).len(), 3);
-        assert_eq!(tracked(&[a, b, monitor, done_a]), vec!["ba7xghdk0", "bbb222"]);
+        assert_eq!(
+            tracked(&[a, b, monitor, done_a]),
+            vec!["ba7xghdk0", "bbb222"]
+        );
     }
 
     /// Work ends four ways in a real transcript, and three of them are not

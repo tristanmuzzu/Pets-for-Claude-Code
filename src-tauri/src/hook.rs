@@ -145,9 +145,8 @@ pub fn run(fallback_event: Option<String>) {
     // it was blocked on. Without this, a denied permission followed by the
     // turn ending left "Needs you" on the card for hours — the outcome the
     // same event carries is applied just below, after the slate is clean.
-    let resolves = PROGRESS_EVENTS.contains(&event.as_str())
-        || event == "Stop"
-        || event == "StopFailure";
+    let resolves =
+        PROGRESS_EVENTS.contains(&event.as_str()) || event == "Stop" || event == "StopFailure";
     if resolves && !trailing_subagent {
         session.clear_pending();
     }
@@ -273,7 +272,12 @@ fn capture(raw: &str) {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| "unknown".into());
-    let name = format!("{}-{}-{}.json", now_ms(), sanitize(&event), std::process::id());
+    let name = format!(
+        "{}-{}-{}.json",
+        now_ms(),
+        sanitize(&event),
+        std::process::id()
+    );
     let _ = fs::write(dir.join(name), raw);
 }
 
