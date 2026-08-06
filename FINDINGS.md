@@ -156,6 +156,30 @@ Root causes found, in order of contribution:
   just tries something else. It now counts `PermissionDenied` — documented as
   "denied by the auto mode classifier" — and reads "N blocked". FIXED.
 
+## After v0.7.3 — the claim the whole overlay is for
+
+- **N-4** `state.rs:630` — the sweep downgraded any running session silent for
+  five minutes to `stalled`, *including one blocked on a human*. Being asked a
+  question produces no further hook events by definition, so a real permission
+  prompt is indistinguishable from death by that rule. Five minutes after
+  walking away from a prompt, the card read **Stopped responding** with the
+  question still on it, and `how-it-works.md` had been claiming the opposite
+  ("a session genuinely waiting on you is never retired by age") since it was
+  written. Reproduced live against the installed 0.7.3 build: a session with
+  `waiting_since` six minutes old came back `state: idle, stalled: true`.
+  FIXED — the decision is now `has_stopped_responding`, a pure function with
+  tests, and a session whose agent really died is still retired by the process
+  check that runs before it.
+- **N-5** `main.js:439` — `kindLabel` checked `stalled` before `waiting`, so
+  even with the backend fixed, any session flagged by an older build showed
+  "Stopped responding" over its own question. The checkable claim now wins.
+- **N-6** `.github/workflows/release.yml` — the release workflow ran `npm test`
+  and `cargo test` but not `clippy -D warnings` or `cargo fmt --check`, the two
+  gates `ci` enforces. That is how v0.7.2 shipped green from a commit whose
+  `ci` run was red. Both added. The release body also said "See
+  docs/releases/vX.Y.Z.md" instead of containing the notes; it now takes the
+  file.
+
 ## Parked (recorded, not fixed — reasons given)
 
 - **H-1/S-6 (general event-ordering guard)** — hook payloads carry no fire

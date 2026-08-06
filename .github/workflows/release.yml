@@ -33,6 +33,8 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -49,10 +51,32 @@ jobs:
 
       - run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      # The same two gates `ci` runs. They were missing here, so a tag could —
+      # and did, at v0.7.2 — build a green release out of a commit whose `ci`
+      # run was red. A release workflow that is weaker than the branch check is
+      # a release workflow that ships the thing the branch check refused.
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
       - name: Verify the sprite atlases are in sync with their generators
         run: |
           npm run sprites
           git diff --exit-code public/pets
+
+      # The notes are already written, in the file `verify-release.mjs` insists
+      # exists. Pointing at them from the release body meant everyone reading
+      # the Releases page got the sentence "See docs/releases/v0.7.3.md"
+      # instead of the release notes.
+      - name: Take the release body from the notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<PIPSQUEAK_NOTES_EOF'
+            cat "docs/releases/${{ github.ref_name }}.md"
+            echo 'PIPSQUEAK_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -61,5 +85,5 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Pipsqueak ${{ github.ref_name }}
           releaseDraft: true
-          releaseBody: See docs/releases/${{ github.ref_name }}.md
+          releaseBody: ${{ steps.notes.outputs.body }}
           args: --bundles nsis,msi

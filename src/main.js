@@ -437,8 +437,15 @@ function paintCard(node, card, compact = false) {
 }
 
 function kindLabel(state, session) {
-  if (session.stalled) return 'Stopped responding'
+  // "Needs you" outranks "Stopped responding" deliberately. They are both
+  // claims about silence, and only one of them can be checked: a prompt that
+  // is still pending is a fact, while "stopped responding" is an inference
+  // drawn from the same silence a pending prompt causes. A card that shows the
+  // question and calls the session dead in the same breath is worse than
+  // either alone. The sweep no longer stalls a waiting session either; this is
+  // the second lock on the same door.
   if (state === 'waiting') return 'Needs you'
+  if (session.stalled) return 'Stopped responding'
   if (state === 'failed') return 'Failed'
   if (state === 'finishing') {
     // The count is the whole point: it is the reason this is not "Done". Kept

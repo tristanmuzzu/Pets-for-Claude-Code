@@ -625,9 +625,7 @@ pub fn sweep() -> usize {
             changed += 1;
             continue;
         }
-        // A session that reported how its turn ended is not silently stuck,
-        // however long ago that was.
-        if age > WORKING_STALE_MS && session.is_running() && session.outcome.is_empty() {
+        if has_stopped_responding(&session, age) {
             session.state = "idle".to_string();
             session.kind = "Idle".to_string();
             session.activity.clear();
@@ -645,9 +643,72 @@ pub fn sweep() -> usize {
     changed
 }
 
+/// Has this session died without saying so?
+///
+/// Silence is the only evidence available, and it means different things. A
+/// turn that reported how it ended is not stuck. Neither is one blocked on a
+/// human: being asked a question produces no further events *by definition*,
+/// so a real permission prompt looks exactly like death to this rule. It used
+/// to be read as death, and five minutes after walking away from a prompt the
+/// card said "Stopped responding" while still showing the question — the pet
+/// contradicting itself in the one situation it exists for.
+///
+/// A session whose agent process is genuinely gone is retired before this is
+/// ever asked, which is the honest test.
+fn has_stopped_responding(session: &Session, age: u64) -> bool {
+    if age <= WORKING_STALE_MS || !session.is_running() {
+        return false;
+    }
+    if !session.outcome.is_empty() {
+        return false;
+    }
+    session.waiting_since == 0 && session.pending_since == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quiet(state: &str) -> Session {
+        Session {
+            state: state.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The README promise: "a session that is genuinely waiting on you is
+    /// never retired by age. That claim stays true no matter how long you
+    /// take." It was not true — a prompt left unanswered for five minutes was
+    /// relabelled "Stopped responding" with the question still on the card.
+    #[test]
+    fn a_session_waiting_on_a_human_never_stops_responding() {
+        let long = WORKING_STALE_MS * 2;
+
+        let mut asked = quiet("running");
+        asked.waiting_since = 1;
+        assert!(!has_stopped_responding(&asked, long));
+
+        let mut pending = quiet("running");
+        pending.pending_since = 1;
+        assert!(!has_stopped_responding(&pending, long));
+
+        // Silence with nobody being asked anything is the case this is for.
+        assert!(has_stopped_responding(&quiet("running"), long));
+        // And it takes more than a pause between tool calls.
+        assert!(!has_stopped_responding(&quiet("running"), 1000));
+    }
+
+    /// A turn that said how it ended is not stuck, however long ago that was.
+    #[test]
+    fn a_finished_turn_is_not_a_dead_one() {
+        let mut done = quiet("running");
+        done.outcome = "done".into();
+        assert!(!has_stopped_responding(&done, WORKING_STALE_MS * 100));
+        assert!(!has_stopped_responding(
+            &quiet("idle"),
+            WORKING_STALE_MS * 100
+        ));
+    }
 
     /// Migration leaves the saved position alone on purpose. Correcting it
     /// here needs the display scale, which this layer does not have, and

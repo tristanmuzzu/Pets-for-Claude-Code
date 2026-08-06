@@ -139,6 +139,23 @@ test('a session the sweep gave up on reads as idle, not finished', () => {
   assert.equal(displayState(session, NOW), 'idle')
 })
 
+test('a question still being asked outranks having given up on the session', () => {
+  // Both claims come from the same silence, and only one of them can be
+  // checked: the prompt is a fact, "stopped responding" is an inference. A
+  // session flagged stalled by an older build — or by any future rule — must
+  // still read as waiting while the question is on the card, or the status
+  // line contradicts the row underneath it.
+  const session = quiet({
+    state: 'running',
+    stalled: true,
+    pending_since: NOW - WAITING_DEBOUNCE_MS * 2,
+    pending_tool: 'Bash',
+    pending_detail: 'run: npm run deploy'
+  })
+  assert.equal(displayState(session, NOW), 'waiting')
+  assert.equal(blockedOn(session, NOW), 'run: npm run deploy')
+})
+
 test('a state holds long enough to be read', () => {
   const view = {}
   const session = quiet()
