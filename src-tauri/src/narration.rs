@@ -242,10 +242,23 @@ fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
         }
     }
 
-    // Finished. The completion notification names the id and says so plainly;
-    // an id can be notified more than once (a resumable agent), which a set
-    // handles without caring.
-    if line.contains("<status>completed</status>") {
+    // Over, however it went. Only `completed` used to drain the set, and a
+    // real transcript ends work four ways: one agent that failed, or one
+    // background command killed, left the count permanently one too high, so
+    // every later turn in that session read "Finishing · 1 running" and never
+    // went green — for as long as the session kept working, since the
+    // five-minute write-off only starts once everything goes quiet.
+    //
+    // `running` is deliberately not in the list: that notification is a
+    // progress report, not an ending. An id can also be notified more than
+    // once, which a set handles without caring.
+    const OVER: [&str; 4] = [
+        "<status>completed</status>",
+        "<status>failed</status>",
+        "<status>stopped</status>",
+        "<status>killed</status>",
+    ];
+    if OVER.iter().any(|status| line.contains(status)) {
         if let Some(id) = between(line, "<task-id>", "</task-id>") {
             outstanding.remove(&id);
         }
@@ -402,6 +415,31 @@ mod tests {
         let done_a = r#"{"content":"<task-notification><task-id>aaa111</task-id><status>completed</status>"}"#;
         assert_eq!(tracked(&[a, b, monitor]).len(), 3);
         assert_eq!(tracked(&[a, b, monitor, done_a]), vec!["ba7xghdk0", "bbb222"]);
+    }
+
+    /// Work ends four ways in a real transcript, and three of them are not
+    /// "completed". Counting only completions left a card reading
+    /// "Finishing · 1 running" for the rest of the session over one agent that
+    /// had already failed.
+    #[test]
+    fn work_that_ends_badly_still_ends() {
+        let launch = |id: &str| {
+            format!(r#"{{"toolUseResult":{{"status":"async_launched","agentId":"{id}"}}}}"#)
+        };
+        let notify = |id: &str, status: &str| {
+            format!(
+                r#"{{"content":"<task-notification><task-id>{id}</task-id><status>{status}</status>"}}"#
+            )
+        };
+        for status in ["completed", "failed", "stopped", "killed"] {
+            let lines = [launch("aaa111"), notify("aaa111", status)];
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            assert!(tracked(&refs).is_empty(), "{status} should end the work");
+        }
+        // A progress report is not an ending.
+        let lines = [launch("aaa111"), notify("aaa111", "running")];
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        assert_eq!(tracked(&refs), vec!["aaa111"]);
     }
 
     #[test]
