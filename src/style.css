@@ -516,7 +516,7 @@ body {
   background: rgba(178, 110, 250, 0.16);
 }
 
-.chip.hiccups {
+.chip.blocked {
   color: #ffb4b4;
   background: rgba(244, 88, 88, 0.15);
 }
@@ -560,6 +560,8 @@ body {
 }
 
 .log li[data-state="failed"] { color: var(--failed); }
+/* Refused by policy, not broken: the same orange as a card that is asking. */
+.log li[data-state="blocked"] { color: var(--waiting); }
 .log li[data-state="waiting"] { color: var(--waiting); }
 .log li[data-state="done"] { color: var(--done); }
 

@@ -179,6 +179,15 @@ same debounce applies to `Notification`/`permission_prompt`, `idle_prompt` and
 `agent_needs_input`. Auto-mode declining a call is shown as ordinary progress,
 not a failure.
 
+The one place a refusal is counted is the card's red **N blocked** chip, off
+`PermissionDenied` — the event Claude Code fires when the auto-mode classifier
+refuses a call, and the only signal here that distinguishes "policy said no"
+from "the command errored". The count is per turn, so it clears on the next
+prompt. Tool calls that merely *failed* are not counted at all: Claude tries
+something else, and a tally of that reads as "the agent keeps getting things
+wrong" while telling you nothing you can act on. They still show up in the
+expanded log, in red, as they happen.
+
 ## When a session dies
 
 Nothing writes a file to say Claude Code crashed. A sweep runs every ten
