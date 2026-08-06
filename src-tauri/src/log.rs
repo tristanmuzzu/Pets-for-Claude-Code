@@ -48,15 +48,20 @@ fn rotate(path: &std::path::Path) {
     if meta.len() <= MAX_BYTES {
         return;
     }
-    let Ok(text) = fs::read_to_string(path) else {
+    // Bytes, not a str. The byte midpoint of a String can land inside a
+    // multibyte character, and slicing there panics — which `panic = "abort"`
+    // turns into the overlay dying inside its own logger, at exactly the
+    // moment it was trying to record a failure. Reading bytes also means one
+    // corrupt byte cannot disable rotation forever the way read_to_string did.
+    let Ok(bytes) = fs::read(path) else {
         return;
     };
-    let midpoint = text.len() / 2;
-    let cut = match text[midpoint..].find('\n') {
+    let midpoint = bytes.len() / 2;
+    let cut = match bytes[midpoint..].iter().position(|b| *b == b'\n') {
         Some(offset) => midpoint + offset + 1,
         None => return,
     };
-    let _ = fs::write(path, &text[cut..]);
+    let _ = fs::write(path, &bytes[cut..]);
 }
 
 /// `2026-08-04 18:52:56` in UTC, from milliseconds since the epoch.
@@ -115,6 +120,26 @@ mod tests {
         assert_eq!(stamp(0), "1970-01-01 00:00:00Z");
         // 2026-08-04 18:52:56 UTC
         assert_eq!(stamp(1_785_869_576_000), "2026-08-04 18:52:56Z");
+    }
+
+    /// The log carries em dashes and accented home directories, so sooner or
+    /// later the byte midpoint falls inside a character. Rotation must cut at
+    /// a line boundary and leave valid text, not abort the process.
+    #[test]
+    fn rotation_survives_a_multibyte_midpoint() {
+        let path = std::env::temp_dir().join(format!(
+            "pipsqueak-log-rotate-test-{}.txt",
+            std::process::id()
+        ));
+        let line = "— nothing but multibyte punctuation —\n";
+        let text = line.repeat((MAX_BYTES as usize / line.len()) + 50);
+        fs::write(&path, text.as_bytes()).unwrap();
+        rotate(&path);
+        let after = fs::read(&path).unwrap();
+        assert!(after.len() < text.len(), "the file should have been halved");
+        let decoded = String::from_utf8(after).expect("rotation must cut on a character boundary");
+        assert!(decoded.starts_with('—'), "the cut should land on a line start");
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

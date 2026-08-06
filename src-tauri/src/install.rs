@@ -62,7 +62,39 @@ fn backup(raw: &str) -> Result<String, String> {
     let path = claude_settings_path();
     let dest = path.with_file_name(format!("settings.json.pipsqueak-backup-{}", now_ms()));
     fs::write(&dest, raw).map_err(|e| format!("cannot write backup: {e}"))?;
+    prune_backups(&path);
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Keeps the newest few backups. One accumulates per install or uninstall and
+/// nothing else ever deletes them.
+fn prune_backups(settings: &std::path::Path) {
+    const KEEP: usize = 5;
+    let Some(dir) = settings.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("settings.json.pipsqueak-backup-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    if backups.len() <= KEEP {
+        return;
+    }
+    // The suffix is a fixed-width millisecond timestamp, so the
+    // lexicographic order is the chronological one.
+    backups.sort();
+    for old in &backups[..backups.len() - KEEP] {
+        let _ = fs::remove_file(old);
+    }
 }
 
 fn is_ours(entry: &Value) -> bool {
@@ -179,24 +211,47 @@ fn hooks_map(root: &mut Value) -> Result<&mut Map<String, Value>, String> {
 pub fn install() -> Result<String, String> {
     let exe = exe_path()?;
     let (mut root, existed, raw) = read_settings()?;
-    let backup_path = if existed && !raw.is_empty() {
-        Some(backup(&raw)?)
-    } else {
-        None
-    };
+    let before = root.clone();
 
     {
         let hooks = hooks_map(&mut root)?;
+        // Strip our entries from *every* event key first, not just the
+        // current list: an event dropped from EVENTS in a later build would
+        // otherwise keep an orphaned hook pointing at whatever path was
+        // installed back then.
+        let event_names: Vec<String> = hooks.keys().cloned().collect();
+        for name in event_names {
+            if let Some(groups) = hooks.get_mut(&name).and_then(Value::as_array_mut) {
+                strip_ours(groups);
+                if groups.is_empty() {
+                    hooks.remove(&name);
+                }
+            }
+        }
         for event in EVENTS {
             let slot = hooks.entry(*event).or_insert_with(|| json!([]));
             let groups = slot
                 .as_array_mut()
                 .ok_or_else(|| format!("settings.hooks.{event} is not an array"))?;
-            strip_ours(groups);
             groups.push(our_group(&exe, event));
         }
     }
 
+    // Nothing changed: the same hooks are already registered at the same
+    // path. Rewriting (and re-backing-up) a file we would not alter is churn
+    // in somebody's hand-tuned config.
+    if root == before {
+        return Ok(format!(
+            "The {} hooks are already installed in {}.",
+            EVENTS.len(),
+            claude_settings_path().display()
+        ));
+    }
+    let backup_path = if existed && !raw.is_empty() {
+        Some(backup(&raw)?)
+    } else {
+        None
+    };
     write_settings(&root)?;
     Ok(match backup_path {
         Some(path) => format!(
@@ -218,11 +273,11 @@ pub fn uninstall() -> Result<String, String> {
     if !existed {
         return Ok("Nothing to remove.".to_string());
     }
-    let backup_path = backup(&raw)?;
 
     let mut removed = 0;
-    {
-        let hooks = hooks_map(&mut root)?;
+    // `get_mut` rather than `hooks_map`: an uninstall must not *plant* an
+    // empty "hooks" object in a settings file that never had one.
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
         let event_names: Vec<String> = hooks.keys().cloned().collect();
         for name in event_names {
             let Some(groups) = hooks.get_mut(&name).and_then(Value::as_array_mut) else {
@@ -234,6 +289,11 @@ pub fn uninstall() -> Result<String, String> {
             }
         }
     }
+    if removed == 0 {
+        // Nothing of ours in there: leave the file byte-for-byte alone.
+        return Ok("Nothing to remove.".to_string());
+    }
+    let backup_path = backup(&raw)?;
 
     write_settings(&root)?;
     Ok(format!(
@@ -300,5 +360,16 @@ mod tests {
         strip_ours(&mut groups);
         groups.push(our_group("pipsqueak.exe", "Stop"));
         assert_eq!(groups.len(), 1);
+    }
+
+    /// settings.json is hand-tuned; its key order is the owner's. This fails
+    /// if serde_json's preserve_order feature ever falls off, which would
+    /// silently alphabetise the whole file on the next install.
+    #[test]
+    fn settings_keys_keep_their_order() {
+        let raw = r#"{ "zeta": 1, "alpha": 2, "hooks": {} }"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let out = serde_json::to_string(&value).unwrap();
+        assert!(out.find("zeta").unwrap() < out.find("alpha").unwrap());
     }
 }
