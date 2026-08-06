@@ -49,6 +49,14 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// because Windows throttles timers hard for an occluded window and a needless
 /// reload is still a visible flicker.
 const FRONTEND_SILENT_MS: u64 = 45_000;
+/// How long a silent page gets to answer a ping before it is declared dead.
+///
+/// Timers are throttled hard for an occluded window — down to once a minute —
+/// so silence alone only proves the page is not *rendering*. Event delivery is
+/// not throttled: a live page answers the ping immediately, and one that does
+/// not is actually gone. Checked on the sweep cadence, so the effective grace
+/// is one sweep interval.
+const PING_GRACE_MS: u64 = 3_000;
 /// A rescue that fails leaves the page just as dead, so retrying in a tight
 /// loop only fills the log.
 const RESCUE_INTERVAL_MS: u64 = 60_000;
@@ -87,8 +95,21 @@ struct Interactive(Mutex<Vec<Rect>>);
 #[derive(Default)]
 struct Frontend {
     last_seen_ms: AtomicU64,
+    last_ping_ms: AtomicU64,
     last_rescue_ms: AtomicU64,
 }
+
+/// The last session list the poller emitted, so the frontend can ask for a
+/// re-send by clearing it. An emit that fires before the page's listeners
+/// attach (first boot, any reload) is otherwise lost until the next change.
+#[derive(Default)]
+struct Emitted(Mutex<String>);
+
+/// The tray's two checkboxes, so a config change made anywhere else can move
+/// them. Set once at build time they drifted: toggle quiet from the pet menu
+/// and the tray kept claiming the old value.
+#[derive(Default)]
+struct TrayToggles(Mutex<Option<(CheckMenuItem<tauri::Wry>, CheckMenuItem<tauri::Wry>)>>);
 
 /// Mirrors `config.click_through` so the hit-test loop never touches the disk.
 #[derive(Default)]
@@ -143,7 +164,39 @@ fn set_config(app: AppHandle, config: Config) -> Result<(), String> {
         let _ = window.set_ignore_cursor_events(config.click_through);
     }
     narration::set_mode(narration::Mode::parse(&config.narrate));
+    sync_tray_toggles(&app, &config);
     state::save_config(&config).map_err(|e| e.to_string())
+}
+
+/// Moves the tray checkboxes to match a config changed anywhere else.
+fn sync_tray_toggles(app: &AppHandle, config: &Config) {
+    if let Ok(guard) = app.state::<TrayToggles>().0.lock() {
+        if let Some((click_through, quiet)) = guard.as_ref() {
+            let _ = click_through.set_checked(config.click_through);
+            let _ = quiet.set_checked(config.quiet);
+        }
+    }
+}
+
+/// The page answering a ping: alive, whatever its throttled timers are doing.
+#[tauri::command]
+fn frontend_pong(frontend: State<'_, Frontend>) {
+    frontend
+        .last_seen_ms
+        .store(state::now_ms(), Ordering::Relaxed);
+}
+
+/// The page has (re)attached its listeners. Anything emitted before this
+/// moment was shouted into an empty room, so forget what was last sent and
+/// let the poller send it again.
+#[tauri::command]
+fn frontend_ready(frontend: State<'_, Frontend>, emitted: State<'_, Emitted>) {
+    frontend
+        .last_seen_ms
+        .store(state::now_ms(), Ordering::Relaxed);
+    if let Ok(mut last) = emitted.0.lock() {
+        last.clear();
+    }
 }
 
 #[tauri::command]
@@ -485,13 +538,14 @@ fn place_window(app: &AppHandle, config: &Config) {
         }
         return;
     }
-    // Default: bottom-right, clear of the Windows taskbar. Persist it, or the
-    // position stays null until the pet is dragged for the first time.
+    // Default: bottom-right of the work area, which already excludes the
+    // taskbar wherever it is and however tall it is. The old hard-coded 72px
+    // allowance undershot a scaled or stacked taskbar and the pet's feet
+    // started behind it until ensure_on_screen corrected it seconds later.
     if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.outer_size()) {
-        let area = monitor.size();
-        let origin = monitor.position();
-        let x = origin.x + area.width.saturating_sub(size.width + 24) as i32;
-        let y = origin.y + area.height.saturating_sub(size.height + 72) as i32;
+        let area = monitor.work_area();
+        let x = area.position.x + (area.size.width as i32 - size.width as i32 - 24).max(0);
+        let y = area.position.y + (area.size.height as i32 - size.height as i32 - 24).max(0);
         let _ = window.set_position(PhysicalPosition::new(x, y));
         let mut stored = config.clone();
         stored.x = Some(x);
@@ -682,7 +736,6 @@ fn spawn_hit_test(app: AppHandle) {
 
 fn spawn_poller(app: AppHandle) {
     std::thread::spawn(move || {
-        let mut last = String::new();
         let mut next_sweep = Instant::now();
         loop {
             // Hooks can only ever say what happened; nothing writes a file to
@@ -699,8 +752,23 @@ fn spawn_poller(app: AppHandle) {
             }
             let sessions = current_sessions();
             let encoded = serde_json::to_string(&sessions).unwrap_or_default();
-            if encoded != last {
-                last = encoded;
+            // The dedupe string lives in shared state so `frontend_ready` can
+            // clear it: an emit fired before the page's listeners attached
+            // needs sending again, and nothing else would change the data.
+            let changed = app
+                .state::<Emitted>()
+                .0
+                .lock()
+                .map(|mut last| {
+                    if *last == encoded {
+                        false
+                    } else {
+                        *last = encoded;
+                        true
+                    }
+                })
+                .unwrap_or(false);
+            if changed {
                 let _ = app.emit("pipsqueak://sessions", &sessions);
             }
             beat();
@@ -763,12 +831,26 @@ fn watch_frontend(app: &AppHandle) {
     if now.saturating_sub(last_seen) < FRONTEND_SILENT_MS {
         return;
     }
+    // Silent is not dead. WebView2 throttles timers for an occluded window
+    // down to about once a minute, and a page that stopped rendering because
+    // of that is perfectly healthy — reloading it here is what made the
+    // overlay blank and repaint every minute under a fullscreen app. Events
+    // are not throttled, so ask, and only reload a page that will not answer.
+    let pinged = frontend.last_ping_ms.load(Ordering::Relaxed);
+    if pinged <= last_seen {
+        frontend.last_ping_ms.store(now, Ordering::Relaxed);
+        let _ = app.emit("pipsqueak://ping", ());
+        return;
+    }
+    if now.saturating_sub(pinged) < PING_GRACE_MS {
+        return;
+    }
     if now.saturating_sub(frontend.last_rescue_ms.load(Ordering::Relaxed)) < RESCUE_INTERVAL_MS {
         return;
     }
     frontend.last_rescue_ms.store(now, Ordering::Relaxed);
     log::write(&format!(
-        "frontend silent for {}s, reloading the page",
+        "frontend silent for {}s and not answering pings, reloading the page",
         now.saturating_sub(last_seen) / 1000
     ));
     reload_frontend(app);
@@ -804,15 +886,28 @@ fn drain_commands(app: &AppHandle) {
     let Ok(raw) = fs::read_to_string(&path) else {
         return;
     };
-    let _ = fs::remove_file(&path);
     let Some(action) = serde_json::from_str::<Value>(&raw).ok().and_then(|value| {
         value
             .get("action")
             .and_then(Value::as_str)
             .map(String::from)
     }) else {
+        let _ = fs::remove_file(&path);
         return;
     };
+    // A pet switch is delivered as an event, and an event emitted before the
+    // page's listeners attach is dropped while the CLI has already printed
+    // "Pet switched". Leave the command for a later tick instead.
+    if action.starts_with("pet:")
+        && app
+            .state::<Frontend>()
+            .last_seen_ms
+            .load(Ordering::Relaxed)
+            == 0
+    {
+        return;
+    }
+    let _ = fs::remove_file(&path);
 
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
@@ -821,9 +916,16 @@ fn drain_commands(app: &AppHandle) {
         "show" => {
             let _ = window.show();
             // "off then on" is what everyone tries first when the overlay is
-            // misbehaving, so it had better be able to fix the case where the
-            // window is fine and the page inside it is not.
-            reload_frontend(app);
+            // misbehaving, so it must fix a dead page — but reloading a
+            // healthy one is itself a visible blank-and-repaint. Ask the page
+            // instead; the watchdog reloads it if it stays silent.
+            let frontend = app.state::<Frontend>();
+            let last_seen = frontend.last_seen_ms.load(Ordering::Relaxed);
+            let now = state::now_ms();
+            if last_seen != 0 && now.saturating_sub(last_seen) >= FRONTEND_SILENT_MS {
+                frontend.last_ping_ms.store(now, Ordering::Relaxed);
+                let _ = app.emit("pipsqueak://ping", ());
+            }
         }
         "hide" => {
             let _ = window.hide();
@@ -913,6 +1015,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
                     let _ = window.set_ignore_cursor_events(config.click_through);
                 }
+                // Tell the frontend, or its own copy of the config silently
+                // reverts this on its next save.
+                let _ = app.emit("pipsqueak://config", &config);
             }
             "quiet" => {
                 let mut config = load_config();
@@ -921,7 +1026,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 if config.quiet {
                     attention::clear(app);
                 }
-                let _ = app.emit("pipsqueak://config", ());
+                let _ = app.emit("pipsqueak://config", &config);
             }
             "reload" => {
                 log::write("reload requested from the tray");
@@ -957,10 +1062,20 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         builder = builder.icon(icon);
     }
     builder.build(app)?;
+    if let Ok(mut guard) = app.state::<TrayToggles>().0.lock() {
+        *guard = Some((click_through, quiet));
+    }
     Ok(())
 }
 
 pub fn run() {
+    // One overlay at a time. A second instance stacks a second pet on the
+    // first and both drain the same command file, so show/hide lands on a
+    // random one. If somebody is already home, wake them instead.
+    if crate::control::is_running() {
+        let _ = crate::control::run(Some("show".to_string()));
+        return;
+    }
     let _ = fs::create_dir_all(sessions_dir());
     let _ = fs::create_dir_all(pets_dir());
     let _ = fs::create_dir_all(root());
@@ -972,6 +1087,8 @@ pub fn run() {
         .manage(Binding::default())
         .manage(Frontend::default())
         .manage(ClickThrough::default())
+        .manage(Emitted::default())
+        .manage(TrayToggles::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
             get_config,
@@ -995,7 +1112,9 @@ pub fn run() {
             autostart_enabled,
             set_autostart,
             quit,
-            hide_window
+            hide_window,
+            frontend_pong,
+            frontend_ready
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1032,6 +1151,10 @@ pub fn run() {
                 Err(reason) => log::write(&format!("no global hotkey: {reason}")),
             }
 
+            // The heartbeat must exist before anything can race us: the
+            // poller's first tick used to be the first beat, and a `control`
+            // call landing in that gap launched a second overlay.
+            beat();
             spawn_poller(handle.clone());
             spawn_hit_test(handle);
             Ok(())

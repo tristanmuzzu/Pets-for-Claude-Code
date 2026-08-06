@@ -120,7 +120,13 @@ so, and Pipsqueak reads all three:
 | `stop_hook_active` | a stop hook asked it to continue | keeps working |
 | `background_tasks` non-empty, no final message | still finishing | keeps working |
 | `background_tasks` non-empty, with a final message | done, but something trails | settles after 2s |
-| none of the above | finished | done |
+| none of the above | finished | done, after a 2s hold |
+
+The hold on the last row is not hedging, it is how blocking stop hooks look
+from the outside: a review gate or completion loop can veto the stop and have
+the turn carry straight on, and `stop_hook_active` only admits that on the
+*second* `Stop`. Two seconds is long enough for the continuation to cancel a
+premature "Done" before it was ever shown.
 
 A `SubagentStop` for work that outlived the answer is bookkeeping: it adjusts
 the count and touches nothing else. Treated as progress, it cleared the outcome

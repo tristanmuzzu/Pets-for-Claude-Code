@@ -139,11 +139,15 @@ mod windows_impl {
     ///
     /// Taken once and walked in memory: asking the OS per level would let a
     /// process exit mid-walk and hand us an unrelated reused pid.
-    fn snapshot() -> Vec<(u32, Entry)> {
+    ///
+    /// `None` when the snapshot could not be taken at all. That is a different
+    /// answer from an empty table: "could not look" must never read as "every
+    /// process is gone", because the caller deletes sessions on that verdict.
+    fn snapshot() -> Option<Vec<(u32, Entry)>> {
         let mut out = Vec::new();
         let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
         if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-            return out;
+            return None;
         }
         let mut entry = ProcessEntry32W {
             size: std::mem::size_of::<ProcessEntry32W>() as u32,
@@ -174,7 +178,13 @@ mod windows_impl {
             ok = unsafe { Process32NextW(handle, &mut entry) };
         }
         unsafe { CloseHandle(handle) };
-        out
+        // A real process table always contains at least this process; an
+        // empty walk means the enumeration itself failed.
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
     fn created_at(pid: u32) -> Option<u64> {
@@ -197,10 +207,7 @@ mod windows_impl {
     }
 
     pub fn owner() -> Option<(u32, u64)> {
-        let table = snapshot();
-        if table.is_empty() {
-            return None;
-        }
+        let table = snapshot()?;
         let find = |pid: u32| table.iter().find(|(id, _)| *id == pid).map(|(_, e)| e);
 
         let mut pid = unsafe { GetCurrentProcessId() };
@@ -225,8 +232,12 @@ mod windows_impl {
             // getting that wrong deletes a live session. The process table is
             // readable either way, so ask it instead of guessing. A pid still
             // listed is alive; we just cannot check it for reuse, which the
-            // age cutoffs in `state::sweep` cover.
-            return snapshot().iter().any(|(id, _)| *id == pid);
+            // age cutoffs in `state::sweep` cover. If even the snapshot fails,
+            // not knowing is not knowing it is gone.
+            return match snapshot() {
+                Some(table) => table.iter().any(|(id, _)| *id == pid),
+                None => true,
+            };
         }
         let mut code: u32 = 0;
         let running = unsafe { GetExitCodeProcess(handle, &mut code) } != 0 && code == STILL_ACTIVE;

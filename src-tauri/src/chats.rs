@@ -78,11 +78,9 @@ pub fn lookup(session_id: &str) -> Option<Chat> {
         return None;
     }
     let guard = refreshed()?;
-    guard
-        .files
-        .values()
-        .find(|(_, cli, _)| cli == session_id)
-        .map(|(_, _, chat)| chat.clone())
+    best_by_session(&guard.files)
+        .get(session_id)
+        .map(|chat| (*chat).clone())
 }
 
 /// Fills in the chat title and id on everything the overlay is about to show.
@@ -93,16 +91,37 @@ pub fn decorate(sessions: &mut [Session]) {
     let Some(guard) = refreshed() else {
         return;
     };
-    let mut by_session: HashMap<&str, &Chat> = HashMap::new();
-    for (_, cli, chat) in guard.files.values() {
-        by_session.insert(cli.as_str(), chat);
-    }
+    let by_session = best_by_session(&guard.files);
     for session in sessions.iter_mut() {
         if let Some(chat) = by_session.get(session.session_id.as_str()) {
             session.chat_id = chat.id.clone();
             session.chat_title = chat.title.clone();
         }
     }
+}
+
+/// One winner per session id, decided the same way everywhere.
+///
+/// Two records can claim the same `cliSessionId` (a resumed or branched chat).
+/// Last-insert-wins over HashMap iteration made the winner random, so the
+/// card's title could swap every rescan — and `lookup`, which picked *first*,
+/// could open a different chat than the title shown. The most recently
+/// modified record answers, with the id as a tiebreak so equal stamps are
+/// still deterministic.
+fn best_by_session(files: &HashMap<PathBuf, (u64, String, Chat)>) -> HashMap<&str, &Chat> {
+    let mut best: HashMap<&str, (u64, &Chat)> = HashMap::new();
+    for (modified, cli, chat) in files.values() {
+        match best.get(cli.as_str()) {
+            Some((at, incumbent))
+                if (*modified, chat.id.as_str()) <= (*at, incumbent.id.as_str()) => {}
+            _ => {
+                best.insert(cli.as_str(), (*modified, chat));
+            }
+        }
+    }
+    best.into_iter()
+        .map(|(cli, (_, chat))| (cli, chat))
+        .collect()
 }
 
 /// Asks the desktop app to show a chat.
@@ -223,6 +242,14 @@ fn read_head(path: &Path) -> Option<String> {
 ///
 /// A fragment, not a document: this reads the first few kilobytes of a file
 /// whose tail is enormous, so a real parser has nothing to parse.
+fn hex4(chars: &mut impl Iterator<Item = char>) -> Option<u32> {
+    let hex: String = (0..4).filter_map(|_| chars.next()).collect();
+    if hex.len() != 4 {
+        return None;
+    }
+    u32::from_str_radix(&hex, 16).ok()
+}
+
 fn field(head: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let after = &head[head.find(&needle)? + needle.len()..];
@@ -242,12 +269,24 @@ fn field(head: &str, key: &str) -> Option<String> {
             '\\' => match chars.next()? {
                 'n' | 't' | 'r' => out.push(' '),
                 'u' => {
-                    let hex: String = (0..4).filter_map(|_| chars.next()).collect();
-                    out.push(
-                        u32::from_str_radix(&hex, 16)
-                            .ok()
-                            .and_then(char::from_u32)?,
-                    );
+                    let unit = hex4(&mut chars)?;
+                    let decoded = if (0xD800..0xDC00).contains(&unit) {
+                        // A high surrogate: the app escapes non-BMP characters
+                        // (emoji in titles) as a pair. Treating each half as
+                        // its own character failed both and dropped the whole
+                        // title with them.
+                        if chars.next()? != '\\' || chars.next()? != 'u' {
+                            return None;
+                        }
+                        let low = hex4(&mut chars)?;
+                        if !(0xDC00..0xE000).contains(&low) {
+                            return None;
+                        }
+                        char::from_u32(0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00))?
+                    } else {
+                        char::from_u32(unit)?
+                    };
+                    out.push(decoded);
                 }
                 other => out.push(other),
             },
@@ -307,5 +346,46 @@ mod tests {
             Some("13f92b55-b7ea")
         );
         assert_eq!(local_id(Path::new("/store/other.json")), None);
+    }
+
+    /// Non-BMP characters arrive as surrogate pairs. An emoji in a chat title
+    /// used to cost the whole title, and the card fell back to the project name.
+    #[test]
+    fn an_emoji_title_survives_as_a_pair() {
+        let escaped = "{\"title\": \"Fix \\uD83D\\uDE00 bug\"}";
+        assert_eq!(field(escaped, "title").as_deref(), Some("Fix \u{1F600} bug"));
+        // A lone half is not a character; give up rather than guess.
+        assert_eq!(field(r#"{"title": "bad \uD83D end"}"#, "title"), None);
+    }
+
+    /// Two records claiming one session resolve to the newest, everywhere the
+    /// question is asked, so the title shown and the chat opened agree.
+    #[test]
+    fn duplicate_records_resolve_to_the_newest() {
+        let mut files: HashMap<PathBuf, (u64, String, Chat)> = HashMap::new();
+        files.insert(
+            PathBuf::from("a.json"),
+            (
+                100,
+                "session-1".into(),
+                Chat {
+                    id: "old".into(),
+                    title: "Old title".into(),
+                },
+            ),
+        );
+        files.insert(
+            PathBuf::from("b.json"),
+            (
+                200,
+                "session-1".into(),
+                Chat {
+                    id: "new".into(),
+                    title: "New title".into(),
+                },
+            ),
+        );
+        let best = best_by_session(&files);
+        assert_eq!(best.get("session-1").unwrap().id, "new");
     }
 }

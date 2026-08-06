@@ -205,6 +205,16 @@ fn spoken(line: &str, mode: Mode) -> Option<String> {
     if entry.get("type").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
+    // Subagent traffic lands in the same transcript, marked as a sidechain.
+    // Its inner monologue on the parent card read as the live line flickering
+    // between unrelated voices.
+    if entry
+        .get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
     let content = entry.get("message")?.get("content")?.as_array()?;
     let mut best = None;
     for part in content {
@@ -269,6 +279,19 @@ mod tests {
         part.insert("type".into(), json!(kind));
         part.insert(kind.into(), json!(text));
         json!({ "type": "assistant", "message": { "content": [Value::Object(part)] } }).to_string()
+    }
+
+    /// Subagents write into the same transcript, marked `isSidechain`. Their
+    /// lines on the parent card read as the narration jumping between voices.
+    #[test]
+    fn a_sidechain_voice_stays_off_the_card() {
+        let line = json!({
+            "type": "assistant",
+            "isSidechain": true,
+            "message": { "content": [{ "type": "text", "text": "Subagent progress report." }] }
+        })
+        .to_string();
+        assert_eq!(spoken(&line, Mode::Speech), None);
     }
 
     #[test]

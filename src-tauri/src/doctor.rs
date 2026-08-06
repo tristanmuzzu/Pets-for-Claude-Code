@@ -164,6 +164,18 @@ fn binary_check() -> Check {
         None => ok("binary", "Hook program", "Nothing registered yet.".into()),
         Some(registered) => {
             let path = std::path::Path::new(&registered);
+            // Case- and separator-insensitive: Windows paths that differ only
+            // in casing or slash direction are the same file, and a raw
+            // comparison warned about "a different copy" that was this one.
+            let same = fs::canonicalize(path)
+                .ok()
+                .zip(fs::canonicalize(&current).ok())
+                .map(|(a, b)| a == b)
+                .unwrap_or_else(|| {
+                    registered.replace('/', "\\").eq_ignore_ascii_case(
+                        &current.to_string_lossy().replace('/', "\\"),
+                    )
+                });
             if !path.exists() {
                 fail(
                     "binary",
@@ -171,7 +183,7 @@ fn binary_check() -> Check {
                     format!("The hooks point at {registered}, which no longer exists. Reinstall to update the path."),
                     Some("install"),
                 )
-            } else if path != current {
+            } else if !same {
                 warn(
                     "binary",
                     "Hook program",
@@ -298,14 +310,17 @@ fn traffic_check() -> Check {
     }
     let newest = sessions.iter().map(|s| s.updated_ms).max().unwrap_or(0);
     let age_min = now_ms().saturating_sub(newest) / 60_000;
-    ok(
-        "traffic",
-        "Recent activity",
-        format!(
-            "{} session(s); last event {age_min} minute(s) ago.",
-            sessions.len()
-        ),
-    )
+    let detail = format!(
+        "{} session(s); last event {age_min} minute(s) ago.",
+        sessions.len()
+    );
+    // Session files linger for hours; their mere existence is not a pulse.
+    // Hooks that broke this morning used to read green here with the age
+    // buried in the detail text.
+    if age_min > 60 {
+        return warn("traffic", "Recent activity", detail);
+    }
+    ok("traffic", "Recent activity", detail)
 }
 
 /// A timestamp to compare against later. See [`watch_result`].

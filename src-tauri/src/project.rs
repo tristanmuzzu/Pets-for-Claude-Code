@@ -60,20 +60,37 @@ fn git_root(start: &Path) -> Option<PathBuf> {
             return Some(dir.to_path_buf());
         }
         if marker.is_file() {
-            // "gitdir: C:/repo/.git/worktrees/<name>"
-            let text = std::fs::read_to_string(&marker).ok()?;
-            let raw = text.split_once("gitdir:")?.1.trim().replace('\\', "/");
-            let idx = raw.find("/.git/worktrees/")?;
-            return Some(PathBuf::from(&raw[..idx]));
+            // "gitdir: C:/repo/.git/worktrees/<name>". A `.git` file that is
+            // not a worktree pointer — a submodule's, say — must not abandon
+            // the walk: the superproject above it has a real `.git` directory
+            // and is the project a person means.
+            if let Some(owner) = worktree_owner(&marker) {
+                return Some(owner);
+            }
         }
     }
     None
 }
 
+fn worktree_owner(marker: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(marker).ok()?;
+    let raw = text.split_once("gitdir:")?.1.trim().replace('\\', "/");
+    let idx = raw.find("/.git/worktrees/")?;
+    Some(PathBuf::from(&raw[..idx]))
+}
+
 fn is_scratch(root: &Path) -> bool {
     let lower = root.to_string_lossy().to_lowercase().replace('\\', "/");
-    lower.contains("/appdata/local/temp/")
-        || lower.contains("/temp/")
+    // The OS's own temp directory, wherever this machine keeps it. Matching
+    // any path containing "/temp/" branded a real project living under
+    // D:\Temp as scratch and hid its card entirely.
+    let os_temp = std::env::temp_dir()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace('\\', "/");
+    let os_temp = os_temp.trim_end_matches('/');
+    (!os_temp.is_empty() && lower.starts_with(os_temp))
+        || lower.contains("/appdata/local/temp/")
         || lower.starts_with("/tmp/")
         || lower.contains("/var/folders/")
 }
@@ -99,6 +116,26 @@ mod tests {
         assert!(!is_scratch(Path::new(
             "C:\\Users\\me\\Documents\\real-project"
         )));
+        // A directory merely *named* temp is somebody's real disk layout, and
+        // calling it scratch hid the card entirely.
+        assert!(!is_scratch(Path::new("D:\\Temp\\real-work")));
+    }
+
+    /// A submodule's `.git` is a file, but not a worktree pointer. It used to
+    /// abort the whole ancestor walk, so the superproject above it — with a
+    /// real `.git` directory — was never found.
+    #[test]
+    fn a_submodule_resolves_to_the_superproject() {
+        let dir = std::env::temp_dir().join(format!("pipsqueak-sub-{}", std::process::id()));
+        let repo = dir.join("super-repo");
+        let sub = repo.join("vendored").join("lib");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+
+        let found = git_root(&sub).expect("the superproject should be found");
+        assert_eq!(found, repo);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

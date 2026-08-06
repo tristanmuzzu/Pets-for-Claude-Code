@@ -47,8 +47,13 @@ pub fn run(fallback_event: Option<String>) {
     let path = sessions_dir().join(format!("{}.json", sanitize(&session_id)));
 
     if event == "SessionEnd" {
+        // Hold the same lock every hook holds for its read-modify-write, so an
+        // in-flight event cannot rename the file back into existence after
+        // this delete. The lock file itself is left alone: removing it out
+        // from under a live holder lets a third writer into the critical
+        // section, and an orphaned lock expires on its own.
+        let _lock = FileLock::acquire(&path);
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_file(path.with_extension("json.lock"));
         return;
     }
 
@@ -57,10 +62,23 @@ pub fn run(fallback_event: Option<String>) {
     // "before" and whichever renames last discards the other's event.
     let _lock = FileLock::acquire(&path);
 
-    let mut session: Session = fs::read_to_string(&path)
+    let mut session: Session = match fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+    {
+        Some(session) => session,
+        None => {
+            // Only the events that genuinely begin work may create the file.
+            // Hooks run detached and in parallel, so a straggler can arrive
+            // after `SessionEnd` deleted the session; recreating it from
+            // nothing resurrects a zombie card that sits there until the
+            // sweep notices.
+            if event != "SessionStart" && event != "UserPromptSubmit" {
+                return;
+            }
+            Session::default()
+        }
+    };
 
     let Some(mut update) = classify(&event, &payload) else {
         return;
@@ -70,7 +88,7 @@ pub fn run(fallback_event: Option<String>) {
     // work. Taking it at face value cleared the outcome and relabelled a
     // finished card "Delegating", so the turn that had just been announced as
     // done went back to looking busy with nothing running.
-    let trailing_subagent = is_trailing_subagent(&event, &session.outcome);
+    let trailing_subagent = is_trailing_subagent(&event, &session);
     if trailing_subagent {
         update.state = "";
         update.kind.clear();
@@ -120,7 +138,14 @@ pub fn run(fallback_event: Option<String>) {
         session.subagents = 0;
     }
 
-    if PROGRESS_EVENTS.contains(&event.as_str()) && !trailing_subagent {
+    // `Stop` and `StopFailure` clear it too: the turn ending resolves whatever
+    // it was blocked on. Without this, a denied permission followed by the
+    // turn ending left "Needs you" on the card for hours — the outcome the
+    // same event carries is applied just below, after the slate is clean.
+    let resolves = PROGRESS_EVENTS.contains(&event.as_str())
+        || event == "Stop"
+        || event == "StopFailure";
+    if resolves && !trailing_subagent {
         session.clear_pending();
     }
     // Anything other than the prompt itself means the prompt is over.
@@ -139,7 +164,13 @@ pub fn run(fallback_event: Option<String>) {
     if !session.pending_tool.is_empty() && event != "PermissionRequest" && event != "Notification" {
         session.clear_permission();
     }
-    if !update.permission.is_empty() && session.pending_tool != update.permission {
+    // Compare the detail too: two consecutive prompts for the same tool but
+    // different commands must not leave the previous command's text, risk
+    // label, and an already-elapsed debounce clock on the new prompt.
+    if !update.permission.is_empty()
+        && (session.pending_tool != update.permission
+            || session.pending_detail != update.permission_detail)
+    {
         session.pending_tool = update.permission.clone();
         session.pending_detail = update.permission_detail.clone();
         session.pending_risk = update.permission_risk.to_string();
@@ -277,6 +308,13 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
     let input = payload.get("tool_input");
 
     Some(match event {
+        // Auto-compaction fires `SessionStart` again mid-session with
+        // `source: "compact"` (doc-verified). Treating it as a fresh session
+        // flipped a working card to an idle "Session started" and stole the
+        // headline for the rest of the turn.
+        "SessionStart" if text("source") == "compact" => {
+            live("thinking", "Thinking", "Context compacted".into())
+        }
         "SessionStart" => Update {
             state: "idle",
             kind: "Idle".into(),
@@ -375,6 +413,19 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 }),
                 "idle_prompt" => waiting("Waiting for your reply"),
                 "agent_needs_input" => waiting("A teammate needs input"),
+                // `notification_type` is not in the documented payload schema,
+                // so it may simply be absent. Falling back to the message text
+                // keeps "needs you" working instead of silently never firing.
+                "" if !message.is_empty() => {
+                    let lower = message.to_lowercase();
+                    if lower.contains("permission") {
+                        waiting(&message)
+                    } else if lower.contains("waiting for your") || lower.contains("input") {
+                        waiting("Waiting for your reply")
+                    } else {
+                        return None;
+                    }
+                }
                 _ => return None,
             }
         }
@@ -500,7 +551,12 @@ fn stop_disposition(payload: &Value, last_message: &str) -> Stop {
             Stop::Finished { settle_ms: 2_000 }
         };
     }
-    Stop::Finished { settle_ms: 0 }
+    // Even a clean-looking end stays provisional for a moment. A blocking
+    // stop hook (a review gate, a completion loop) can veto this stop and
+    // have the turn carry straight on — `stop_hook_active` only says so on
+    // the *second* Stop, after the fact. Without the hold, every vetoed stop
+    // flashed a Done card that the next tool event immediately wiped.
+    Stop::Finished { settle_ms: 2_000 }
 }
 
 /// The coarse category behind the status line. Several different tools map to
@@ -668,8 +724,16 @@ fn short(value: &str, fallback: &str) -> String {
 ///
 /// Claude Code sends `SubagentStop` for work that outlives the answer, so this
 /// is routine rather than exceptional, and it must not restart the turn.
-fn is_trailing_subagent(event: &str, outcome: &str) -> bool {
-    matches!(event, "SubagentStart" | "SubagentStop") && !outcome.is_empty()
+fn is_trailing_subagent(event: &str, session: &Session) -> bool {
+    match event {
+        "SubagentStart" => !session.outcome.is_empty(),
+        // A `SubagentStop` with nothing outstanding is also bookkeeping when
+        // the next prompt has already cleared the outcome: without the count
+        // check, a straggler from the previous turn relabelled a fresh
+        // "Thinking…" card as "Delegating" with nothing running.
+        "SubagentStop" => !session.outcome.is_empty() || session.subagents == 0,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -798,7 +862,9 @@ mod tests {
         });
         let update = classify("Stop", &payload).unwrap();
         assert_eq!(update.outcome, "done");
-        assert_eq!(update.settle_ms, 0);
+        // Provisional even when clean: a blocking stop hook can veto this
+        // stop, and zero settle time made every vetoed stop flash a Done card.
+        assert_eq!(update.settle_ms, 2_000);
         // The turn is over, so the session is not running any more. Leaving it
         // running would have the staleness sweep decide five minutes later
         // that a finished session had stopped responding, and say so over the
@@ -960,10 +1026,59 @@ mod tests {
     /// "Delegating" with nothing running.
     #[test]
     fn a_late_subagent_does_not_unfinish_a_turn() {
-        assert!(is_trailing_subagent("SubagentStop", "done"));
-        assert!(is_trailing_subagent("SubagentStart", "failed"));
-        assert!(!is_trailing_subagent("SubagentStop", ""));
-        assert!(!is_trailing_subagent("PreToolUse", "done"));
+        let with = |outcome: &str, subagents: u64| Session {
+            outcome: outcome.to_string(),
+            subagents,
+            ..Session::default()
+        };
+        assert!(is_trailing_subagent("SubagentStop", &with("done", 1)));
+        assert!(is_trailing_subagent("SubagentStart", &with("failed", 0)));
+        assert!(!is_trailing_subagent("SubagentStop", &with("", 2)));
+        assert!(!is_trailing_subagent("PreToolUse", &with("done", 0)));
+        // A new prompt cleared the outcome, but nothing is outstanding: this
+        // stop belongs to the previous turn and must stay bookkeeping.
+        assert!(is_trailing_subagent("SubagentStop", &with("", 0)));
+        // A genuine stop for a subagent this turn started is progress.
+        assert!(!is_trailing_subagent("SubagentStop", &with("", 1)));
+    }
+
+    /// A blocking stop hook can veto this stop and have the turn carry on;
+    /// the payload only admits that on the *second* Stop. The hold is what
+    /// keeps the Done card from flashing and vanishing when that happens.
+    #[test]
+    fn even_a_clean_stop_is_held_provisional() {
+        let update = classify("Stop", &json!({ "last_assistant_message": "Fixed." })).unwrap();
+        assert_eq!(update.outcome, "done");
+        assert!(update.settle_ms >= 1_000, "settle_ms was {}", update.settle_ms);
+    }
+
+    /// Auto-compaction fires `SessionStart` again mid-session with
+    /// `source: "compact"`. That is a resumption, not a fresh session: the
+    /// card must not reset to idle or lose its headline mid-turn.
+    #[test]
+    fn a_compaction_restart_is_not_a_new_session() {
+        let update = classify("SessionStart", &json!({ "source": "compact" })).unwrap();
+        assert_eq!(update.state, "thinking");
+        assert!(update.headline.is_none());
+
+        let fresh = classify("SessionStart", &json!({ "source": "startup" })).unwrap();
+        assert_eq!(fresh.state, "idle");
+        assert_eq!(fresh.headline.as_deref(), Some("Session started"));
+    }
+
+    /// `notification_type` is not in the documented payload schema. When it is
+    /// missing, the message text still has to be able to say "needs you".
+    #[test]
+    fn a_notification_without_a_type_still_counts_as_waiting() {
+        let payload = json!({ "message": "Claude needs your permission to use Bash" });
+        let update = classify("Notification", &payload).unwrap();
+        assert!(!update.waiting.is_empty());
+
+        let idle = json!({ "message": "Claude is waiting for your input" });
+        assert!(!classify("Notification", &idle).unwrap().waiting.is_empty());
+
+        // A typeless notification that reads like neither stays ignored.
+        assert!(classify("Notification", &json!({ "message": "Signed in." })).is_none());
     }
 
     #[test]

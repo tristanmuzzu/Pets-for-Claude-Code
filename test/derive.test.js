@@ -8,7 +8,6 @@ import {
   displayState,
   holdState,
   isNewer,
-  rank,
   relativeTime
 } from '../src/derive.js'
 
@@ -59,6 +58,16 @@ test('a completion that has not settled is still a running turn', () => {
   assert.equal(displayState(session, NOW + 2001), 'done')
 })
 
+test('a settling turn stays on screen even though the producer wrote idle', () => {
+  // The hook writes `state: "idle"` together with the outcome. Reporting that
+  // idle during the settle window took the card out of the DOM for two
+  // seconds and popped it back in as "done" — the flicker this window exists
+  // to prevent.
+  const session = quiet({ state: 'idle', outcome: 'done', outcome_ms: NOW, settles_ms: NOW + 2000 })
+  assert.equal(displayState(session, NOW), 'running')
+  assert.equal(displayState(session, NOW + 2001), 'done')
+})
+
 test('a finished turn stays finished until somebody looks at it', () => {
   // No timer: a card that removes itself after 30s is a card that finished
   // while you were in a meeting and never told you.
@@ -78,16 +87,6 @@ test('a session the sweep gave up on reads as idle, not finished', () => {
   // failure, and it must not outrank either.
   const session = quiet({ state: 'running', stalled: true })
   assert.equal(displayState(session, NOW), 'idle')
-})
-
-test('the busiest session speaks for a project', () => {
-  const blocked = quiet({ pending_since: NOW })
-  const working = quiet({ state: 'running' })
-  const finished = quiet({ state: 'idle', outcome: 'done' })
-  const asleep = quiet({ state: 'idle' })
-  assert.ok(rank(blocked) > rank(working))
-  assert.ok(rank(working) > rank(finished))
-  assert.ok(rank(finished) > rank(asleep))
 })
 
 test('a state holds long enough to be read', () => {

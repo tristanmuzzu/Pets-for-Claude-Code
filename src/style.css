@@ -119,10 +119,17 @@ body {
     0 0 0 1px var(--ring),
     0 10px 26px rgba(0, 0, 0, 0.45),
     inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  animation: rise 160ms ease-out;
   /* Every row is always rendered, so a card never resizes under the cursor and
      the cards below never jump. */
   min-height: 84px;
+}
+
+/* The entrance is a one-shot class, applied only to a freshly built card and
+   removed when it finishes. On the base rule it replayed every time a card
+   moved in the stack, because re-inserting a connected node restarts its
+   animations: a promoted card blinked to transparent and rose again. */
+.card.card-enter {
+  animation: rise 160ms ease-out;
 }
 
 @keyframes rise {
@@ -207,6 +214,15 @@ body {
   50% { opacity: 0.35; }
 }
 
+/* One-shot for the same reason as .card-enter: on the base rule the unfold
+   replayed whenever the card moved in the DOM, not just when the row appeared.
+   The card gets taller when this appears, which is wanted: the stack is
+   anchored at the bottom, so it grows away from the pet, and the movement is
+   itself the signal. Easing it in stops that reading as a layout glitch. */
+.ask.ask-enter {
+  animation: unfold 180ms ease-out;
+}
+
 @keyframes unfold {
   from {
     opacity: 0;
@@ -259,21 +275,11 @@ body {
   white-space: nowrap;
 }
 
-.count,
 .age {
   font-size: 10.5px;
   color: var(--faint);
   font-variant-numeric: tabular-nums;
   flex: none;
-}
-
-.count {
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.age {
   margin-left: auto;
 }
 
@@ -445,10 +451,6 @@ body {
  * than competing with the status line.
  */
 .ask {
-  /* The card gets taller when this appears, which is wanted: the stack is
-     anchored at the bottom, so it grows away from the pet, and the movement is
-     itself the signal. Easing it in stops that reading as a layout glitch. */
-  animation: unfold 180ms ease-out;
   margin: 7px 0 0;
   padding: 6px 8px;
   border-radius: 8px;
@@ -586,6 +588,15 @@ body {
 .chips .dot {
   width: 6px;
   height: 6px;
+}
+
+/* A chip names a chat now, and a chat title is a sentence. Clipped rather than
+   allowed to set the width of the row it sits in. */
+.chips .label {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --- welcome / setup check ------------------------------------------- */

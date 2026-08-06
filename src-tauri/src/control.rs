@@ -24,14 +24,17 @@ pub fn run(action: Option<String>) -> Result<String, String> {
         } else {
             "Pipsqueak is not running.".to_string()
         }),
-        "off" | "hide" | "stop" => {
+        "off" | "hide" => {
             if !running {
                 return Ok("Pipsqueak is not running.".to_string());
             }
             send("hide")?;
             Ok("Pet hidden.".to_string())
         }
-        "quit" | "exit" => {
+        // The UI distinguishes "put it away" from "stop it"; the CLI keeps
+        // the same distinction. "stop" leaving the process, hotkey and tray
+        // alive was a lie by another name.
+        "quit" | "exit" | "stop" => {
             if !running {
                 return Ok("Pipsqueak is not running.".to_string());
             }
