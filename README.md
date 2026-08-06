@@ -78,9 +78,12 @@ it says and thinks. The last one is the default and the one that feels alive.
 
 - **↗ opens that chat.** Not some Claude window. That exact conversation, by id,
   in the desktop app.
-- **× dismisses.** A finished card says **Done** and waits until you've seen it,
-  then goes away completely.
-- **Click a card** for the last two dozen things that project did.
+- **Click a finished card and it's gone.** A card that says **Done** waits until
+  you've seen it, however long that takes, and then one click anywhere on it
+  swats it away completely — not down to a chip, which would mean something is
+  still going on. A card that's still working opens instead, showing the last
+  two dozen things that project did.
+- **× dismisses too**, and closes a working card down to a one-line chip.
 - **`Ctrl+Alt+P`** shows and hides the whole thing from anywhere. If another
   program already owns that chord, Pipsqueak takes the next free one and tells
   you which.
