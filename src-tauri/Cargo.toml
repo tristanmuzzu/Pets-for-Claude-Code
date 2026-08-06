@@ -1,6 +1,6 @@
 [package]
 name = "pipsqueak"
-version = "0.5.0"
+version = "0.6.0"
 description = "A desktop pet that shows what Claude Code is doing, in its own words."
 authors = ["Tristan Rafe Muzzu"]
 license = "MIT"
