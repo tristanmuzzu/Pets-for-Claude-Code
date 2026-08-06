@@ -256,6 +256,14 @@ body {
 .card[data-state="failed"] .dot { background: var(--failed); }
 .card[data-state="done"] .dot { background: var(--done); }
 .card[data-state="compacting"] .dot { background: var(--compacting); }
+/* Still working, and the blink says the working is not this session's own
+   doing: the turn has ended and what it started has not. Deliberately the
+   working colour rather than the finished one — green is a claim this card is
+   not yet entitled to make. */
+.card[data-state="finishing"] .dot {
+  background: var(--running);
+  animation: blink 1.6s ease-in-out infinite;
+}
 
 @keyframes blink {
   50% { opacity: 0.25; }
@@ -444,6 +452,7 @@ body {
 .card[data-state="waiting"] .status .kind { color: var(--waiting); }
 .card[data-state="failed"] .status .kind { color: var(--failed); }
 .card[data-state="done"] .status .kind { color: var(--done); }
+.card[data-state="finishing"] .status .kind { color: var(--running); }
 
 /*
  * What the session is blocked on. The only line on a card worth interrupting

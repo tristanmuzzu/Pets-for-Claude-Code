@@ -47,6 +47,31 @@ function say(session, text, kind = 'text') {
   )
 }
 
+/**
+ * Work the turn starts and does not wait for: a background command, a monitor,
+ * a subagent. Claude Code writes an id into the transcript at launch and names
+ * that id again when it finishes, which is the only record anywhere that the
+ * turn ending is not the work ending.
+ */
+function launch(session, id, kind = 'background') {
+  const result =
+    kind === 'agent'
+      ? { isAsync: true, status: 'async_launched', agentId: id }
+      : { stdout: '', stderr: '', interrupted: false, backgroundTaskId: id }
+  appendFileSync(
+    transcriptFor(session),
+    `${JSON.stringify({ type: 'user', toolUseResult: result })}\n`
+  )
+}
+
+function finish(session, id, summary) {
+  const content = `<task-notification><task-id>${id}</task-id><status>completed</status><summary>${summary}</summary></task-notification>`
+  appendFileSync(
+    transcriptFor(session),
+    `${JSON.stringify({ type: 'queue-operation', operation: 'enqueue', content })}\n`
+  )
+}
+
 function fire(session, cwd, event, extra) {
   return new Promise((done, fail) => {
     const child = spawn(BIN, ['hook', event], { stdio: ['pipe', 'ignore', 'inherit'] })
@@ -164,6 +189,36 @@ const PROJECTS = [
       [500, 'SessionEnd', { reason: 'clear' }]
     ]
   },
+  {
+    // The case the card used to get wrong, and the reason "Done" is no longer
+    // written the moment the assistant stops talking: the turn ends *because*
+    // it is waiting — on a CI run it started in the background, and on two
+    // subagents. Every hook says the turn is over. Nothing will ever fire a
+    // hook when the work itself finishes.
+    id: 'sim-pipeline',
+    cwd: 'C:/code/deploy-pipeline',
+    steps: [
+      [1000, 'SessionStart', { source: 'startup' }],
+      [800, 'UserPromptSubmit', { prompt: 'Ship the release once CI is green' }],
+      [0, 'Say', { text: 'Kicking off the pipeline and reviewing the diff while it runs.' }],
+      [1500, 'PreToolUse', bash('gh run watch 42', 'Watch the release pipeline')],
+      [0, 'Launch', { id: 'bci42run', kind: 'background' }],
+      [1200, 'PreToolUse', { tool_name: 'Agent', tool_input: { description: 'Review the diff' } }],
+      [0, 'Launch', { id: 'a11review', kind: 'agent' }],
+      [900, 'PreToolUse', { tool_name: 'Agent', tool_input: { description: 'Check the changelog' } }],
+      [0, 'Launch', { id: 'a22notes', kind: 'agent' }],
+      [0, 'Say', { text: 'Waiting on CI and the two reviewers before I tag anything.' }],
+      // The floor is yielded here. Three things are still running.
+      [9000, 'Stop', {
+        last_assistant_message: 'Waiting for the pipeline and the reviewers to report back.'
+      }],
+      [0, 'Complete', { id: 'a11review', summary: 'Agent "Review the diff" finished' }],
+      [6000, 'Complete', { id: 'a22notes', summary: 'Agent "Check the changelog" finished' }],
+      // Only now is the turn genuinely over, and only now may the card say so.
+      [7000, 'Complete', { id: 'bci42run', summary: 'Background command "gh run watch" completed' }],
+      [20000, 'SessionEnd', { reason: 'clear' }]
+    ]
+  },
   // These two arrive after the first recording window has closed, so the same
   // run can be captured twice: three cards early, a collapsed stack later.
   {
@@ -207,6 +262,12 @@ async function play(project) {
     } else if (event === 'Say') {
       say(project.id, extra.text, extra.kind)
       console.log(`  ${project.id.padEnd(18)} said "${extra.text.slice(0, 48)}…"`)
+    } else if (event === 'Launch') {
+      launch(project.id, extra.id, extra.kind)
+      console.log(`  ${project.id.padEnd(18)} launched ${extra.kind} ${extra.id}`)
+    } else if (event === 'Complete') {
+      finish(project.id, extra.id, extra.summary)
+      console.log(`  ${project.id.padEnd(18)} ${extra.id} reported back`)
     } else {
       await fire(project.id, project.cwd, event, extra)
       console.log(`  ${project.id.padEnd(18)} ${event}${extra.tool_name ? ` (${extra.tool_name})` : ''}`)
@@ -215,6 +276,16 @@ async function play(project) {
   }
 }
 
-console.log(`replaying ${PROJECTS.length} concurrent projects through ${BIN}\n`)
-await Promise.all(PROJECTS.map(play))
+// `--only <id>` replays one project alone, for looking hard at a single case
+// rather than at six of them competing for three slots.
+const onlyAt = process.argv.indexOf('--only')
+const only = onlyAt === -1 ? null : process.argv[onlyAt + 1]
+const playing = only ? PROJECTS.filter((p) => p.id === only) : PROJECTS
+if (only && playing.length === 0) {
+  console.error(`No project called ${only}. Known: ${PROJECTS.map((p) => p.id).join(', ')}`)
+  process.exit(1)
+}
+
+console.log(`replaying ${playing.length} concurrent projects through ${BIN}\n`)
+await Promise.all(playing.map(play))
 console.log('\ndone')

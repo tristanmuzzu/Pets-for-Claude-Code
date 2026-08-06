@@ -128,6 +128,41 @@ the turn carry straight on, and `stop_hook_active` only admits that on the
 *second* `Stop`. Two seconds is long enough for the continuation to cancel a
 premature "Done" before it was ever shown.
 
+## Why the turn ending is not the work ending
+
+None of the above helps with the case that matters most: the assistant yields
+the floor *because* it is waiting. Two subagents are still reviewing, or a
+release pipeline it started in the background has not reported back, and its
+final sentence says exactly that. `Stop` fires anyway, and **no hook of any
+kind fires when a background command or a subagent finishes**. From the hooks
+alone, that turn is indistinguishable from a finished one.
+
+The transcript is where the answer lives. Claude Code gives every asynchronous
+thing an id when it starts it — a background command, a monitor, a subagent —
+and names that same id again in the notification when it completes. So the
+work still outstanding is simply the launches minus the completions, and the
+overlay is already reading that file for the live line.
+
+| The card says | When |
+| --- | --- |
+| **Finishing · N running** | the turn ended and N things it started have not reported back |
+| **Done** | the turn ended and nothing it started is still running |
+
+Which is the distinction the Claude Code sidebar draws with a blinking dot, a
+hollow one, and a blue one. A count that never drains — because the overlay
+started watching after the launch and missed the completion — is written off
+after five minutes of total silence, the same cutoff that retires a session
+which stopped producing events.
+
+Two things are deliberately not done here. The pet does not read the
+assistant's prose looking for phrases like "waiting for" — that is guessing
+dressed as knowing, and the ids are already an exact answer. And it does not
+treat the *tray blink* as the same claim as the card: the card can say Done
+and take it back a second later, because it is in front of you and it corrects
+itself, while a tray blink is a tap on the shoulder of somebody looking
+somewhere else. So the blink waits until the completion has held for eight
+seconds with nothing still running.
+
 A `SubagentStop` for work that outlived the answer is bookkeeping: it adjusts
 the count and touches nothing else. Treated as progress, it cleared the outcome
 and put a finished card back to "Delegating" with nothing running.

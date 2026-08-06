@@ -17,6 +17,10 @@ import { tmpdir } from 'node:os'
 import { decodePng } from './pngdec.mjs'
 import { encodeApng } from './apng.mjs'
 
+// TopMost, because the overlay it sits behind is transparent and always on
+// top: without it, whatever window had focus shows through the pet's own
+// window and lands in the recording. The whole point of painting a backdrop
+// is that nobody's desktop ends up in a public README.
 const BACKDROP_SCRIPT = `param($Hex)
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 $form = New-Object System.Windows.Forms.Form
@@ -24,6 +28,7 @@ $form.FormBorderStyle = 'None'
 $form.WindowState = 'Maximized'
 $form.BackColor = [System.Drawing.ColorTranslator]::FromHtml($Hex)
 $form.ShowInTaskbar = $false
+$form.TopMost = $true
 [System.Windows.Forms.Application]::Run($form)
 `
 
@@ -124,8 +129,15 @@ await sleep(1200)
 children.push(spawn(BIN, [], { env, stdio: 'ignore', detached: false }))
 await sleep(2500)
 
+// `--only <id>` is passed straight through, so a recording can show one
+// project's whole story instead of six of them sharing three slots.
+const only = args.get('only')
 children.push(
-  spawn(process.execPath, [resolve(HERE, 'simulate.mjs'), BIN], { env, stdio: 'ignore' })
+  spawn(
+    process.execPath,
+    [resolve(HERE, 'simulate.mjs'), BIN, ...(only ? ['--only', only] : [])],
+    { env, stdio: 'ignore' }
+  )
 )
 console.log(`Letting the simulator warm up for ${LEAD_IN_MS / 1000}s…`)
 await sleep(LEAD_IN_MS)

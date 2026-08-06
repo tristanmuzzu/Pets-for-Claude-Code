@@ -110,6 +110,11 @@ pub struct Entry {
 /// event never arrives.
 pub const RUNNING_STATES: [&str; 3] = ["thinking", "running", "compacting"];
 
+/// Keeps a transient, overlay-computed count out of the file hooks write.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct Session {
@@ -193,8 +198,19 @@ pub struct Session {
     /// turn, since Claude usually just tries something else, so this is a
     /// marker rather than a state.
     pub hiccups: u64,
-    /// Subagents started but not yet finished.
+    /// Subagents started but not yet finished, as the hooks saw them.
     pub subagents: u64,
+    /// Work the turn started and has not been told is over: background shell
+    /// commands, monitors and subagents, counted from the transcript by the
+    /// overlay rather than by a hook.
+    ///
+    /// A hook fires when the assistant yields the floor, which is not the same
+    /// moment the work ends, and no hook ever fires for a background command
+    /// finishing. Without this the card called a turn Done while five agents
+    /// were still running and the assistant's last words were that it was
+    /// waiting for them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub outstanding: u64,
     /// The sweep gave up on this session: running, but silent for longer than
     /// any real turn goes without firing a hook.
     ///
@@ -263,6 +279,15 @@ pub struct Config {
     /// existing installs, because an upgrade should get the welcome
     /// once too, since it is the only place the setup is explained.
     pub welcomed: bool,
+    /// Whether the once-only autostart decision has been made.
+    ///
+    /// An overlay whose entire job is to be in the corner of your eye is
+    /// worthless if it is not running, and "it did not come back after a
+    /// reboot" is indistinguishable from "it is broken". So the first run
+    /// registers it to start with Windows and says so. Recorded here rather
+    /// than inferred from the registry, so turning it *off* stays off instead
+    /// of being helpfully restored on the next launch.
+    pub autostart_initialised: bool,
     pub pet: String,
     pub scale: f64,
     pub click_through: bool,
@@ -318,6 +343,7 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             welcomed: false,
+            autostart_initialised: false,
             pet: "byte".to_string(),
             scale: 2.0,
             click_through: false,

@@ -9,12 +9,14 @@ import {
   SLEEP_AFTER_MS,
   URGENT,
   WAITING_DEBOUNCE_MS,
+  WORKING,
   blockedOn,
   displayState,
   duration,
   holdState,
   isNewer,
-  relativeTime
+  relativeTime,
+  worthCelebrating
 } from './derive.js'
 
 /** `npm run dev` in a plain browser has no IPC; fall back to a demo loop. */
@@ -119,6 +121,9 @@ function viewFor(key) {
       wasUrgent: false,
       // A finished turn nobody has acknowledged yet.
       unread: false,
+      // Whether this completion has already been announced, so a card that
+      // sits there finished does not blink the tray on every render tick.
+      celebrated: false,
       lastShown: '',
       // The state currently on screen, and the earliest it may be replaced.
       heldState: '',
@@ -196,6 +201,7 @@ const LINE_HOLD_MS = 1000
  */
 function restingLine(state) {
   if (state === 'waiting') return 'Waiting for you'
+  if (state === 'finishing') return 'Waiting for the work it started'
   if (state === 'done') return 'Finished'
   if (state === 'failed') return 'The turn failed'
   if (state === 'idle') return 'Nothing running'
@@ -209,6 +215,21 @@ function holdLine(view, line, now = Date.now()) {
   view.line = line
   view.lineUntil = now + LINE_HOLD_MS
   return line
+}
+
+/**
+ * Shows or hides the whole stack, and remembers which.
+ *
+ * `show_bubble` was documented, stored, loaded and saved, and read by nothing:
+ * the real switch was a variable that reset on every restart and every
+ * watchdog reload, so "hide the cards" quietly came undone. One decision, one
+ * place, and the setting means what the guide says it means.
+ */
+function setStackHidden(hidden) {
+  if (stackHidden === hidden) return
+  stackHidden = hidden
+  config.showBubble = !hidden
+  saveConfig()
 }
 
 /** Marks a finished turn as seen, which is what removes its card. */
@@ -264,16 +285,23 @@ function buildCard(key) {
   })
   node.addEventListener('click', () => {
     const view = viewFor(key)
-    // Three things one click can mean, in order of how sure we are of it.
-    // Finished: you have seen it, so it goes. Collapsed to a line: you want to
-    // read this one, so it takes the card. Otherwise: open the detail.
-    if (acknowledge(key)) {
-      // Nothing else to do; the card is on its way out.
-    } else if (node.dataset.density === 'compact') {
+    // Two things one click can mean, and neither of them destroys anything.
+    // Collapsed to a line: you want to read this one, so it takes the card.
+    // Otherwise: open the detail.
+    //
+    // A finished card used to be dismissed by this click, which made the one
+    // moment a card holds the most worth reading — the turn is over, the final
+    // message and the last two dozen actions are right there — the one moment
+    // clicking it threw all of that away, unrecoverably. Coming back from
+    // lunch, seeing green and clicking to find out *what* finished is the
+    // obvious thing to do, and it was the one thing that could not be undone.
+    // Dismissal belongs to ×, which is aimed.
+    if (node.dataset.density === 'compact') {
       promoted = key
     } else {
       view.expanded = !view.expanded
     }
+    // Looking at it settles the debt either way.
     view.unread = false
     invoke('clear_attention').catch(() => {})
     render()
@@ -340,10 +368,19 @@ function paintCard(node, card, compact = false) {
 
   // Two counts that say how much is going on without any text changing:
   // subagents running, and tools that failed and were worked around.
-  const subagents = session.subagents ?? 0
+  // Work this turn started and is still waiting on. Counted from the
+  // transcript rather than from the hooks: the hook counter only ever saw
+  // subagents, never a background command, and nothing decrements it when a
+  // subagent ends without an event, so it drifted upward and then contradicted
+  // the status line on the same card. One count, one source.
+  //
+  // Hidden while the card reads "Finishing", where the status line is already
+  // saying the same number in more words.
+  const outstanding = session.outstanding ?? 0
   const subagentChip = node.querySelector('.subagents')
-  subagentChip.hidden = subagents < 1
-  subagentChip.textContent = `${subagents} sub`
+  subagentChip.hidden = outstanding < 1 || state === 'finishing'
+  subagentChip.textContent = `${outstanding} running`
+  subagentChip.title = 'Background commands and subagents this turn started and has not been told are finished'
   const hiccups = session.hiccups ?? 0
   const hiccupChip = node.querySelector('.hiccups')
   hiccupChip.hidden = hiccups < 1
@@ -397,6 +434,12 @@ function kindLabel(state, session) {
   if (session.stalled) return 'Stopped responding'
   if (state === 'waiting') return 'Needs you'
   if (state === 'failed') return 'Failed'
+  if (state === 'finishing') {
+    // The count is the whole point: it is the reason this is not "Done". Kept
+    // short because it shares the status line with the counters, and the
+    // longer phrasing was the half that got truncated away.
+    return `Finishing · ${session.outstanding ?? 0} running`
+  }
   if (state === 'done') return 'Done'
   if (state === 'compacting') return 'Compacting'
   // `kind` describes work in progress, so it is only true while there is some.
@@ -415,7 +458,7 @@ function buildChip(key) {
   text.className = 'label'
   button.append(dot, text)
   button.addEventListener('click', () => {
-    stackHidden = false
+    setStackHidden(false)
     collapsed.delete(key)
     if (!slots.includes(key)) slots.unshift(key)
     render()
@@ -447,10 +490,19 @@ function render() {
     if (urgent && !view.wasUrgent) {
       collapsed.delete(group.key)
       slots = [group.key, ...slots.filter((key) => key !== group.key)]
-      // Something needing you outranks whatever you were reading, so it takes
-      // the full card back off it.
-      promoted = null
-      if (group.state === 'waiting' && config.alertOnWaiting) invoke('alert').catch(() => {})
+      // "Anything that starts needing you takes the card back on its own" is a
+      // promise the README makes, and hiding the cards used to break it: the
+      // question sat in a six-pixel dot until the pet was clicked again.
+      setStackHidden(false)
+      if (group.state === 'waiting') {
+        // The state the whole overlay was built for — an agent waiting on you
+        // is dead time you are paying for twice — and it was the only state
+        // that could not reach you behind a fullscreen window. Done and Failed
+        // blink the tray; the one that is costing money in real time now does
+        // too. The sound stays opt-in.
+        invoke('flash_tray').catch(() => {})
+        if (config.alertOnWaiting) invoke('alert').catch(() => {})
+      }
     }
     view.wasUrgent = urgent
 
@@ -458,17 +510,28 @@ function render() {
     // whole overlay exists to tell you about. The mark outlives the card.
     // A notice is the overlay talking about itself, not a completion: it
     // neither blinks the tray nor wears an unread dot.
+    //
+    // `worthCelebrating` is the difference between the card's claim and this
+    // one. The card may say Done and take it back; a tray blink cannot be
+    // taken back, so it waits until the completion has held, with nothing the
+    // session started still running.
     if (
       group.key !== 'notice' &&
       settled(group.state) &&
-      view.lastShown !== group.state &&
-      isFresh(group.session)
+      !view.celebrated &&
+      isFresh(group.session) &&
+      worthCelebrating(group.session)
     ) {
+      view.celebrated = true
       view.unread = true
       invoke('flash_tray').catch(() => {})
     }
-    // Work restarting answers the question the mark was asking.
-    if (RUNNING.has(group.state)) view.unread = false
+    // Work restarting answers the question the mark was asking — including
+    // work that carried on after the turn ended.
+    if (WORKING.has(group.state)) {
+      view.unread = false
+      view.celebrated = false
+    }
     view.lastShown = group.state
   }
 
@@ -503,10 +566,13 @@ function render() {
   const wanted = stackHidden ? [] : slots.filter((key) => !collapsed.has(key))
   const dense = wanted.filter((key) => key !== 'notice').length > SLOT_LIMIT
   const visible = wanted.slice(0, dense ? DENSE_LIMIT : SLOT_LIMIT)
+  // Something urgent outranks what you were reading while it is urgent — and
+  // then gives the card back. Clearing `promoted` outright meant answering one
+  // permission prompt permanently stole the card from the chat you had chosen
+  // to watch, with no way back except noticing and clicking again.
+  const urgentKey = visible.find((key) => URGENT.has(byKey.get(key)?.state))
   const detailed = dense
-    ? visible.includes(promoted)
-      ? promoted
-      : visible[0]
+    ? urgentKey ?? (visible.includes(promoted) ? promoted : visible[0])
     : null
   const visibleKeys = new Set(visible)
 
@@ -760,6 +826,36 @@ function hotkeyLine() {
   return node
 }
 
+/**
+ * States the autostart decision, and offers the other one.
+ *
+ * Built empty and filled in when the backend answers, for the same reason as
+ * `hotkeyLine`: a panel that arrives half a frame late is worse than a line
+ * that does.
+ */
+function autostartLine() {
+  const row = document.createElement('div')
+  const label = para('')
+  row.append(label)
+  const paint = (enabled) => {
+    label.textContent = enabled
+      ? 'It starts with Windows, so it is there when you get back.'
+      : 'It does not start with Windows.'
+    button.textContent = enabled ? 'Do not start with Windows' : 'Start with Windows'
+  }
+  const button = action('', async () => {
+    const enabled = await invoke('autostart_enabled').catch(() => false)
+    const result = await invoke('set_autostart', { enabled: !enabled }).catch((e) => String(e))
+    if (typeof result === 'string') showNotice(result)
+    paint(!enabled)
+  })
+  row.append(button)
+  invoke('autostart_enabled')
+    .then(paint)
+    .catch(() => paint(false))
+  return row
+}
+
 function showWelcome() {
   openPanel('Pipsqueak', () => {
     const nodes = [
@@ -774,12 +870,11 @@ function showWelcome() {
         const message = await invoke('install_hooks').catch((e) => String(e))
         button.textContent = message
       }, true),
-      action('Start Pipsqueak with Windows', async (button) => {
-        const enabled = await invoke('autostart_enabled').catch(() => false)
-        const result = await invoke('set_autostart', { enabled: !enabled }).catch((e) => String(e))
-        button.textContent =
-          typeof result === 'string' ? result : enabled ? 'Will not start with Windows' : 'Will start with Windows'
-      }),
+      // On by default, and said out loud rather than left as a button nobody
+      // pressed: an overlay that is not running is indistinguishable from an
+      // overlay that is broken, and the shortcut that would bring it back
+      // belongs to the process that is not there.
+      autostartLine(),
       action('Check GitHub for updates occasionally', async (button) => {
         config.updateCheck = !config.updateCheck
         await saveConfig()
@@ -976,7 +1071,7 @@ async function openMenu() {
   )
   children.push(
     button(stackHidden ? 'Show the cards' : 'Hide the cards', () => {
-      stackHidden = !stackHidden
+      setStackHidden(!stackHidden)
       collapsed.clear()
     })
   )
@@ -1150,7 +1245,7 @@ function wireInteraction() {
       // A click outside the menu can't reach us, because the window is
       // click-through there, so the pet itself is what dismisses it.
       if (!el.menu.hidden) el.menu.hidden = true
-      else stackHidden = !stackHidden
+      else setStackHidden(!stackHidden)
       // Looking at the pet is looking at the pet.
       invoke('clear_attention').catch(() => {})
       render()
@@ -1217,6 +1312,9 @@ async function boot() {
       x: stored.x,
       y: stored.y
     }
+    // Hiding the cards is a decision, not a mood: it used to come back on
+    // every restart, reload and watchdog rescue.
+    stackHidden = !config.showBubble
   }
 
   try {
@@ -1248,7 +1346,7 @@ async function boot() {
     // interrupts whatever you were doing to say it. If the hooks are there,
     // the only thing worth mentioning is the new shortcut, and a notice card
     // says that without taking over the screen.
-    if (await invoke('hooks_installed').catch(() => false)) {
+    if (await invoke('hooks_installed').catch(() => true)) {
       const chord = await invoke('hotkey_binding').catch(() => '')
       showNotice(
         chord
@@ -1258,6 +1356,13 @@ async function boot() {
     } else {
       showWelcome()
     }
+  } else if (!(await invoke('hooks_installed').catch(() => true))) {
+    // The welcome is shown once and marked seen the moment it appears, even if
+    // it was closed without installing anything. After that the pet dozes
+    // forever — which is deliberately the same thing a healthy idle pet does,
+    // so a deaf install is indistinguishable from a quiet one. Say it, once
+    // per launch, only while it is actually true.
+    showNotice('No Claude Code hooks installed — right-click the pet and choose Check my setup.')
   }
 
   sessions = await invoke('get_sessions').catch(() => [])

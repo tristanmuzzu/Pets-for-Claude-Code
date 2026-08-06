@@ -25,6 +25,8 @@ Pipsqueak, a desktop pet that shows what Claude Code is doing.
 USAGE:
   pipsqueak                 Run the overlay (default)
   pipsqueak control <what>  on | off | toggle | quit | status | <pet name>
+  pipsqueak autostart <on>  on | off | status: start with Windows
+  pipsqueak sessions        Print what the overlay would show right now, as JSON
   pipsqueak install         Register Claude Code hooks in ~/.claude/settings.json
   pipsqueak uninstall       Remove them again
   pipsqueak hook <Event>    Internal: consume one hook payload on stdin
@@ -39,11 +41,54 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("hook") => hook::run(args.get(1).cloned()),
         Some("control") => report(control::run(args.get(1).cloned())),
+        Some("autostart") => report(autostart(args.get(1).map(String::as_str))),
+        Some("sessions") => report(sessions()),
         Some("install") | Some("--install") => report(install::install()),
         Some("uninstall") | Some("--uninstall") => report(install::uninstall()),
         Some("--version") | Some("-v") => println!("pipsqueak {}", env!("CARGO_PKG_VERSION")),
         Some("--help") | Some("-h") => println!("{HELP}"),
         _ => app::run(),
+    }
+}
+
+/// What the overlay would draw, without needing the overlay.
+///
+/// A card is a session file joined to two things that are not in it: the chat
+/// the desktop app knows about, and what the transcript says is still running.
+/// Both are computed rather than stored, so "why is the card saying that"
+/// could only be answered by looking at the pet. Now it can be answered in a
+/// terminal, and asserted in a test.
+fn sessions() -> Result<String, String> {
+    let mut sessions = state::read_sessions();
+    chats::decorate(&mut sessions);
+    narration::decorate(&mut sessions, narration::Mode::parse("thoughts"));
+    serde_json::to_string_pretty(&sessions).map_err(|e| e.to_string())
+}
+
+/// `pipsqueak autostart on|off|status`.
+///
+/// The tray menu and the welcome panel could already do this, which is fine
+/// until the pet is not running, which is exactly when somebody needs it.
+fn autostart(what: Option<&str>) -> Result<String, String> {
+    match what.unwrap_or("status") {
+        "status" | "" => Ok(match desktop::autostart_command() {
+            Some(exe) => format!("Starts with Windows, running {exe}"),
+            None => "Does not start with Windows.".to_string(),
+        }),
+        "on" | "enable" | "yes" => {
+            // Record the decision so the first-run default cannot undo it.
+            let mut config = state::load_config();
+            config.autostart_initialised = true;
+            let _ = state::save_config(&config);
+            desktop::set_autostart(true).map(|()| "Will start with Windows.".to_string())
+        }
+        "off" | "disable" | "no" => {
+            let mut config = state::load_config();
+            config.autostart_initialised = true;
+            let _ = state::save_config(&config);
+            desktop::set_autostart(false).map(|()| "Will not start with Windows.".to_string())
+        }
+        other => Err(format!("unknown autostart option: {other}")),
     }
 }
 

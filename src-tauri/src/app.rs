@@ -436,6 +436,13 @@ fn autostart_enabled() -> bool {
 
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<(), String> {
+    // Turning it off is a decision, and `ensure_autostart` must not helpfully
+    // switch it back on at the next launch.
+    let mut config = load_config();
+    if !config.autostart_initialised {
+        config.autostart_initialised = true;
+        let _ = state::save_config(&config);
+    }
     desktop::set_autostart(enabled)
 }
 
@@ -776,6 +783,56 @@ fn spawn_poller(app: AppHandle) {
             std::thread::sleep(POLL_INTERVAL);
         }
     });
+}
+
+/// Starts with Windows by default, and keeps pointing at the right program.
+///
+/// Two separate failures, both of which look identical from the outside — the
+/// pet is simply not there, and the hotkey that would bring it back belongs to
+/// a process that is not running:
+///
+/// 1. Nobody ever turned autostart on. It was a button in a panel shown once,
+///    which is a poor way to decide something an overlay depends on entirely.
+///    The first run now registers it and says so; turning it off keeps it off.
+/// 2. The entry pointed at a path the program no longer lives at, after an
+///    install to a different location. Present, plausible, and inert.
+fn ensure_autostart(config: &Config) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let exe = exe.to_string_lossy().to_string();
+    match desktop::autostart_command() {
+        // Registered, but for a program that is not this one. Rewrite it: a
+        // stale entry silently stops the pet coming back after a reboot.
+        Some(registered) if !same_program(&registered, &exe) => {
+            log::write(&format!(
+                "autostart pointed at {registered}, correcting it to {exe}"
+            ));
+            let _ = desktop::set_autostart(true);
+        }
+        Some(_) => {}
+        None => {
+            if config.autostart_initialised {
+                // Deliberately off. Leave it alone.
+                return;
+            }
+            let mut stored = config.clone();
+            stored.autostart_initialised = true;
+            // Record the decision before acting on it, so a failure here is
+            // not retried on every launch forever.
+            let _ = state::save_config(&stored);
+            match desktop::set_autostart(true) {
+                Ok(()) => log::write("first run: registered to start with Windows"),
+                Err(err) => log::write(&format!("could not register autostart: {err}")),
+            }
+        }
+    }
+}
+
+/// Windows path comparison: case and slash direction do not make two programs.
+fn same_program(a: &str, b: &str) -> bool {
+    let normalise = |p: &str| p.trim().trim_matches('"').replace('/', "\\").to_lowercase();
+    normalise(a) == normalise(b)
 }
 
 /// Notices that the program has been deleted out from under itself.
@@ -1150,6 +1207,8 @@ pub fn run() {
                 }
                 Err(reason) => log::write(&format!("no global hotkey: {reason}")),
             }
+
+            ensure_autostart(&config);
 
             // The heartbeat must exist before anything can race us: the
             // poller's first tick used to be the first beat, and a `control`

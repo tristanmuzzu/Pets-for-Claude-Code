@@ -28,9 +28,46 @@ export const DONE_LINGER_MS = 30_000
 export const SLEEP_AFTER_MS = 60_000
 
 export const URGENT = new Set(['waiting', 'failed'])
-export const ACTIVE = new Set(['thinking', 'running', 'waiting', 'failed', 'compacting', 'done'])
+export const ACTIVE = new Set([
+  'thinking',
+  'running',
+  'waiting',
+  'failed',
+  'compacting',
+  'finishing',
+  'done'
+])
 /** The durable states a session file can report. */
 export const RUNNING = new Set(['thinking', 'running', 'compacting'])
+/**
+ * States that mean work is still happening, whoever is doing it.
+ *
+ * `finishing` is the turn being over while the things it started are not:
+ * subagents, a background command, a monitor. The assistant has stopped
+ * talking, so nothing a hook can see is running, and the session is still
+ * busy.
+ */
+export const WORKING = new Set(['thinking', 'running', 'compacting', 'finishing'])
+/**
+ * How long a session must be silent before its outstanding work is written
+ * off.
+ *
+ * Every launch is recorded in the transcript and so is every completion, but
+ * the overlay can start watching halfway through and see only one half. This
+ * is the backstop: the same five minutes after which a running session is
+ * assumed dead, applied to the work it started.
+ */
+export const OUTSTANDING_STALE_MS = 5 * 60_000
+/**
+ * How long a completion must hold before it is worth interrupting anyone.
+ *
+ * A blocking stop hook — a review gate, a completion loop — can veto a stop
+ * seconds after the fact and send the turn straight back to work. The card can
+ * afford to be wrong for a moment and correct itself; a tray blink and an
+ * unread dot cannot, because they are claims made to someone who is looking
+ * somewhere else.
+ */
+export const CELEBRATE_AFTER_MS = 8_000
 
 /**
  * Which state wins when a project has several, and how long each one holds the
@@ -48,6 +85,7 @@ export const DISPLAY = {
   compacting: { rank: 2, hold: 1500 },
   running: { rank: 2, hold: 900 },
   thinking: { rank: 2, hold: 900 },
+  finishing: { rank: 2, hold: 900 },
   idle: { rank: 0, hold: 0 }
 }
 
@@ -87,6 +125,14 @@ export function displayState(session, now = Date.now()) {
   if (session.stalled) return 'idle'
 
   const outcome = session.outcome || ''
+  if (outcome === 'done' && stillWorking(session, now)) {
+    // The turn is over and the work is not. Claude Code fires `Stop` when the
+    // assistant yields the floor, which it does while subagents run and while
+    // a background command it is waiting on has not finished — and no hook
+    // ever fires for either of those ending. Saying "Done" here is the pet's
+    // loudest claim made at the one moment it cannot support it.
+    return 'finishing'
+  }
   if (outcome === 'done') {
     // Claude Code sends Stop while background work is still finishing. Until
     // the result settles it is still a running turn. The producer writes
@@ -100,6 +146,32 @@ export function displayState(session, now = Date.now()) {
   }
   if (outcome === 'failed') return 'failed'
   return session.state || 'idle'
+}
+
+/**
+ * Is work the turn started still running?
+ *
+ * Counted from the transcript, where every background command, monitor and
+ * subagent is given an id when it starts and named again when it finishes.
+ * Written off after [`OUTSTANDING_STALE_MS`] of total silence, because a
+ * session that has said nothing for that long is not waiting on anything: it
+ * is over, and a card stuck on "finishing" would be its own kind of lie.
+ */
+export function stillWorking(session, now = Date.now()) {
+  if (!(session.outstanding > 0)) return false
+  return now - (session.updated_ms || 0) < OUTSTANDING_STALE_MS
+}
+
+/**
+ * Is this completion worth interrupting someone for yet?
+ *
+ * Separate from whether the card may show it. The card is allowed to be
+ * provisional — it is in front of you and it corrects itself. A tray blink is
+ * a tap on the shoulder, and taking one back is not possible.
+ */
+export function worthCelebrating(session, now = Date.now()) {
+  if (stillWorking(session, now)) return false
+  return now - (session.outcome_ms || 0) >= CELEBRATE_AFTER_MS
 }
 
 /**

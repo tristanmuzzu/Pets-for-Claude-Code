@@ -67,17 +67,39 @@ pub fn alert() {
 }
 
 pub fn autostart_enabled() -> bool {
+    autostart_command().is_some()
+}
+
+/// The program the autostart entry actually launches, if there is one.
+///
+/// Worth having separately from "is it enabled": an entry pointing at a path
+/// the app was installed to two versions ago is present, looks healthy, and
+/// starts nothing.
+pub fn autostart_command() -> Option<String> {
     #[cfg(windows)]
     {
-        quiet_command("reg")
+        let out = quiet_command("reg")
             .args(["query", RUN_KEY, "/v", "Pipsqueak"])
             .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // "    Pipsqueak    REG_SZ    "C:\…\pipsqueak.exe""
+        let text = String::from_utf8_lossy(&out.stdout);
+        let value = text
+            .lines()
+            .find(|line| line.contains("REG_SZ"))?
+            .split_once("REG_SZ")?
+            .1
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        (!value.is_empty()).then_some(value)
     }
     #[cfg(not(windows))]
     {
-        false
+        None
     }
 }
 
