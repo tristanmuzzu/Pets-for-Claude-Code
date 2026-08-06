@@ -106,6 +106,10 @@ On first launch a panel offers to register the Claude Code hooks. That's the onl
 step that touches your config, and it says exactly what it edits. Then restart
 Claude Code, because it reads its hooks at startup. That's the whole setup.
 
+It also registers itself to start with Windows, because a status overlay that
+doesn't survive a reboot isn't one. The welcome panel says so and turns it off
+in one click, as does `pipsqueak autostart off`.
+
 There's a plugin too, if you'd rather drive the pet from inside a session:
 
 ```bash
@@ -155,10 +159,17 @@ here unchanged, both versions of that atlas, including any already sitting in
 The whole thing is worthless if you can't trust one glance at it, so most of the
 work went into not claiming things:
 
-- **"Done" only when the turn is really over.** `Stop` fires whenever the
-  assistant yields the floor, including when it's about to carry straight on.
-  Pipsqueak checks `stop_hook_active`, `background_tasks` and `session_crons`
-  first. A subagent reporting in afterwards is bookkeeping, not new work.
+- **"Done" only when everything is done.** `Stop` fires whenever the assistant
+  yields the floor — including when it yields *because* it is waiting, with two
+  subagents still reviewing and a release pipeline it started still running. No
+  hook fires when either of those finishes. So the card counts the work the turn
+  started, from the ids Claude Code writes into the transcript, and reads
+  **Finishing · 3 running** until the last one reports back. Green means
+  finished, the way the sidebar's blue dot does.
+- **The tray only blinks for news that held.** The card is in front of you and
+  can correct itself; a tray blink is a tap on the shoulder of somebody looking
+  elsewhere, so it waits until the completion has survived with nothing still
+  running. A stop hook vetoing a stop never reaches you as a false finish.
 - **"Needs you" only after a prompt has gone unanswered for 800ms.**
   `PermissionRequest` fires before anyone is asked, and auto-mode settles most of
   them in a couple of hundred milliseconds. Crying wolf teaches you to ignore the
