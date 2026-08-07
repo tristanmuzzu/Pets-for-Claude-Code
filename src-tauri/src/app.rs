@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// Hit-test rates, by how close the cursor is to something interactive. Only
@@ -61,6 +61,12 @@ const PING_GRACE_MS: u64 = 3_000;
 /// loop only fills the log.
 const RESCUE_INTERVAL_MS: u64 = 60_000;
 const WINDOW_LABEL: &str = "pet";
+/// The window at the middle pet size, in logical pixels. Must match the size
+/// declared in `tauri.conf.json`, which is what every launch starts from.
+const BASE_WINDOW: (f64, f64) = (360.0, 640.0);
+/// The pet size the overlay's own measurements were drawn at. See `--ui` in
+/// `style.css`.
+const BASE_SCALE: f64 = 2.0;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct Rect {
@@ -165,7 +171,11 @@ fn set_config(app: AppHandle, config: Config) -> Result<(), String> {
     }
     narration::set_mode(narration::Mode::parse(&config.narrate));
     sync_tray_toggles(&app, &config);
-    state::save_config(&config).map_err(|e| e.to_string())
+    state::save_config(&config).map_err(|e| e.to_string())?;
+    // After saving, because fitting the window moves it and the corrected
+    // position is written to the same file.
+    fit_window(&app, config.scale);
+    Ok(())
 }
 
 /// Moves the tray checkboxes to match a config changed anywhere else.
@@ -215,11 +225,15 @@ fn set_hit_rects(
 
 #[tauri::command]
 fn save_position(app: AppHandle, x: i32, y: i32) -> Result<(), String> {
-    let _ = app;
-    let mut config = load_config();
-    config.x = Some(x);
-    config.y = Some(y);
-    state::save_config(&config).map_err(|e| e.to_string())
+    // The page reports the window's own corner; what is stored is the pet's.
+    // See `stored_origin`.
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return Ok(());
+    };
+    let size = window.outer_size().map_err(|e| e.to_string())?;
+    let factor = window.scale_factor().unwrap_or(1.0);
+    remember_position(PhysicalPosition::new(x, y), size, factor);
+    Ok(())
 }
 
 #[tauri::command]
@@ -544,33 +558,140 @@ fn place_window(app: &AppHandle, config: &Config) {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
+    let size = window.outer_size().unwrap_or_default();
+    let factor = window.scale_factor().unwrap_or(1.0);
     if let (Some(x), Some(y)) = (config.x, config.y) {
-        let (x, y) = clamp_to_display(&window, x, y);
+        let (x, y) = origin_position((x, y), size, factor);
+        let (x, y) = clamp_to_display(&window, x, y, size);
         let _ = window.set_position(PhysicalPosition::new(x, y));
-        if (x, y) != (config.x.unwrap_or(x), config.y.unwrap_or(y)) {
-            // Remember the corrected position, or every launch pays the same
-            // correction and a drag near the edge keeps snapping back.
-            let mut stored = config.clone();
-            stored.x = Some(x);
-            stored.y = Some(y);
-            let _ = state::save_config(&stored);
-        }
+        // Remember the corrected position, or every launch pays the same
+        // correction and a drag near the edge keeps snapping back.
+        remember_position(PhysicalPosition::new(x, y), size, factor);
         return;
     }
     // Default: bottom-right of the work area, which already excludes the
     // taskbar wherever it is and however tall it is. The old hard-coded 72px
     // allowance undershot a scaled or stacked taskbar and the pet's feet
     // started behind it until ensure_on_screen corrected it seconds later.
-    if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.outer_size()) {
+    if let Ok(Some(monitor)) = window.primary_monitor() {
         let area = monitor.work_area();
         let x = area.position.x + (area.size.width as i32 - size.width as i32 - 24).max(0);
         let y = area.position.y + (area.size.height as i32 - size.height as i32 - 24).max(0);
         let _ = window.set_position(PhysicalPosition::new(x, y));
-        let mut stored = config.clone();
-        stored.x = Some(x);
-        stored.y = Some(y);
-        let _ = state::save_config(&stored);
+        remember_position(PhysicalPosition::new(x, y), size, factor);
     }
+}
+
+/// Fits the window to the pet size.
+///
+/// The overlay scales with the pet — cards, text and all, or a small pet sits
+/// under a full-sized card and takes up exactly as much room as before. The
+/// window it is drawn in has to scale with it too: at the largest size the
+/// cards are half again as wide as the window they were designed for, and the
+/// window's own edge would cut them off.
+///
+/// It grows up and to the left rather than down and to the right, because the
+/// pet stands in the bottom-right corner of the window and changing its size
+/// must not walk it across the screen.
+fn fit_window(app: &AppHandle, scale: f64) {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let (Ok(factor), Ok(current), Ok(position)) = (
+        window.scale_factor(),
+        window.outer_size(),
+        window.outer_position(),
+    ) else {
+        return;
+    };
+    // The corner the pet stands in. Everything below is measured back from it.
+    let corner = (
+        position.x + current.width as i32,
+        position.y + current.height as i32,
+    );
+    let want = window_size(scale, factor);
+    let (mut w, mut h) = (want.width as f64, want.height as f64);
+    // The window can only grow up and to the left, so the room it has is the
+    // room on that side of the pet. Without this the largest size on a short
+    // screen asks for a window taller than the display, and `clamp_to_display`
+    // pushes it back down — taking the pet with it, which is the one thing
+    // changing size must not do. A cramped window costs a card off the top of
+    // the stack; a moved pet costs you the corner you chose.
+    if let Some(monitor) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+    {
+        let area = monitor.work_area();
+        w = w.min((corner.0 - area.position.x) as f64);
+        h = h.min((corner.1 - area.position.y) as f64);
+    }
+    let wanted = PhysicalSize::new(w.round().max(1.0) as u32, h.round().max(1.0) as u32);
+    if wanted == current {
+        return;
+    }
+    let x = corner.0 - wanted.width as i32;
+    let y = corner.1 - wanted.height as i32;
+    let _ = window.set_size(wanted);
+    // The size the window is *becoming*: asking the window for it here can
+    // still return the old one, and a stale size clamps against the wrong edge.
+    let (x, y) = clamp_to_display(&window, x, y, wanted);
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    remember_position(PhysicalPosition::new(x, y), wanted, factor);
+}
+
+/// The window at a given pet size, in physical pixels.
+fn window_size(scale: f64, factor: f64) -> PhysicalSize<u32> {
+    let ui = scale / BASE_SCALE;
+    PhysicalSize::new(
+        (BASE_WINDOW.0 * ui * factor).round().max(1.0) as u32,
+        (BASE_WINDOW.1 * ui * factor).round().max(1.0) as u32,
+    )
+}
+
+/// Where the pet is, written the one way that survives a change of size.
+///
+/// The window grows and shrinks with the pet around the corner the pet stands
+/// in, so the window's own top-left corner names a different place at every
+/// size. Storing that directly is what made the pet walk: a launch starts at
+/// the size in `tauri.conf.json`, reads back a position that meant a larger
+/// window, and puts the corner somewhere else — a little further every time.
+///
+/// So a stored position always means "where a window at the middle size would
+/// sit under this pet". At that size it is the window's own position, which is
+/// what every config written so far already holds.
+fn stored_origin(
+    position: PhysicalPosition<i32>,
+    size: PhysicalSize<u32>,
+    factor: f64,
+) -> (i32, i32) {
+    let base = window_size(BASE_SCALE, factor);
+    (
+        position.x + size.width as i32 - base.width as i32,
+        position.y + size.height as i32 - base.height as i32,
+    )
+}
+
+/// Where a window of this size has to sit to honour a stored position.
+fn origin_position(stored: (i32, i32), size: PhysicalSize<u32>, factor: f64) -> (i32, i32) {
+    let base = window_size(BASE_SCALE, factor);
+    (
+        stored.0 + base.width as i32 - size.width as i32,
+        stored.1 + base.height as i32 - size.height as i32,
+    )
+}
+
+/// Saves where the window ended up, in the frame [`stored_origin`] describes.
+fn remember_position(position: PhysicalPosition<i32>, size: PhysicalSize<u32>, factor: f64) {
+    let (x, y) = stored_origin(position, size, factor);
+    let mut config = load_config();
+    if (config.x, config.y) == (Some(x), Some(y)) {
+        return;
+    }
+    config.x = Some(x);
+    config.y = Some(y);
+    let _ = state::save_config(&config);
 }
 
 /// Pulls a position back until the whole window sits inside a display.
@@ -584,14 +705,18 @@ fn place_window(app: &AppHandle, config: &Config) {
 /// Clamping rather than re-placing also means a saved position that is merely
 /// slightly wrong, after a resolution change, a scaling change, or a window
 /// that grew between versions, gets nudged back instead of thrown away.
-fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32) {
+fn clamp_to_display(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    size: PhysicalSize<u32>,
+) -> (i32, i32) {
     let Ok(monitors) = window.available_monitors() else {
         return (x, y);
     };
     if monitors.is_empty() {
         return (x, y);
     }
-    let size = window.outer_size().unwrap_or_default();
     let (w, h) = (size.width as i32, size.height as i32);
     let mid_x = x + w / 2;
     let mid_y = y + h / 2;
@@ -642,15 +767,17 @@ fn ensure_on_screen(app: &AppHandle) {
     let Ok(position) = window.outer_position() else {
         return;
     };
-    let (x, y) = clamp_to_display(&window, position.x, position.y);
+    let size = window.outer_size().unwrap_or_default();
+    let (x, y) = clamp_to_display(&window, position.x, position.y, size);
     if (x, y) == (position.x, position.y) {
         return;
     }
     let _ = window.set_position(PhysicalPosition::new(x, y));
-    let mut config = load_config();
-    config.x = Some(x);
-    config.y = Some(y);
-    let _ = state::save_config(&config);
+    remember_position(
+        PhysicalPosition::new(x, y),
+        size,
+        window.scale_factor().unwrap_or(1.0),
+    );
 }
 
 /// Keeps the window click-through except over the pet and its cards.
@@ -1189,7 +1316,11 @@ pub fn run() {
                 .0
                 .store(config.click_through, Ordering::Relaxed);
             narration::set_mode(narration::Mode::parse(&config.narrate));
+            // Placed first, at the size every launch starts from, which is
+            // what a saved position means; then fitted to the pet size, which
+            // keeps the corner it was placed by and saves the new position.
             place_window(&handle, &config);
+            fit_window(&handle, config.scale);
             if let Some(window) = handle.get_webview_window(WINDOW_LABEL) {
                 let _ = window.set_ignore_cursor_events(true);
                 let _ = window.show();
@@ -1228,4 +1359,60 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to start Pipsqueak");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pet at the bottom-right of a window at the largest size, on a
+    /// display at 125%.
+    fn large() -> (PhysicalSize<u32>, f64) {
+        (window_size(3.0, 1.25), 1.25)
+    }
+
+    #[test]
+    fn a_stored_position_survives_a_round_trip() {
+        let (size, factor) = large();
+        let at = PhysicalPosition::new(1145, 40);
+        let stored = stored_origin(at, size, factor);
+        assert_eq!(origin_position(stored, size, factor), (at.x, at.y));
+    }
+
+    /// The regression that made this frame necessary: a launch starts at the
+    /// size in `tauri.conf.json`, and reading a position saved by a larger
+    /// window put the pet a quarter of the way across the screen — again on
+    /// every launch, until it walked off the edge.
+    #[test]
+    fn a_launch_puts_the_pet_back_where_it_was() {
+        let (size, factor) = large();
+        let base = window_size(BASE_SCALE, factor);
+        let corner =
+            |p: (i32, i32), s: PhysicalSize<u32>| (p.0 + s.width as i32, p.1 + s.height as i32);
+
+        let running = PhysicalPosition::new(1145, 40);
+        let stored = stored_origin(running, size, factor);
+        // The window is created at the base size and placed from the store...
+        let placed = origin_position(stored, base, factor);
+        // ...and the pet stands in the same corner it did before the restart.
+        assert_eq!(corner(placed, base), corner((running.x, running.y), size));
+    }
+
+    #[test]
+    fn the_middle_size_stores_the_windows_own_position() {
+        let factor = 1.25;
+        let size = window_size(BASE_SCALE, factor);
+        let at = PhysicalPosition::new(1370, 105);
+        // Every config written before the window scaled with the pet holds a
+        // plain window position, and has to keep meaning what it meant.
+        assert_eq!(stored_origin(at, size, factor), (at.x, at.y));
+    }
+
+    #[test]
+    fn the_window_scales_with_the_pet() {
+        let factor = 1.0;
+        assert_eq!(window_size(2.0, factor), PhysicalSize::new(360, 640));
+        assert_eq!(window_size(1.5, factor), PhysicalSize::new(270, 480));
+        assert_eq!(window_size(3.0, factor), PhysicalSize::new(540, 960));
+    }
 }

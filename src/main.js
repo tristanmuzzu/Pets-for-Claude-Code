@@ -25,6 +25,9 @@ const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in windo
 /** Replaced at build time from package.json. See vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
 
+/** The pet size the rest of the overlay was drawn at. See `--ui` in style.css. */
+const BASE_SCALE = 2
+
 /** How many chat cards are shown in full before the stack collapses. */
 const SLOT_LIMIT = 3
 /** How many chats fit once they are one line each. */
@@ -1043,7 +1046,7 @@ async function openMenu() {
           label,
           async () => {
             config.scale = value
-            renderer.setScale(value)
+            applyScale(value)
             await saveConfig()
           },
           config.scale === value,
@@ -1201,11 +1204,28 @@ async function openMenu() {
   syncHitRects()
 }
 
+/**
+ * Resize the whole overlay, not only the pet.
+ *
+ * The pet is drawn at its final size, because a sprite magnified after the
+ * fact stops being pixel art. Everything else is one CSS transform, so a card
+ * keeps its proportions and its line breaks at every size. The window itself
+ * is resized to match by the backend, which is what stops a large overlay
+ * being cut off by the edge it is anchored to.
+ */
+function applyScale(scale) {
+  renderer.setScale(scale)
+  document.documentElement.style.setProperty('--ui', String(scale / BASE_SCALE))
+  // The cards just moved and changed size, and the regions that swallow clicks
+  // are their on-screen rectangles.
+  syncHitRects()
+}
+
 async function selectPet(id) {
   try {
     const payload = await loadPetPayload(id)
     await renderer.load(id, payload)
-    renderer.setScale(config.scale)
+    applyScale(config.scale)
     config.pet = id
     await saveConfig()
   } catch (error) {
@@ -1336,7 +1356,7 @@ async function boot() {
     config.pet = 'pip'
     await renderer.load('pip', null)
   }
-  renderer.setScale(config.scale)
+  applyScale(config.scale)
   renderer.start()
 
   wireInteraction()
@@ -1428,7 +1448,7 @@ async function boot() {
     const id = String(event.payload)
     try {
       await renderer.load(id, await loadPetPayload(id))
-      renderer.setScale(config.scale)
+      applyScale(config.scale)
       config.pet = id
       await saveConfig()
     } catch (error) {

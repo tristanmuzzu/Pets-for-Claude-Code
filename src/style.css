@@ -26,6 +26,14 @@
   --done: #3fbf76;
   --compacting: #b26efa;
   --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", monospace;
+  /*
+   * How big the overlay is, as a multiple of the size everything here is
+   * measured at. The pet size sets it, because a small pet under a full-sized
+   * card is not a smaller overlay: the cards are the part that takes up the
+   * room, and at the largest size the pet was covering the bottom of one.
+   * `main.js` writes it; 1 is the middle size the numbers below were drawn for.
+   */
+  --ui: 1;
 }
 
 * {
@@ -57,10 +65,26 @@ body {
   height: 100%;
 }
 
+/*
+ * Everything the pet says. One transform rather than a scaled length on every
+ * rule below it, so a card is the same card at every size: same proportions,
+ * same wrapping, same hairlines. Scaled about the bottom-right corner, which
+ * is the corner the window is anchored by and the one the pet stands in, so
+ * changing size never walks the overlay across the screen.
+ */
+#overlay {
+  position: absolute;
+  inset: 0;
+  transform: scale(var(--ui));
+  transform-origin: 100% 100%;
+}
+
 #pet {
   position: absolute;
-  right: 8px;
-  bottom: 8px;
+  /* The pet's own margin scales too, or the gap between it and the card it is
+     speaking from grows as everything else shrinks. */
+  right: calc(8px * var(--ui));
+  bottom: calc(8px * var(--ui));
   width: 96px;
   height: 96px;
   image-rendering: pixelated;
@@ -96,7 +120,14 @@ body {
   position: absolute;
   right: 10px;
   bottom: 106px;
-  width: 322px;
+  /*
+   * Its own width, or whatever the window can spare. The window grows with the
+   * pet, but only into the room on the far side of it: a pet parked near the
+   * left edge of the screen has none, and a card that keeps its full width
+   * there is a card with its left third cut off. Narrower is legible; clipped
+   * is not.
+   */
+  width: min(322px, calc(100vw / var(--ui) - 20px));
   display: flex;
   flex-direction: column-reverse;
   align-items: flex-end;
@@ -583,7 +614,9 @@ body {
   display: flex;
   align-items: center;
   gap: 5px;
-  font: 11px/1 system-ui, sans-serif;
+  /* Room for descenders: the label below clips its overflow, and at a line
+     height of exactly 1 the tail of a `p` or a `g` was cut off. */
+  font: 11px/1.3 system-ui, sans-serif;
   padding: 5px 8px;
   border-radius: 999px;
   border: 1px solid var(--edge);
@@ -615,9 +648,13 @@ body {
   position: absolute;
   right: 10px;
   bottom: 106px;
-  width: 322px;
-  /* Fits inside the window above the pet, with room for the arrow. */
-  max-height: 480px;
+  /* As wide as the cards, and gives way at the edge of the screen for the same
+     reason. */
+  width: min(322px, calc(100vw / var(--ui) - 20px));
+  /* Fits inside the window above the pet, with room for the arrow. The window
+     is scaled too, so the room to fit into is the window divided by the
+     scale: this is 480px at the middle size, as it always was. */
+  max-height: calc(100vh / var(--ui) - 160px);
   overflow-y: auto;
   padding: 12px 13px 13px;
   border: 1px solid var(--edge);
@@ -743,7 +780,7 @@ body {
   right: 112px;
   bottom: 26px;
   margin: 0;
-  max-width: 200px;
+  max-width: min(200px, calc(100vw / var(--ui) - 124px));
   padding: 5px 8px;
   border: 1px solid var(--edge);
   border-radius: 9px;
@@ -771,8 +808,9 @@ body {
   background: var(--surface);
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42);
   /* However long the menu gets, it stops at the top of the window instead of
-     running off it, which used to clip the first few items. */
-  max-height: calc(100vh - 120px);
+     running off it, which used to clip the first few items. Divided by the
+     scale for the same reason as the panel's. */
+  max-height: calc(100vh / var(--ui) - 120px);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;

@@ -11,7 +11,7 @@ parsed at all is moved to `config.json.bak` rather than overwritten.
 | --- | --- |
 | `version` | which build's idea of this file it is; managed for you |
 | `pet` | id of the active pet (`byte`, `pip`, `ember`, or your own) |
-| `scale` | pet size, 1 to 6 |
+| `scale` | how big the overlay is — pet, cards and text together — 1 to 6 |
 | `click_through` | make the pet itself non-interactive too |
 | `show_bubble` | show the status cards; off keeps the pet alone, and is remembered |
 | `show_scratch` | include sessions rooted in a temp directory |

@@ -7,29 +7,36 @@
   </head>
   <body>
     <main id="stage">
-      <!-- column-reverse: the first child renders closest to the pet -->
-      <div id="stack">
-        <div id="chips" class="chips" hidden></div>
-      </div>
-
-      <div id="menu" class="menu" hidden></div>
-
-      <!-- One panel, two jobs: the first-run welcome and the setup check.
-           Both are rare, modal-ish, and want the same box. -->
-      <section id="panel" class="panel" hidden>
-        <header class="panel-head">
-          <h1 id="panel-title"></h1>
-          <button id="panel-close" class="icon close" type="button" title="Close">×</button>
-        </header>
-        <div id="panel-body"></div>
-      </section>
-
       <!--
-        The hint is ours rather than a `title`, because the operating system
-        shows one of those after half a second, and half a second is short
-        enough that it fires every time the cursor merely passes the pet.
+        Everything the pet says, scaled with the pet. The pet itself stays
+        outside: it is a sprite, and it is drawn at its final size so the
+        pixels stay square instead of being magnified afterwards.
       -->
-      <p id="hint" class="hint" hidden>Click to hide the cards · right-click for options · drag to move</p>
+      <div id="overlay">
+        <!-- column-reverse: the first child renders closest to the pet -->
+        <div id="stack">
+          <div id="chips" class="chips" hidden></div>
+        </div>
+
+        <div id="menu" class="menu" hidden></div>
+
+        <!-- One panel, two jobs: the first-run welcome and the setup check.
+             Both are rare, modal-ish, and want the same box. -->
+        <section id="panel" class="panel" hidden>
+          <header class="panel-head">
+            <h1 id="panel-title"></h1>
+            <button id="panel-close" class="icon close" type="button" title="Close">×</button>
+          </header>
+          <div id="panel-body"></div>
+        </section>
+
+        <!--
+          The hint is ours rather than a `title`, because the operating system
+          shows one of those after half a second, and half a second is short
+          enough that it fires every time the cursor merely passes the pet.
+        -->
+        <p id="hint" class="hint" hidden>Click to hide the cards · right-click for options · drag to move</p>
+      </div>
       <canvas id="pet" width="96" height="96"></canvas>
     </main>
 
