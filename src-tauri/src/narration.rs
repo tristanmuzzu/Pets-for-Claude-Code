@@ -231,6 +231,14 @@ fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
     // Launched. Background shells and monitors carry their id directly; a
     // subagent's launch is only distinguishable from its later mentions by
     // sitting next to the status the tool result was given.
+    //
+    // The *task list* borrows the same word for something that is not work in
+    // flight at all — a plan item, numbered 1, 2, 3 — and it is only ever
+    // written, never reported finished. That is why a session with nothing
+    // running showed "9 running": seven of the nine were plan items, one per
+    // `TaskUpdate`, stuck in the set for the rest of the session. `plausible_id`
+    // is what tells them apart: a launched thing gets a generated id, and a
+    // generated id has letters in it.
     for key in ["\"backgroundTaskId\":\"", "\"taskId\":\""] {
         if let Some(id) = quoted_after(line, key) {
             outstanding.insert(id);
@@ -298,6 +306,10 @@ fn plausible_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        // A generated id always carries letters. A counter — a plan item, a
+        // step number, an index — never does, and nothing ever quotes one
+        // back as finished, so one counted here would be outstanding forever.
+        && id.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 /// The line an assistant entry is worth, if any.
@@ -419,6 +431,30 @@ mod tests {
             tracked(&[a, b, monitor, done_a]),
             vec!["ba7xghdk0", "bbb222"]
         );
+    }
+
+    /// The task list is a plan, not work in flight, and it uses the same word
+    /// for its items. Counting them is how a finished session came to say
+    /// "9 running": seven were plan items from one `TaskUpdate` each, and
+    /// nothing ever reports a plan item finished, so they never drained.
+    #[test]
+    fn a_plan_item_is_not_work_in_flight() {
+        let created = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}"#;
+        let result = r#"{"type":"user","toolUseResult":{"success":true,"taskId":"1","updatedFields":["status"]}}"#;
+        assert!(tracked(&[created, result]).is_empty());
+    }
+
+    /// The things that really do run on their own all carry a generated id,
+    /// and each arrives in its own shape. Copied from real transcripts.
+    #[test]
+    fn every_kind_of_launched_work_is_counted() {
+        let monitor =
+            r#"{"toolUseResult":{"taskId":"bdvl3mmky","timeoutMs":600000,"persistent":false}}"#;
+        let workflow = r#"{"toolUseResult":{"status":"async_launched","taskId":"wkctkok4p","taskType":"local_workflow"}}"#;
+        let shell = r#"{"toolUseResult":{"stdout":"","backgroundTaskId":"badue5944"}}"#;
+        let agent =
+            r#"{"toolUseResult":{"status":"async_launched","agentId":"a817eb2d8f910df2f"}}"#;
+        assert_eq!(tracked(&[monitor, workflow, shell, agent]).len(), 4);
     }
 
     /// Work ends four ways in a real transcript, and three of them are not
