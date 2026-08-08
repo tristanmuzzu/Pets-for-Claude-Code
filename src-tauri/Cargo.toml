@@ -30,3 +30,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Used to set the window's input shape directly. Tauri's set_ignore_cursor_events
+# is all-or-nothing, and the all-or-nothing choice is unusable here (see
+# apply_input_shape in app.rs).
+gtk = "0.18"
+gdk = "0.18"
+cairo-rs = "0.18"
