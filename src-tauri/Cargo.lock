@@ -2162,6 +2162,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pipsqueak"
 version = "0.7.4"
 dependencies = [
+ "cairo-rs",
+ "gdk",
+ "gtk",
  "serde",
  "serde_json",
  "tauri",

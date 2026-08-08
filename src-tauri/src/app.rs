@@ -201,6 +201,7 @@ fn frontend_ready(frontend: State<'_, Frontend>, emitted: State<'_, Emitted>) {
 
 #[tauri::command]
 fn set_hit_rects(
+    app: AppHandle,
     rects: Vec<Rect>,
     interactive: State<'_, Interactive>,
     frontend: State<'_, Frontend>,
@@ -208,9 +209,63 @@ fn set_hit_rects(
     frontend
         .last_seen_ms
         .store(state::now_ms(), Ordering::Relaxed);
+    #[cfg(target_os = "linux")]
+    apply_input_shape(&app, rects.clone());
+    #[cfg(not(target_os = "linux"))]
+    let _ = &app;
     if let Ok(mut guard) = interactive.0.lock() {
         *guard = rects;
     }
+}
+
+/// Restricts the clickable area of the overlay to `rects`; every other pixel
+/// falls through to whatever is underneath.
+///
+/// This replaces the cursor-polling hit test on Linux, which cannot work there.
+/// Under Wayland no client may ask where the pointer is, and running through
+/// XWayland does not rescue it: X only learns the pointer position while it is
+/// over an X surface, and a click-through window never is. Measured on GNOME
+/// 50.1 / Wayland, 2026-08-08 — `cursor_position()` returned
+/// `Ok((960.0, 540.0))`, the exact centre of the 1920x1080 screen, on every
+/// single poll no matter where the mouse actually was:
+///
+///     hittest: click_through=false rects=2 cursor=Ok((960.0, 540.0)) origin=Ok((67, 32))
+///
+/// With the pointer permanently "not over" the pet, the poll concluded
+/// not-over forever and left the window click-through for its entire life. The
+/// pet rendered correctly and could never be clicked or dragged.
+///
+/// An input shape needs no pointer position at all — the compositor does the
+/// routing — so it is both correct and cheaper than polling.
+#[cfg(target_os = "linux")]
+fn apply_input_shape(app: &AppHandle, rects: Vec<Rect>) {
+    use gtk::prelude::*;
+
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    // GTK is not thread-safe and this arrives on a command worker thread.
+    let _ = app.run_on_main_thread(move || {
+        let Ok(gtk_window) = window.gtk_window() else {
+            return;
+        };
+        let Some(gdk_window) = gtk_window.window() else {
+            return;
+        };
+        let region = cairo::Region::create();
+        for r in &rects {
+            // Outward rounding: a click on the boundary pixel of a card should
+            // hit the card, not the desktop behind it.
+            let rect = cairo::RectangleInt::new(
+                r.x.floor() as i32,
+                r.y.floor() as i32,
+                r.w.ceil() as i32,
+                r.h.ceil() as i32,
+            );
+            let _ = region.union_rectangle(&rect);
+        }
+        gdk_window.input_shape_combine_region(&region, 0, 0);
+    });
 }
 
 #[tauri::command]
@@ -669,6 +724,17 @@ fn ensure_on_screen(app: &AppHandle) {
 /// stack of separate cards, and one window covering their union would swallow
 /// clicks in the gaps between them.)
 fn spawn_hit_test(app: AppHandle) {
+    // On Linux the pointer position is not knowable (see apply_input_shape),
+    // so this poll can only ever conclude "not over" and would fight the input
+    // shape that actually works there. The cost is that the pet does not follow
+    // the cursor with its eyes on Linux; the alternative is a pet nobody can
+    // click.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
         let mut interval = HIT_TEST_FAR;
@@ -1191,8 +1257,20 @@ pub fn run() {
             narration::set_mode(narration::Mode::parse(&config.narrate));
             place_window(&handle, &config);
             if let Some(window) = handle.get_webview_window(WINDOW_LABEL) {
+                // Order matters, and differs by platform. Setting click-through
+                // before show() avoids a frame where the pet swallows clicks,
+                // which is why it is first everywhere it can be.
+                //
+                // On Linux it cannot be: a GTK widget has no underlying GdkWindow
+                // until it is realized, and realization is what show() does. tao's
+                // CursorIgnoreEvents handler does `window.window().unwrap()`, so
+                // calling this while hidden aborts the process
+                // (tao/src/platform_impl/linux/event_loop.rs:457). Set it after.
+                #[cfg(not(target_os = "linux"))]
                 let _ = window.set_ignore_cursor_events(true);
                 let _ = window.show();
+                #[cfg(target_os = "linux")]
+                let _ = window.set_ignore_cursor_events(true);
             }
             build_tray(&handle)?;
             log::write(&format!(
