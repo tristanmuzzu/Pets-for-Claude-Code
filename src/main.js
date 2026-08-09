@@ -224,10 +224,24 @@ function holdLine(view, line, now = Date.now()) {
  * the real switch was a variable that reset on every restart and every
  * watchdog reload, so "hide the cards" quietly came undone. One decision, one
  * place, and the setting means what the guide says it means.
+ *
+ * `persist` is the second half of that fix. The stack gets revealed for two
+ * very different reasons and only one of them is a preference:
+ *
+ *   - the user chose it (tray menu, pet click)        -> persist
+ *   - something urgent took the card back by itself   -> DO NOT persist
+ *
+ * Without that distinction the auto-reveal below rewrote `show_bubble` to true
+ * the first time any session needed attention, which on this machine meant
+ * every login: Claude Code starts a turn, the card comes back on its own, and
+ * "hide the cards" is undone before the desktop has even finished drawing.
+ * Hiding stayed fixed for exactly as long as nothing happened. The runtime
+ * reveal still works — it just no longer votes on what the user wants.
  */
-function setStackHidden(hidden) {
+function setStackHidden(hidden, { persist = true } = {}) {
   if (stackHidden === hidden) return
   stackHidden = hidden
+  if (!persist) return
   config.showBubble = !hidden
   saveConfig()
 }
@@ -471,7 +485,8 @@ function buildChip(key) {
   text.className = 'label'
   button.append(dot, text)
   button.addEventListener('click', () => {
-    setStackHidden(false)
+    // Reveal to show THIS card, not a vote to show cards from now on.
+    setStackHidden(false, { persist: false })
     collapsed.delete(key)
     if (!slots.includes(key)) slots.unshift(key)
     render()
@@ -506,7 +521,11 @@ function render() {
       // "Anything that starts needing you takes the card back on its own" is a
       // promise the README makes, and hiding the cards used to break it: the
       // question sat in a six-pixel dot until the pet was clicked again.
-      setStackHidden(false)
+      //
+      // persist:false is load-bearing. This fires on its own whenever a session
+      // turns urgent, so persisting it silently converted "I hid the cards" into
+      // "show the cards" on the first turn after every login.
+      setStackHidden(false, { persist: false })
       if (group.state === 'waiting') {
         // The state the whole overlay was built for — an agent waiting on you
         // is dead time you are paying for twice — and it was the only state
