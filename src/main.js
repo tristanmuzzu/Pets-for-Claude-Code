@@ -485,8 +485,9 @@ function buildChip(key) {
   text.className = 'label'
   button.append(dot, text)
   button.addEventListener('click', () => {
-    // Reveal to show THIS card, not a vote to show cards from now on.
-    setStackHidden(false, { persist: false })
+    // Reveal to show THIS card, not a vote to show cards from now on — and not
+    // at all when the user has the cards hidden.
+    if (config.showBubble) setStackHidden(false, { persist: false })
     collapsed.delete(key)
     if (!slots.includes(key)) slots.unshift(key)
     render()
@@ -519,13 +520,20 @@ function render() {
       collapsed.delete(group.key)
       slots = [group.key, ...slots.filter((key) => key !== group.key)]
       // "Anything that starts needing you takes the card back on its own" is a
-      // promise the README makes, and hiding the cards used to break it: the
-      // question sat in a six-pixel dot until the pet was clicked again.
+      // promise the README makes — but it is not allowed to overrule an explicit
+      // "hide the cards". Hidden means hidden.
       //
-      // persist:false is load-bearing. This fires on its own whenever a session
-      // turns urgent, so persisting it silently converted "I hid the cards" into
-      // "show the cards" on the first turn after every login.
-      setStackHidden(false, { persist: false })
+      // Two rounds of this. First the auto-reveal PERSISTED, so one urgent
+      // session turned "I hid the cards" into "show the cards" for good, which
+      // is why it came back every login. persist:false fixed the setting and not
+      // the symptom: the cards still appeared on every urgent turn, which with
+      // an agent running is more or less always, so the pet looked exactly as
+      // un-hidden as before.
+      //
+      // So the reveal is now conditional. If the user asked for the cards to be
+      // hidden, an urgent session gets the tray flash and the pet's own state
+      // and nothing else.
+      if (config.showBubble) setStackHidden(false, { persist: false })
       if (group.state === 'waiting') {
         // The state the whole overlay was built for — an agent waiting on you
         // is dead time you are paying for twice — and it was the only state
