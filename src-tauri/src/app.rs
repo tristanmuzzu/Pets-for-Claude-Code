@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, State, WindowEvent};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// Hit-test rates, by how close the cursor is to something interactive. Only
@@ -60,6 +60,10 @@ const PING_GRACE_MS: u64 = 3_000;
 /// A rescue that fails leaves the page just as dead, so retrying in a tight
 /// loop only fills the log.
 const RESCUE_INTERVAL_MS: u64 = 60_000;
+/// The floor between two corrections of an unwanted resize. Fast enough that a
+/// scale change is repaired within a frame or two, slow enough that arguing
+/// with a compositor that wants a different size costs nothing measurable.
+const RESIZE_FIX_INTERVAL: Duration = Duration::from_millis(250);
 const WINDOW_LABEL: &str = "pet";
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -616,7 +620,9 @@ fn place_window(app: &AppHandle, config: &Config) {
     // taskbar wherever it is and however tall it is. The old hard-coded 72px
     // allowance undershot a scaled or stacked taskbar and the pet's feet
     // started behind it until ensure_on_screen corrected it seconds later.
-    if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.outer_size()) {
+    // Inner size for the same reason clamp_to_display uses it: outer is the
+    // shadow, not the pet.
+    if let (Ok(Some(monitor)), Ok(size)) = (window.primary_monitor(), window.inner_size()) {
         let area = monitor.work_area();
         let x = area.position.x + (area.size.width as i32 - size.width as i32 - 24).max(0);
         let y = area.position.y + (area.size.height as i32 - size.height as i32 - 24).max(0);
@@ -646,7 +652,17 @@ fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32)
     if monitors.is_empty() {
         return (x, y);
     }
-    let size = window.outer_size().unwrap_or_default();
+    // Inner, not outer. `outer_size` is unusable here on GTK for two reasons:
+    // tao initialises it from `root_origin()` — a *position*, so before the
+    // first configure-event it is not a size at all — and then tracks
+    // `frame_extents()`, which on GNOME includes the invisible CSD shadow.
+    // Feeding either into the clamp made the pet walk: every launch clamped
+    // against a window fatter than the one on screen, saved the tightened
+    // position, and clamped that again next time. Measured 2026-08-10 across
+    // three launches at a fixed 1920x1080: x went 1674 -> 1449 -> 1254 with
+    // nobody touching it. The window is undecorated, so the part that has to
+    // fit on screen is exactly the inner size.
+    let size = window.inner_size().unwrap_or_default();
     let (w, h) = (size.width as i32, size.height as i32);
     let mid_x = x + w / 2;
     let mid_y = y + h / 2;
@@ -683,14 +699,104 @@ fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32)
     let bottom = top + area.size.height as i32 - h;
     // A window taller than the work area has no valid position; pin it to the
     // top-left of that display rather than inverting the range.
-    (
+    let out = (
         x.clamp(left, right.max(left)),
         y.clamp(top, bottom.max(top)),
-    )
+    );
+    if out != (x, y) {
+        // Moving the pet is the visible part; the numbers behind it are the
+        // only way to tell a real rescue from a clamp against a bad size.
+        let outer = window.outer_size().unwrap_or_default();
+        log::write(&format!(
+            "clamped ({x},{y}) -> ({},{}) with window inner {w}x{h} outer {}x{} \
+             in work area {}x{}+{}+{}",
+            out.0,
+            out.1,
+            outer.width,
+            outer.height,
+            area.size.width,
+            area.size.height,
+            area.position.x,
+            area.position.y
+        ));
+    }
+    out
+}
+
+/// The overlay's size as `tauri.conf.json` declares it, in logical pixels.
+///
+/// Read from the config rather than repeated as a constant, so the window and
+/// the thing that repairs the window cannot drift apart.
+fn configured_size(app: &AppHandle) -> Option<LogicalSize<f64>> {
+    app.config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == WINDOW_LABEL)
+        .map(|w| LogicalSize::new(w.width, w.height))
+}
+
+/// Puts the overlay back to its declared size after something else changed it.
+///
+/// THE BUG THIS EXISTS FOR
+///
+/// Changing the display scale under Wayland shrank the running overlay and left
+/// it that way. Measured 2026-08-10, GNOME 50.1, monitor scale 1.25 -> 1.0 with
+/// `xwayland-native-scaling` on: the process had been up since before the
+/// change, and its X window had gone from the configured 360x640 to 200x320
+/// while the page inside still laid out a 322px-wide card. The card was sliced
+/// down the middle. A restart fixed it, which is the tell: nothing was wrong
+/// with the config, only with the live window.
+///
+/// The window is `resizable: false` and carries min = max = 360x640 size hints,
+/// so *no* outside resize is legitimate. The compositor does it anyway when the
+/// GDK scale factor changes underneath a running client. Since every such resize
+/// is wrong by definition, the repair is simply to ask for the declared size
+/// back whenever the observed one differs.
+///
+/// It cannot key on a scale-factor event, because on Linux there is none: tao's
+/// GTK backend emits `Resized` from GTK's configure-event and never emits
+/// `ScaleFactorChanged` at all (tao 0.35 platform_impl/linux/event_loop.rs).
+/// `Resized` is the better signal anyway — it catches an unwanted resize
+/// whatever caused it, not just the one cause we know about.
+///
+/// Returns whether it had to correct anything.
+fn ensure_size(app: &AppHandle) -> bool {
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return false;
+    };
+    let Some(want) = configured_size(app) else {
+        return false;
+    };
+    let (Ok(scale), Ok(have)) = (window.scale_factor(), window.inner_size()) else {
+        return false;
+    };
+    let want = want.to_physical::<u32>(scale);
+    // A pixel of slack: logical -> physical -> logical rounds, and a permanent
+    // one-pixel disagreement would mean asking for a resize on every sweep.
+    let off = |a: u32, b: u32| a.abs_diff(b) > 1;
+    if !off(have.width, want.width) && !off(have.height, want.height) {
+        return false;
+    }
+    log::write(&format!(
+        "window was {}x{} at scale {scale}, restoring {}x{}",
+        have.width, have.height, want.width, want.height
+    ));
+    let _ = window.set_size(want);
+    true
 }
 
 /// Rescues the overlay when the display it was on disappears while running.
 fn ensure_on_screen(app: &AppHandle) {
+    // A hidden window has no position worth trusting and nothing to rescue:
+    // moving it would only overwrite the spot the pet comes back to.
+    if !app
+        .get_webview_window(WINDOW_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+    {
+        return;
+    }
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
     };
@@ -822,18 +928,39 @@ fn spawn_hit_test(app: AppHandle) {
 fn spawn_poller(app: AppHandle) {
     std::thread::spawn(move || {
         let mut next_sweep = Instant::now();
+        // The window rescue, unlike the session sweep, must not run on the
+        // first tick.
+        //
+        // THE BUG THIS EXISTS FOR
+        //
+        // `place_window` has just put the window exactly where it belongs, so
+        // there is nothing to rescue yet — and asking GTK where the window is
+        // before it has delivered its first configure-event does not say "I do
+        // not know", it says (0,0). The clamp duly pulled that onto the work
+        // area and *saved* it, so every launch moved the pet to the top-left
+        // corner and forgot where the owner had put it. Measured 2026-08-10
+        // with a config reading 1514,425:
+        //   clamped (0,0) -> (69,33) with window inner 360x640 ...
+        let mut next_rescue = Instant::now() + SWEEP_INTERVAL;
         loop {
             // Hooks can only ever say what happened; nothing writes a file to
             // report that Claude Code died. The sweep is the only thing that
             // can retire a session, so it has to run on a clock of its own.
             if Instant::now() >= next_sweep {
                 state::sweep();
-                // Same cadence, different job: catch an undock or an unplugged
-                // monitor that left the overlay somewhere you cannot reach it.
-                ensure_on_screen(&app);
                 watch_frontend(&app);
                 check_own_binary(&app);
                 next_sweep = Instant::now() + SWEEP_INTERVAL;
+            }
+            // Same cadence, different job: catch an undock, an unplugged
+            // monitor, or a display-scale change that left the overlay the
+            // wrong size or somewhere you cannot reach it. Size first — a
+            // window of the wrong size cannot be clamped to the right place,
+            // and a scale change breaks both at once.
+            if Instant::now() >= next_rescue {
+                ensure_size(&app);
+                ensure_on_screen(&app);
+                next_rescue = Instant::now() + SWEEP_INTERVAL;
             }
             let sessions = current_sessions();
             let encoded = serde_json::to_string(&sessions).unwrap_or_default();
@@ -1213,6 +1340,35 @@ pub fn run() {
     state::sweep();
 
     tauri::Builder::default()
+        // A resize we did not ask for is the display configuration changing
+        // under us; put the window back before the next frame is drawn rather
+        // than waiting up to a sweep for the poller to notice. See ensure_size.
+        .on_window_event(|window, event| {
+            if window.label() != WINDOW_LABEL || !matches!(event, WindowEvent::Resized(_)) {
+                return;
+            }
+            // Correcting from inside the handler would re-enter GTK's
+            // configure-event; and a compositor that insists on its own size
+            // would turn "ask again" into a resize loop with a core in it. One
+            // correction per interval at most, on a later turn of the loop.
+            static LAST_FIX: Mutex<Option<Instant>> = Mutex::new(None);
+            let Ok(mut last) = LAST_FIX.lock() else {
+                return;
+            };
+            if last.is_some_and(|t| t.elapsed() < RESIZE_FIX_INTERVAL) {
+                return;
+            }
+            *last = Some(Instant::now());
+            drop(last);
+            let app = window.app_handle().clone();
+            let _ = app.clone().run_on_main_thread(move || {
+                if ensure_size(&app) {
+                    // The saved position was chosen for the old size, so a
+                    // window that just changed size can be off screen at it.
+                    ensure_on_screen(&app);
+                }
+            });
+        })
         .manage(Interactive::default())
         .manage(Attention::default())
         .manage(Binding::default())
