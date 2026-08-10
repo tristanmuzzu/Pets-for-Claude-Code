@@ -45,9 +45,23 @@ pub fn resolve(cwd: &str) -> Project {
 }
 
 fn basename(path: &Path) -> String {
-    path.file_name()
+    let native = path
+        .file_name()
         .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    // `file_name()` only splits on the host separator, so a Windows path read
+    // on a Unix host comes back whole and the card gets titled
+    // `C:\Users\me\Desktop\thing` instead of `thing`. `worktree_owner` and
+    // `is_scratch` already normalise backslashes for exactly this reason; this
+    // keeps the third path-splitter in the module consistent with them.
+    //
+    // Deliberately only applied when the native split already left a backslash
+    // behind, so a host path never reaches the branch and a Unix file
+    // legitimately named `foo\bar` is untouched unless it is the whole path.
+    match native.rsplit('\\').next() {
+        Some(tail) if !tail.is_empty() && tail.len() != native.len() => tail.to_string(),
+        _ => native,
+    }
 }
 
 /// Walks up looking for `.git`, following the worktree pointer file back to the
@@ -102,6 +116,19 @@ mod tests {
     #[test]
     fn a_plain_directory_is_its_own_project() {
         let project = resolve("C:\\Users\\me\\Desktop\\prokitchens-project");
+        assert_eq!(project.name, "prokitchens-project");
+        assert!(project.workspace.is_empty());
+        assert!(!project.scratch);
+    }
+
+    /// The same case with the host's own separator. Before `basename` learned
+    /// to split backslashes, the test above passed on Windows and failed on
+    /// Linux with the whole `C:\...` string as the project name, so the suite
+    /// was permanently red on one platform and nobody could tell a real
+    /// regression from the usual one.
+    #[test]
+    fn a_plain_unix_directory_is_its_own_project() {
+        let project = resolve("/home/me/projects/prokitchens-project");
         assert_eq!(project.name, "prokitchens-project");
         assert!(project.workspace.is_empty());
         assert!(!project.scratch);
