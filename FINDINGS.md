@@ -180,7 +180,106 @@ Root causes found, in order of contribution:
   docs/releases/vX.Y.Z.md" instead of containing the notes; it now takes the
   file.
 
+## After v0.7.4 — the numbers around the sentence
+
+Reported as "the pet is bullshitting": the quoted line is what Claude really
+said, but everything around it — **Finishing · 7 running · 1 action · 4m** on a
+turn that was over and had nothing running — was not. Three parallel read-only
+audits plus a replay of the real matcher over 250 transcripts and 376 captured
+hook payloads.
+
+- **P-1** `narration.rs:230` — `"taskId"` is overwhelmingly the *to-do list's*
+  field, not an async one: 694 of 723 occurrences across 233 transcripts were
+  `TaskUpdate` ticking a checkbox, ids `"1"`, `"2"`, `"3"`. Each added a
+  background task that could never finish, because no completion notification
+  for a checkbox exists. Measured on 250 real transcripts: **38 sessions ended
+  holding 298 phantom runners**; the screenshot's own session held 14, of which
+  7 had accumulated by the moment it was taken. FIXED — `toolUseResult` is read
+  as an object, only the four shapes Claude Code actually launches work with
+  count, and all-numeric ids are rejected. Same 250 transcripts after: 7
+  leftovers in 7 sessions, every one a background shell still alive at session
+  end.
+- **P-2** `narration.rs:262` — a resumed session emits one notification listing
+  every task the previous session abandoned, up to ten `<task-id>` tags under a
+  single `<status>stopped</status>`. `split_once` read the first and discarded
+  the other nine, which then sat in the count for the rest of the session.
+  FIXED — every id in the notification is retired, `__orphan_summary__` markers
+  skipped.
+- **P-3** `narration.rs:234` — an `attachment` echoing a finished task's id on a
+  later line *re-added* it, by the very line saying it had completed. FIXED — a
+  result or attachment carrying a finished status retires its id instead.
+- **P-4** `main.js:423` — the elapsed was `duration(turn_started_ms)` against a
+  live clock, and `turn_started_ms` is cleared only by the next prompt. A
+  two-minute turn that finished two minutes ago read **4m** and went on
+  climbing for as long as anyone looked at it. FIXED — the hook stamps
+  `turn_ended_ms` and `turnElapsed` freezes there; the sweep stamps it too, so
+  a "Stopped responding" card stops counting as well.
+- **P-5** `hook.rs:133` — a subagent's tool calls arrive on the *parent's*
+  session id with `agent_id` set, and were counted as the turn's own actions
+  and allowed to rename its status line. Verified live: of 131 tool events in
+  one session, 21 were subagents'. The card said "Editing spiralplan.py" while
+  the main agent sat waiting for three agents to report. FIXED — `turn_tools`
+  counts the main chain, and a delegated call reads "Delegating".
+- **P-6** `hook.rs:137` — `UserPromptSubmit` was the only turn boundary, so a
+  turn begun by a stop hook sending one back to work, or by a resume, inherited
+  the previous turn's counters and clock. FIXED — `prompt_id`, which is in
+  every payload, is the boundary; stragglers cannot rotate it back.
+- **P-7** `hook.rs:227` — `event_ms` was documented as the race guard ("the
+  older one must lose") and was written by one line and read by none. Hooks are
+  installed `async: true`, so a `PreToolUse` that started before a `Stop` and
+  landed after it cleared the outcome and set the card back to "running" with
+  nothing running. FIXED — the stamp is taken before the lock (taking it after
+  ordered the events backwards) and an out-of-order event may still count its
+  tool call but may not un-finish a turn.
+- **P-8** `hook.rs:166` — "anything other than the prompt itself means the
+  prompt is over" was written as an exclusion list of two, so `SubagentStop`,
+  `PreCompact` and `SessionStart` cleared a permission prompt nobody had
+  answered — and a subagent finishing while the main agent waits at a prompt is
+  routine. "Needs you" vanished while Claude Code was still asking, and the
+  sweep, which reads a cleared `pending_since` as silence, was then free to
+  call the session dead. FIXED — only an event proving the tool ran, was
+  refused, or that the turn ended may clear it, and never a subagent's.
+- **P-9** `hook.rs:383`/`hook.rs:530` — a `Task` call added a subagent and the
+  `SubagentStart` for that same subagent added another, against one
+  `SubagentStop` removing one. Measured live: three agents launched, count read
+  six, and it never returned to zero — which is the value `is_trailing_subagent`
+  tests. FIXED — a set of the `agent_id`s in the payload.
+- **P-10** `main.js:397` — the "N running" chip read the raw number while the
+  status word used the five-minute write-off, so a session silent for an hour
+  carried "7 running" next to the word "Done". `kindLabel` could also print
+  "Finishing · 0 running" when the work drained inside the state's display
+  hold. FIXED — both go through `runningCount`, and zero prints as "Finishing".
+- **P-11** `main.js:212` — `holdLine` returned the previous line whenever the
+  new one was empty, and the sweep clears `activity` precisely to stop the card
+  claiming work is in progress. So the biggest text on a "Stopped responding"
+  card was a sentence from the turn before. FIXED.
+- **P-12** `main.js:120` — a new view seeded `lastStable: 'running'`, so a
+  session whose first event is a permission prompt spent the debounce claiming
+  to be working, with a card, a slot and the pet animating as busy, on no
+  evidence. FIXED — seeded `idle`.
+
 ## Parked (recorded, not fixed — reasons given)
+
+- **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,
+  `state.rs:477` — `FileLock::acquire` gives up after ~200ms and writes
+  unlocked, and it will steal a lock older than 2s from a holder that is still
+  alive, whose `Drop` then deletes the thief's lock. N parallel `PreToolUse`
+  processes can therefore collapse N increments into one. Not seen in the
+  captured payloads (376 events, no lost `tool_use_id`), and the fix — refusing
+  to write rather than writing unlocked — trades a wrong count for a missing
+  event, which needs its own measurement first.
+- **P-14 (the hook does not retry a transient read)** `hook.rs:74` — `sweep`
+  retries once for exactly this reason and the hook does not, so a file briefly
+  held by an indexer loses that event's increment, or its whole outcome.
+  One-line fix, deliberately separated from this pass so it can be measured.
+- **P-15 (`PermissionDenied` is labelled "Auto-mode blocked")** `hook.rs:439` —
+  the payload carries a `reason`, observed as `"Blocked by classifier"`. Since
+  it is present, the label should quote it rather than assume the classifier;
+  as it stands a denial from a `deny` rule or a permission hook would be
+  attributed to auto-mode. Needs a sample of a non-classifier denial first.
+- **P-16 (`Notification` fallback misses wordings)** `hook.rs:469` — with
+  `notification_type` absent, only "permission", "waiting for your" and "input"
+  are matched; "approval", "approve" and "confirm" are not recorded at all.
 
 - **H-1/S-6 (general event-ordering guard)** — hook payloads carry no fire
   timestamp and process-spawn skew means arrival time cannot reconstruct fire
