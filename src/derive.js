@@ -238,3 +238,31 @@ export function duration(ms, now = Date.now()) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
   return `${Math.floor(seconds / 3600)}h`
 }
+
+/**
+ * How long the turn on this card has been going, or how long it took.
+ *
+ * The card reads "3 actions · 4m", and both halves describe the turn. The
+ * elapsed used to be computed live from `turn_started_ms` with nothing to stop
+ * it, so a turn that took two minutes and finished two minutes ago said "4m",
+ * and went on climbing for as long as anyone was looking at it. A number that
+ * grows while nothing is happening is the pet inventing work.
+ */
+export function turnElapsed(session, now = Date.now()) {
+  const started = session.turn_started_ms || 0
+  if (!started) return ''
+  return duration(started, session.turn_ended_ms || now)
+}
+
+/**
+ * Is the "N running" count worth showing at all?
+ *
+ * The count is only ever a claim about *now*, so it has to be silent the
+ * moment it stops being checkable. [`stillWorking`] already decides that for
+ * the status word; the chip beside it was reading the raw number instead, so a
+ * session that had been silent for an hour still carried "7 running" next to
+ * the word "Done".
+ */
+export function runningCount(session, now = Date.now()) {
+  return stillWorking(session, now) ? session.outstanding || 0 : 0
+}

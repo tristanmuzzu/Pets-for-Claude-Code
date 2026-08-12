@@ -9,7 +9,9 @@ import {
   holdState,
   isNewer,
   relativeTime,
+  runningCount,
   stillWorking,
+  turnElapsed,
   worthCelebrating,
   CELEBRATE_AFTER_MS,
   OUTSTANDING_STALE_MS
@@ -201,4 +203,38 @@ test('ages read the way a glance expects', () => {
   assert.equal(relativeTime(NOW - 500, NOW), 'now')
   assert.equal(relativeTime(NOW - 90_000, NOW), '1m')
   assert.equal(relativeTime(NOW - 7_200_000, NOW), '2h')
+})
+
+test('the turn clock stops when the turn does', () => {
+  // A two-minute turn that ended two minutes ago said "4m" and kept climbing,
+  // because the elapsed was measured from the turn's start against a live
+  // clock with nothing to stop it.
+  const ran = quiet({ turn_started_ms: NOW - 240_000, turn_ended_ms: NOW - 110_000 })
+  assert.equal(turnElapsed(ran, NOW), '2m')
+  // Ten minutes later it still took two minutes.
+  assert.equal(turnElapsed(ran, NOW + 600_000), '2m')
+
+  // A turn still running keeps counting, which is the whole point of it.
+  const running = quiet({ turn_started_ms: NOW - 45_000, turn_ended_ms: 0 })
+  assert.equal(turnElapsed(running, NOW), '45s')
+  // Nothing to time before the first turn.
+  assert.equal(turnElapsed(quiet({ turn_started_ms: 0 }), NOW), '')
+})
+
+test('a count of running work goes quiet when it can no longer be checked', () => {
+  const busy = quiet({ outstanding: 3, updated_ms: NOW - 1000 })
+  assert.equal(runningCount(busy, NOW), 3)
+
+  // The same claim, from a session that has said nothing for longer than any
+  // real turn goes silent. The status word already writes this off; the chip
+  // beside it used to read the raw number and sat there saying "7 running"
+  // next to the word "Done".
+  const quietForAges = quiet({
+    outstanding: 7,
+    updated_ms: NOW - OUTSTANDING_STALE_MS - 1,
+    outcome: 'done',
+    outcome_ms: NOW - OUTSTANDING_STALE_MS
+  })
+  assert.equal(displayState(quietForAges, NOW), 'done')
+  assert.equal(runningCount(quietForAges, NOW), 0)
 })

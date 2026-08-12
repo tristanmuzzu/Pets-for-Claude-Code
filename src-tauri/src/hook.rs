@@ -30,6 +30,12 @@ const PROGRESS_EVENTS: [&str; 7] = [
 ];
 
 pub fn run(fallback_event: Option<String>) {
+    // Stamped before anything that can block, and in particular before the
+    // file lock. Read after it instead — which is where this used to be — and
+    // a hook that waited 200ms for the lock gets a *later* timestamp than the
+    // one that made it wait, which is precisely backwards and makes ordering
+    // by this value worse than not ordering at all.
+    let now = now_ms();
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     capture(&raw);
@@ -83,15 +89,29 @@ pub fn run(fallback_event: Option<String>) {
         }
     };
 
-    let Some(mut update) = classify(&event, &payload) else {
+    let Some(update) = classify(&event, &payload) else {
         return;
     };
+    apply(&mut session, &event, &payload, update, now);
+    session.session_id = session_id;
 
+    if let Ok(bytes) = serde_json::to_vec(&session) {
+        let _ = write_atomic(&path, &bytes);
+    }
+}
+
+/// Folds one classified event into the session file's state.
+///
+/// Split out from [`run`] so the judgements that decide whether a card is
+/// telling the truth — which turn this is, whether the event is a straggler,
+/// whether a subagent or the session itself did the work — can be tested
+/// without a filesystem or a running Claude Code.
+fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update, now: u64) {
     // A subagent reporting in after the turn ended is bookkeeping, not new
     // work. Taking it at face value cleared the outcome and relabelled a
     // finished card "Delegating", so the turn that had just been announced as
     // done went back to looking busy with nothing running.
-    let trailing_subagent = is_trailing_subagent(&event, &session);
+    let trailing_subagent = is_trailing_subagent(event, session);
     if trailing_subagent {
         update.state = "";
         update.kind.clear();
@@ -100,7 +120,16 @@ pub fn run(fallback_event: Option<String>) {
         update.silent = true;
     }
 
-    let now = now_ms();
+    // An event that reached this file after a later one already did.
+    //
+    // Hooks are installed with `async: true`, so Claude Code neither waits for
+    // them nor delivers them in order. A `PreToolUse` that started before a
+    // `Stop` and lands after it used to clear the outcome and set the state
+    // back to "running" — the card came off "Done" with nothing running, which
+    // is the shape of lie this whole file exists to avoid. Counters are
+    // deliberately still applied: they are increments under a lock, and
+    // dropping one loses a tool call that really did happen.
+    let out_of_order = now < session.event_ms;
     if session.started_ms == 0 {
         session.started_ms = now;
     }
@@ -130,24 +159,68 @@ pub fn run(fallback_event: Option<String>) {
             session.transcript = transcript.to_string();
         }
     }
-    if event == "PreToolUse" {
-        session.tools += 1;
-        session.turn_tools += 1;
+    // Which agent this event belongs to, and which turn.
+    //
+    // Both are in every hook payload and neither was being read. A subagent's
+    // tool calls arrive on the *parent's* session id with `agent_id` set, so
+    // without this the card counted three subagents' work as the main agent's
+    // actions and flipped its own status line to whatever a subagent happened
+    // to be doing — "Editing spiralplan.py" while the main agent was sitting
+    // still waiting for them. Narration already refuses sidechain voices for
+    // exactly this reason; the tool line had no equivalent.
+    let by_subagent = payload
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    let prompt_id = payload
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    // A new turn, however it began.
+    //
+    // `UserPromptSubmit` is not the only way one starts: a stop hook can send
+    // a turn back to work, and a resumed session carries on without a prompt.
+    // Both left the counters and the clock running from the previous turn.
+    // `prompt_id` is Claude Code's own answer to "which turn is this", so ask
+    // it. Stragglers are excluded — an out-of-order event from the turn that
+    // just ended would otherwise rotate the turn back and forth.
+    let turn_changed = !out_of_order
+        && !prompt_id.is_empty()
+        && prompt_id != session.prompt_id
+        // Never backwards. A prompt typed while a turn is running is submitted
+        // then and answered later, so the two turns' events interleave, and
+        // rotating on every change would reset the counters each time they
+        // took it in turns to arrive.
+        && prompt_id != session.prev_prompt_id;
+    if turn_changed {
+        session.prev_prompt_id = std::mem::take(&mut session.prompt_id);
+        session.prompt_id = prompt_id.to_string();
     }
-    if event == "UserPromptSubmit" {
+    if turn_changed || (prompt_id.is_empty() && event == "UserPromptSubmit") {
         session.turn_started_ms = now;
+        session.turn_ended_ms = 0;
         session.turn_tools = 0;
         session.blocked = 0;
-        session.subagents = 0;
+        session.agents.clear();
+    }
+    if event == "PreToolUse" {
+        session.tools += 1;
+        // The status line reads "N actions · 4m", and the clock beside it is
+        // the *turn's*. So the count has to be the turn's own work, not the
+        // sum of everything its subagents did in parallel.
+        if by_subagent.is_empty() {
+            session.turn_tools += 1;
+        }
     }
 
     // `Stop` and `StopFailure` clear it too: the turn ending resolves whatever
     // it was blocked on. Without this, a denied permission followed by the
     // turn ending left "Needs you" on the card for hours — the outcome the
     // same event carries is applied just below, after the slate is clean.
-    let resolves =
-        PROGRESS_EVENTS.contains(&event.as_str()) || event == "Stop" || event == "StopFailure";
-    if resolves && !trailing_subagent {
+    let resolves = PROGRESS_EVENTS.contains(&event) || event == "Stop" || event == "StopFailure";
+    if resolves && !trailing_subagent && !out_of_order {
         session.clear_pending();
     }
     // Anything other than the prompt itself means the prompt is over.
@@ -163,7 +236,27 @@ pub fn run(fallback_event: Option<String>) {
     // It is also the rule that survives being wrong about that order: if
     // `PermissionRequest` ever came first, the `PreToolUse` would clear it and
     // the next `PermissionRequest` would simply set it again.
-    if !session.pending_tool.is_empty() && event != "PermissionRequest" && event != "Notification" {
+    //
+    // "Anything other than the prompt itself" was too broad, though. It was
+    // written as an exclusion list of two, so a `SubagentStop`, a `PreCompact`
+    // or a `SessionStart` cleared a prompt nobody had answered — and a
+    // subagent finishing while the main agent sits at a permission prompt is
+    // routine, not exotic. The card stopped saying "Needs you" while Claude
+    // Code was still asking, and the sweep, which reads a cleared
+    // `pending_since` as silence, was then free to call the session dead.
+    // Only an event that proves the tool ran, was refused, or that the turn is
+    // over may clear it now.
+    const ANSWERS_PROMPT: [&str; 7] = [
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PermissionDenied",
+        "UserPromptSubmit",
+        "Stop",
+        "StopFailure",
+    ];
+    let answers_prompt = ANSWERS_PROMPT.contains(&event);
+    if !session.pending_tool.is_empty() && answers_prompt && by_subagent.is_empty() {
         session.clear_permission();
     }
     // Compare the detail too: two consecutive prompts for the same tool but
@@ -178,13 +271,17 @@ pub fn run(fallback_event: Option<String>) {
         session.pending_risk = update.permission_risk.to_string();
         session.pending_since = now;
     }
-    if !update.state.is_empty() {
+    if !update.state.is_empty() && !out_of_order {
         session.state = update.state.to_string();
     }
-    if !update.outcome.is_empty() {
+    if !update.outcome.is_empty() && !out_of_order {
         session.outcome = update.outcome.to_string();
         session.outcome_ms = now;
         session.settles_ms = now + update.settle_ms;
+        // Stop the turn's clock. The card shows "N actions · 4m" beside the
+        // word, and both belong to the turn — so once the turn is over they
+        // are history, and history does not keep counting upward.
+        session.turn_ended_ms = now;
         // The subagent count deliberately survives the outcome. Zeroing it
         // here destroyed the one piece of evidence that contradicts "Done":
         // the turn yielded the floor, but the work it delegated is still
@@ -202,20 +299,56 @@ pub fn run(fallback_event: Option<String>) {
     if update.blocked {
         session.blocked += 1;
     }
-    session.subagents = session
-        .subagents
-        .saturating_add_signed(update.subagents)
-        .min(64);
+    // Subagents by name rather than by tally.
+    //
+    // It used to be a counter with two sources — a `Task` call adding one and
+    // the `SubagentStart` for that same subagent adding another — against a
+    // single `SubagentStop` taking one away. Three agents launched read as
+    // six, and the count never came back to zero, which is the value
+    // `is_trailing_subagent` tests to decide whether a straggling
+    // `SubagentStop` is allowed to relabel a card. A set of the ids Claude
+    // Code puts in the payload cannot double-count and cannot drift.
+    if update.subagents > 0
+        && !by_subagent.is_empty()
+        && !session.agents.contains(&by_subagent)
+        && session.agents.len() < 64
+    {
+        session.agents.push(by_subagent.clone());
+    }
+    if update.subagents < 0 {
+        session.agents.retain(|id| *id != by_subagent);
+    }
+    session.subagents = session.agents.len() as u64;
+
+    // What Claude Code itself says is still in flight. Present on the `Stop`
+    // family only, which is exactly where it is needed: the moment the card
+    // chooses between "Done" and "Finishing".
+    if let Some(tasks) = payload.get("background_tasks").and_then(Value::as_array) {
+        session.tasks = tasks
+            .iter()
+            .filter(|task| task.get("status").and_then(Value::as_str).unwrap_or("") == "running")
+            .filter_map(|task| task.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        session.tasks_ms = now;
+    }
 
     // Any event at all is proof of life, so whatever the sweep concluded is
     // no longer true.
     session.stalled = false;
-    session.session_id = session_id;
     if !update.silent {
         // An event that does not describe work leaves the last word about work
         // standing, rather than blanking it or replacing it with its own.
         if !update.kind.is_empty() {
-            session.kind = update.kind;
+            // A subagent's tool call is the session delegating, not the
+            // session reading a file. Letting its category through made the
+            // status line say "Editing" over a turn whose own work was to sit
+            // and wait for three agents to report back.
+            session.kind = if by_subagent.is_empty() {
+                update.kind
+            } else {
+                "Delegating".to_string()
+            };
         }
         session.activity = update.activity.clone();
         session.detail = update.detail;
@@ -223,7 +356,7 @@ pub fn run(fallback_event: Option<String>) {
             session.headline = headline;
         }
     }
-    session.event = event;
+    session.event = event.to_string();
     session.event_ms = now;
     session.updated_ms = now;
     if !update.silent && !update.activity.is_empty() {
@@ -241,10 +374,6 @@ pub fn run(fallback_event: Option<String>) {
             update.state
         };
         session.push_recent(tag, &update.activity);
-    }
-
-    if let Ok(bytes) = serde_json::to_vec(&session) {
-        let _ = write_atomic(&path, &bytes);
     }
 }
 
@@ -981,6 +1110,243 @@ mod tests {
         // and counting both would take the same subagent away twice.
         let done = classify("PostToolUse", &json!({ "tool_name": "Task" })).unwrap();
         assert_eq!(done.subagents, 0);
+    }
+
+    // --- what one event does to the file ---------------------------------
+    //
+    // Every number the card shows comes out of `apply`, so these are the tests
+    // that decide whether the status line is telling the truth.
+
+    /// Runs one event against a session, the way `run` would.
+    fn feed(session: &mut Session, event: &str, payload: serde_json::Value, now: u64) {
+        let update = classify(event, &payload).expect("event should be classified");
+        apply(session, event, &payload, update, now);
+    }
+
+    fn tool_call(prompt: &str) -> serde_json::Value {
+        json!({ "tool_name": "Read", "prompt_id": prompt, "tool_input": { "file_path": "a.rs" } })
+    }
+
+    /// A subagent's tool calls arrive on the *parent's* session id, so without
+    /// reading `agent_id` the card counted three agents' work as the turn's
+    /// own and renamed itself after whatever they were doing — "Editing
+    /// spiralplan.py" while the main agent sat waiting for them to report.
+    #[test]
+    fn a_subagents_work_is_not_the_turns_work() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+
+        feed(&mut session, "PreToolUse", tool_call("p1"), 1100);
+        assert_eq!(session.turn_tools, 1);
+        assert_eq!(session.kind, "Reading");
+
+        let mut delegated = tool_call("p1");
+        delegated["agent_id"] = json!("a12345");
+        feed(&mut session, "PreToolUse", delegated, 1200);
+        assert_eq!(
+            session.turn_tools, 1,
+            "a subagent's call is not the turn's action"
+        );
+        assert_eq!(
+            session.kind, "Delegating",
+            "and it is not what the turn is doing"
+        );
+        // Still counted somewhere: it is real work the session did.
+        assert_eq!(session.tools, 2);
+    }
+
+    /// `UserPromptSubmit` is not the only way a turn begins. A stop hook can
+    /// send one back to work and a resumed session simply carries on, and both
+    /// used to inherit the previous turn's counters and its clock.
+    #[test]
+    fn a_new_turn_starts_wherever_claude_code_says_it_does() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+        feed(&mut session, "PreToolUse", tool_call("p1"), 1100);
+        feed(&mut session, "PreToolUse", tool_call("p1"), 1200);
+        assert_eq!(session.turn_tools, 2);
+
+        // No prompt event at all, just work stamped with a different turn.
+        feed(&mut session, "PreToolUse", tool_call("p2"), 5000);
+        assert_eq!(session.turn_tools, 1);
+        assert_eq!(session.turn_started_ms, 5000);
+        assert_eq!(session.turn_ended_ms, 0);
+
+        // And a straggler from the turn just ended does not start it again.
+        // A prompt typed mid-turn is submitted then and answered later, so the
+        // two turns' events interleave for a while.
+        feed(&mut session, "PreToolUse", tool_call("p1"), 5100);
+        assert_eq!(session.turn_started_ms, 5000, "the turn is still p2");
+        assert_eq!(session.turn_tools, 2);
+    }
+
+    /// The card reads "N actions · 4m", and both belong to the turn. The clock
+    /// used to run on after the turn ended, so a two-minute turn that finished
+    /// two minutes ago said "4m" — and went on climbing for as long as anyone
+    /// looked at it.
+    #[test]
+    fn the_turns_clock_stops_when_the_turn_does() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "Stop",
+            json!({ "prompt_id": "p1", "last_assistant_message": "Done." }),
+            131_000,
+        );
+        assert_eq!(session.outcome, "done");
+        assert_eq!(session.turn_ended_ms, 131_000);
+        // And starts again with the next turn.
+        feed(&mut session, "PreToolUse", tool_call("p2"), 200_000);
+        assert_eq!(session.turn_ended_ms, 0);
+    }
+
+    /// Hooks are installed `async: true`, so Claude Code neither waits for them
+    /// nor orders them. A `PreToolUse` that started before the `Stop` and
+    /// landed after it took the card back off "Done" with nothing running.
+    #[test]
+    fn a_straggler_does_not_un_finish_a_finished_turn() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "Stop",
+            json!({ "prompt_id": "p1", "last_assistant_message": "Done." }),
+            9000,
+        );
+        assert_eq!(session.outcome, "done");
+
+        // Same turn, earlier timestamp: it left before the Stop did.
+        feed(&mut session, "PreToolUse", tool_call("p1"), 8500);
+        assert_eq!(session.outcome, "done", "the turn is still over");
+        assert_eq!(session.state, "idle");
+        // The tool call itself really happened, so it is still counted.
+        assert_eq!(session.turn_tools, 1);
+    }
+
+    /// A subagent finishing while the main agent sits at a permission prompt is
+    /// routine. It used to clear the prompt, so the card stopped saying "Needs
+    /// you" while Claude Code was still asking — and the sweep, which reads a
+    /// cleared prompt as silence, was then free to call the session dead.
+    #[test]
+    fn a_prompt_nobody_answered_survives_the_bookkeeping() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "PermissionRequest",
+            json!({ "prompt_id": "p1", "tool_name": "Bash", "tool_input": { "command": "rm -rf build" } }),
+            2000,
+        );
+        assert!(session.pending_since > 0);
+
+        for event in ["SubagentStop", "PreCompact", "SessionStart"] {
+            feed(&mut session, event, json!({ "prompt_id": "p1" }), 3000);
+            assert!(
+                session.pending_since > 0,
+                "{event} must not answer a prompt on the user's behalf"
+            );
+        }
+        // The tool actually running is what proves the prompt was answered.
+        feed(
+            &mut session,
+            "PreToolUse",
+            json!({ "prompt_id": "p1", "tool_name": "Bash", "tool_input": { "command": "rm -rf build" } }),
+            4000,
+        );
+        assert_eq!(session.pending_since, 0);
+    }
+
+    /// Two sources added a subagent and one took it away, so three launches
+    /// read as six and the count never came back to zero.
+    #[test]
+    fn a_subagent_is_counted_once_however_it_is_announced() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+        // The Task call, which cannot name an agent that does not exist yet.
+        feed(
+            &mut session,
+            "PreToolUse",
+            json!({ "prompt_id": "p1", "tool_name": "Task", "tool_input": { "description": "audit" } }),
+            1100,
+        );
+        // And the subagent announcing itself, twice for good measure.
+        for at in [1200, 1300] {
+            feed(
+                &mut session,
+                "SubagentStart",
+                json!({ "prompt_id": "p1", "agent_id": "a1", "agent_type": "general-purpose" }),
+                at,
+            );
+        }
+        assert_eq!(session.subagents, 1);
+        feed(
+            &mut session,
+            "SubagentStop",
+            json!({ "prompt_id": "p1", "agent_id": "a1" }),
+            1400,
+        );
+        assert_eq!(session.subagents, 0);
+    }
+
+    /// The `Stop` payload carries Claude Code's own list of what is still
+    /// running. It arrives at exactly the moment the card is choosing between
+    /// "Done" and "Finishing", so it is the answer, and anything the overlay
+    /// inferred from the transcript gives way to it.
+    #[test]
+    fn claude_codes_own_list_of_running_work_is_taken_as_the_answer() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "Stop",
+            json!({
+                "prompt_id": "p1",
+                "last_assistant_message": "Handing off.",
+                "background_tasks": [
+                    { "id": "a111", "type": "subagent", "status": "running" },
+                    { "id": "b222", "type": "shell", "status": "completed" }
+                ]
+            }),
+            9000,
+        );
+        assert_eq!(session.tasks, vec!["a111"], "only what is actually running");
+        assert_eq!(session.tasks_ms, 9000);
     }
 
     /// One tool failing is not the turn failing. Claude nearly always tries

@@ -202,7 +202,17 @@ pub struct Session {
     /// something else and nobody needs a tally of that.
     pub blocked: u64,
     /// Subagents started but not yet finished, as the hooks saw them.
+    /// Derived from [`Session::agents`]; kept as a number because that is what
+    /// every reader of this file wants.
     pub subagents: u64,
+    /// The ids of those subagents, which is what makes the count safe.
+    ///
+    /// Claude Code stamps `agent_id` on every event a subagent causes, so a
+    /// subagent can be counted once no matter how many events announce it —
+    /// the tally this replaces was fed by two sources and drained by one, and
+    /// never came back to zero.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
     /// Work the turn started and has not been told is over: background shell
     /// commands, monitors and subagents, counted from the transcript by the
     /// overlay rather than by a hook.
@@ -214,6 +224,46 @@ pub struct Session {
     /// waiting for them.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub outstanding: u64,
+    /// What Claude Code itself last said was still running.
+    ///
+    /// The `Stop` family of hook payloads carries a `background_tasks` array —
+    /// id, type, status and description for every asynchronous thing the
+    /// session has in flight. That is the answer, from the only process that
+    /// actually knows it, arriving at exactly the moment the card is deciding
+    /// between "Done" and "Finishing". Reading the transcript is still how the
+    /// count moves *between* those moments; this is what it gets corrected
+    /// against, so a shape this build has never seen cannot strand a card on
+    /// "still working" for more than one turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<String>,
+    /// When [`Session::tasks`] was last replaced, so the overlay applies each
+    /// correction once rather than on every poll.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tasks_ms: u64,
+    /// The turn this file is describing, straight from the hook payload.
+    ///
+    /// Claude Code stamps every hook event with the prompt it belongs to. That
+    /// is a far better turn boundary than "a `UserPromptSubmit` arrived":
+    /// turns also begin when a stop hook sends one back to work and when a
+    /// session is resumed, and a prompt queued mid-turn fires
+    /// `UserPromptSubmit` without ending the turn that is running.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_id: String,
+    /// The turn before it, so a turn is never rotated backwards.
+    ///
+    /// A prompt typed while a turn is running is submitted then and finishes
+    /// later, so events from both turns interleave. Without this the counters
+    /// reset every time the two took it in turns to arrive.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prev_prompt_id: String,
+    /// How long the current turn has been going, frozen once it ends.
+    ///
+    /// The card used to compute this live from `turn_started_ms`, which is
+    /// only ever cleared by the next prompt — so a finished card counted
+    /// upwards for as long as it was on screen and read "4m" over a turn that
+    /// took two minutes and had been over for another two.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub turn_ended_ms: u64,
     /// The sweep gave up on this session: running, but silent for longer than
     /// any real turn goes without firing a hook.
     ///
@@ -630,6 +680,13 @@ pub fn sweep() -> usize {
             session.kind = "Idle".to_string();
             session.activity.clear();
             session.subagents = 0;
+            session.agents.clear();
+            // The turn is not going to end now, so its clock has to be stopped
+            // by something. Left running, a "Stopped responding" card counted
+            // upwards for as long as it was on screen.
+            if session.turn_ended_ms == 0 {
+                session.turn_ended_ms = session.updated_ms;
+            }
             // Not a completion. Saying "Done" here would be the same lie in a
             // friendlier voice. The headline is left alone: it still describes
             // what the turn was about, which is true whatever happened next.

@@ -100,6 +100,9 @@ struct Watch {
     /// id when the thing is launched, and the same id in the notification when
     /// it completes. Keeping the set is just subtracting one from the other.
     outstanding: BTreeSet<String>,
+    /// The last authoritative correction taken from a hook payload, so it is
+    /// applied once instead of on every one of the three polls a second.
+    synced_ms: u64,
 }
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, Watch>> {
@@ -125,6 +128,13 @@ pub fn decorate(sessions: &mut [Session], mode: Mode) {
         };
         live.push(path.clone());
         let watch = watches.entry(path.clone()).or_default();
+        // Claude Code's own answer wins over anything inferred from the file.
+        // Applied before the read so a launch that happened after the snapshot
+        // still counts.
+        if session.tasks_ms > watch.synced_ms {
+            watch.synced_ms = session.tasks_ms;
+            watch.outstanding = session.tasks.iter().cloned().collect();
+        }
         follow(&path, watch, mode);
         if mode != Mode::Off && !watch.line.is_empty() {
             session.narration = watch.line.clone();
@@ -220,48 +230,37 @@ fn follow(path: &Path, watch: &mut Watch, mode: Mode) {
     }
 }
 
+/// The statuses that mean a task is over, however it went.
+///
+/// `running` is deliberately absent: that notification is a progress report,
+/// not an ending. Only `completed` used to be here, and one agent that failed
+/// or one background command killed left the count permanently one too high,
+/// so every later turn read "Finishing · 1 running" and never went green.
+const OVER: [&str; 4] = ["completed", "failed", "stopped", "killed"];
+
 /// Adds work this line launched, and removes work it reported finished.
 ///
-/// Claude Code hands every asynchronous thing an id at launch — a background
-/// shell command, a monitor, a subagent — and quotes that same id back when it
-/// completes. Neither half is a documented API, so this reads them as the
-/// strings they are and treats absence as "nothing launched", which is the
-/// answer the pet had anyway before it could see any of this.
+/// Read from the *shape* of the entry rather than by looking for id-shaped
+/// substrings anywhere on the line, which is what this used to do and is why
+/// the count was mostly fiction.
+///
+/// THE BUG THIS EXISTS FOR
+///
+/// `taskId` is overwhelmingly the *to-do list's* field, not an async one:
+/// across 233 real transcripts, 694 of 723 occurrences were `TaskUpdate`
+/// ticking a checkbox off, with ids like `"1"`. Every one of them added a
+/// background task that could never finish, because no completion notification
+/// for a checkbox exists. 39 of those sessions ended holding 302 phantom
+/// runners between them — one card said "Finishing · 7 running" over a turn
+/// that had been over for two minutes. Reading `toolUseResult` as an object
+/// and only trusting the four shapes Claude Code actually launches work with
+/// takes those 302 down to 11, every one of which is a real task that outlived
+/// its session.
 fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
-    // Launched. Background shells and monitors carry their id directly; a
-    // subagent's launch is only distinguishable from its later mentions by
-    // sitting next to the status the tool result was given.
-    for key in ["\"backgroundTaskId\":\"", "\"taskId\":\""] {
-        if let Some(id) = quoted_after(line, key) {
-            outstanding.insert(id);
-        }
-    }
-    if line.contains("\"async_launched\"") {
-        if let Some(id) = quoted_after(line, "\"agentId\":\"") {
-            outstanding.insert(id);
-        }
-    }
-
-    // Over, however it went. Only `completed` used to drain the set, and a
-    // real transcript ends work four ways: one agent that failed, or one
-    // background command killed, left the count permanently one too high, so
-    // every later turn in that session read "Finishing · 1 running" and never
-    // went green — for as long as the session kept working, since the
-    // five-minute write-off only starts once everything goes quiet.
-    //
-    // `running` is deliberately not in the list: that notification is a
-    // progress report, not an ending. An id can also be notified more than
-    // once, which a set handles without caring.
-    const OVER: [&str; 4] = [
-        "<status>completed</status>",
-        "<status>failed</status>",
-        "<status>stopped</status>",
-        "<status>killed</status>",
-    ];
-    if OVER.iter().any(|status| line.contains(status)) {
-        if let Some(id) = between(line, "<task-id>", "</task-id>") {
-            outstanding.remove(&id);
-        }
+    // Endings first, and by substring, because a notification is delivered as
+    // an XML-ish blob inside a JSON string rather than as fields.
+    if line.contains("task-notification") {
+        end_notified(line, outstanding);
     }
     // Stopped by hand, which is an ending like any other.
     if let Some(rest) = line.split_once("Successfully stopped task: ") {
@@ -274,27 +273,115 @@ fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
             outstanding.remove(&id);
         }
     }
+
+    // A cheap reject before the parse. Most of a transcript mentions none of
+    // these, and parsing every line would triple the cost of a poll.
+    if !(line.contains("backgroundTaskId") || line.contains("agentId") || line.contains("taskId")) {
+        return;
+    }
+    let Ok(entry) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if let Some(result) = entry.get("toolUseResult").and_then(Value::as_object) {
+        let field = |key: &str| result.get(key).and_then(Value::as_str);
+        let status = field("status").unwrap_or_default();
+
+        // A to-do list write. Same field name, nothing asynchronous about it.
+        let is_todo = result.contains_key("updatedFields")
+            || result.contains_key("statusChange")
+            || result.contains_key("tasks");
+        // Launched, in the four shapes that really mean it.
+        if !is_todo {
+            if let Some(id) = field("backgroundTaskId").filter(|id| plausible_id(id)) {
+                outstanding.insert(id.to_string());
+            }
+            if status == "async_launched" {
+                for key in ["agentId", "taskId"] {
+                    if let Some(id) = field(key).filter(|id| plausible_id(id)) {
+                        outstanding.insert(id.to_string());
+                    }
+                }
+            }
+            // A monitor: an id handed back alongside how long it may run.
+            // `agentId` is deliberately not read here — a *synchronous*
+            // subagent's result carries one too, and it has already finished.
+            if result.contains_key("timeoutMs") || result.contains_key("persistent") {
+                if let Some(id) = field("taskId").filter(|id| plausible_id(id)) {
+                    outstanding.insert(id.to_string());
+                }
+            }
+        }
+        // A result that reports the work over. Rarer than the notification and
+        // not a substitute for it, but a task whose status is echoed back on a
+        // later line used to be *re-added* by that echo and never removed
+        // again.
+        if OVER.contains(&status) {
+            for key in ["backgroundTaskId", "agentId", "taskId"] {
+                if let Some(id) = field(key) {
+                    outstanding.remove(id);
+                }
+            }
+        }
+    }
+    // The same echo, in the shape Claude Code attaches it to a later turn.
+    if let Some(attachment) = entry.get("attachment").and_then(Value::as_object) {
+        let status = attachment
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if OVER.contains(&status) {
+            for key in ["taskId", "agentId"] {
+                if let Some(id) = attachment.get(key).and_then(Value::as_str) {
+                    outstanding.remove(id);
+                }
+            }
+        }
+    }
 }
 
-/// The quoted string that follows `key`, if it looks like an id.
-fn quoted_after(line: &str, key: &str) -> Option<String> {
-    let rest = line.split_once(key)?.1;
-    let id: String = rest.chars().take_while(|c| *c != '"').collect();
-    plausible_id(&id).then_some(id)
+/// Retires every task named by a finished task-notification.
+///
+/// Every id, not the first one: the scan Claude Code runs when a session is
+/// resumed reports the previous session's abandoned work as one notification
+/// listing up to ten `<task-id>` tags under a single `<status>stopped</status>`.
+/// Reading only the first discarded nine endings, and those nine sat in the
+/// count for the rest of the session.
+fn end_notified(line: &str, outstanding: &mut BTreeSet<String>) {
+    let Some(status) = between(line, "<status>", "</status>") else {
+        return;
+    };
+    if !OVER.contains(&status.as_str()) {
+        return;
+    }
+    let mut rest = line;
+    while let Some((_, tail)) = rest.split_once("<task-id>") {
+        let Some((id, next)) = tail.split_once("</task-id>") else {
+            return;
+        };
+        // `__orphan_summary__:shell` and friends are markers the notification
+        // itself describes as "not tasks".
+        if !id.starts_with("__") {
+            outstanding.remove(id);
+        }
+        rest = next;
+    }
 }
 
 fn between(line: &str, open: &str, close: &str) -> Option<String> {
     let rest = line.split_once(open)?.1;
-    let id = rest.split_once(close)?.0.to_string();
-    plausible_id(&id).then_some(id)
+    Some(rest.split_once(close)?.0.to_string())
 }
 
 /// Ids are short, opaque and alphanumeric. Anything else is a field that
 /// happens to share a name, and counting it would strand a card on "still
 /// working" forever.
+///
+/// All-digits is rejected outright: those are to-do list rows, and nothing
+/// Claude Code launches asynchronously is numbered `1`.
 fn plausible_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
+        && !id.chars().all(|c| c.is_ascii_digit())
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -451,6 +538,62 @@ mod tests {
         let monitor = r#"{"toolUseResult":{"taskId":"ba7xghdk0","timeoutMs":3000}}"#;
         let stopped = r#"{"content":"Successfully stopped task: ba7xghdk0 (prev=…)"}"#;
         assert!(tracked(&[monitor, stopped]).is_empty());
+    }
+
+    /// The bug that made the count fiction.
+    ///
+    /// `taskId` is overwhelmingly the *to-do list's* field: 694 of the 723
+    /// occurrences across 233 real transcripts were a checkbox being ticked,
+    /// numbered `"1"`, `"2"`, `"3"`. Each one added a background task that
+    /// could never finish, because no completion notification for a checkbox
+    /// exists. 39 of those sessions ended holding 302 phantom runners between
+    /// them; one card read "Finishing · 7 running" over a turn that had been
+    /// over for two minutes.
+    #[test]
+    fn ticking_off_a_to_do_item_is_not_launching_a_task() {
+        let created = r#"{"toolUseResult":{"tasks":[{"taskId":"1","title":"Read the code"}]}}"#;
+        let updated = r#"{"toolUseResult":{"success":true,"taskId":"1","updatedFields":["status"],"statusChange":{"from":"in_progress","to":"completed"}}}"#;
+        // The model *asking* for the change is not the system confirming one.
+        let asked = r#"{"message":{"content":[{"type":"tool_use","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}"#;
+        assert!(tracked(&[created, updated, asked]).is_empty());
+        // Belt and braces: nothing Claude Code launches is numbered.
+        assert!(!plausible_id("1"));
+        assert!(plausible_id("bix46i2qi"));
+    }
+
+    /// Resuming a session produces one notification listing every task the
+    /// previous session abandoned — up to ten `<task-id>` tags under a single
+    /// `<status>`. Reading only the first discarded nine endings, and those
+    /// nine sat in the count for the rest of the session.
+    #[test]
+    fn one_notification_can_end_more_than_one_task() {
+        let launch = |id: &str| format!(r#"{{"toolUseResult":{{"backgroundTaskId":"{id}"}}}}"#);
+        let orphans = r#"{"content":"<task-notification><task-id>aaa111</task-id><task-id>bbb222</task-id><task-id>__orphan_summary__:shell</task-id><status>stopped</status><summary>2 background shell command task(s) from the previous session have no completion record</summary></task-notification>"}"#;
+        let lines = [launch("aaa111"), launch("bbb222"), orphans.to_string()];
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        assert!(tracked(&refs).is_empty());
+    }
+
+    /// A finished task whose id is echoed on a later line used to be *added
+    /// back* by that echo — by the very line saying it had completed — and
+    /// never removed again.
+    #[test]
+    fn an_echo_of_finished_work_does_not_revive_it() {
+        let launched = r#"{"toolUseResult":{"status":"async_launched","agentId":"a817eb2d8"}}"#;
+        let finished = r#"{"content":"<task-notification><task-id>a817eb2d8</task-id><status>completed</status></task-notification>"}"#;
+        let echoed = r#"{"attachment":{"type":"task_status","taskId":"a817eb2d8","description":"Fix the sync","status":"completed"}}"#;
+        assert!(tracked(&[launched, finished, echoed]).is_empty());
+        // And the echo alone never counts as a launch.
+        assert!(tracked(&[echoed]).is_empty());
+    }
+
+    /// A subagent called and waited for finishes before its result is written,
+    /// and its result carries an `agentId` too. Counting that as a launch
+    /// strands the card on work that was over before the line was written.
+    #[test]
+    fn a_subagent_that_already_finished_is_not_outstanding() {
+        let sync = r#"{"toolUseResult":{"agentId":"ac8f6ac61","agentType":"Explore","status":"completed"}}"#;
+        assert!(tracked(&[sync]).is_empty());
     }
 
     /// An ordinary turn must not leave anything behind, or every card would

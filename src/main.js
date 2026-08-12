@@ -12,10 +12,11 @@ import {
   WORKING,
   blockedOn,
   displayState,
-  duration,
   holdState,
   isNewer,
   relativeTime,
+  runningCount,
+  turnElapsed,
   worthCelebrating
 } from './derive.js'
 
@@ -117,7 +118,12 @@ function viewFor(key) {
   if (!view) {
     view = {
       expanded: false,
-      lastStable: 'running',
+      // What to fall back to before anything is known. "running" was a guess
+      // dressed as a fact: a session whose first event is a permission prompt
+      // spends the debounce with no derivable state, and seeding this claimed
+      // it was working — a card, a slot, and the pet animating as busy, on no
+      // evidence at all.
+      lastStable: 'idle',
       wasUrgent: false,
       // A finished turn nobody has acknowledged yet.
       unread: false,
@@ -209,7 +215,16 @@ function restingLine(state) {
 }
 
 function holdLine(view, line, now = Date.now()) {
-  if (!line) return view.line ?? ''
+  // Nothing to say is an answer. Returning the last line instead kept a
+  // sentence from a previous turn as the biggest text on the card, underneath
+  // a status line reading "Stopped responding" — the sweep clears `activity`
+  // precisely so the card stops claiming that work is in progress, and this
+  // put it straight back.
+  if (!line) {
+    view.line = ''
+    view.lineUntil = 0
+    return ''
+  }
   if (view.line === line) return line
   if (view.line && now < (view.lineUntil ?? 0)) return view.line
   view.line = line
@@ -392,7 +407,11 @@ function paintCard(node, card, compact = false) {
   //
   // Hidden while the card reads "Finishing", where the status line is already
   // saying the same number in more words.
-  const outstanding = session.outstanding ?? 0
+  //
+  // Gated on the same write-off the status word uses, not on the raw number.
+  // Reading the number directly is how a card that had been silent for an hour
+  // carried "7 running" next to the word "Done".
+  const outstanding = runningCount(session)
   const subagentChip = node.querySelector('.subagents')
   subagentChip.hidden = outstanding < 1 || state === 'finishing'
   subagentChip.textContent = `${outstanding} running`
@@ -405,7 +424,13 @@ function paintCard(node, card, compact = false) {
   const blockedChip = node.querySelector('.blocked')
   blockedChip.hidden = blocked < 1
   blockedChip.textContent = `${blocked} blocked`
-  blockedChip.title = `Auto-mode refused ${blocked} tool ${blocked === 1 ? 'call' : 'calls'} this turn`
+  // "this turn" is only true while the turn is running. Once it is over the
+  // chip is describing something that has finished, and saying so is the
+  // difference between a fact and a claim that quietly expired.
+  const calls = `tool ${blocked === 1 ? 'call' : 'calls'}`
+  blockedChip.title = session.turn_ended_ms
+    ? `Auto-mode refused ${blocked} ${calls} in that turn`
+    : `Auto-mode refused ${blocked} ${calls} this turn`
 
   // Status line: a coarse word plus counters. The detail that used to live here
   // moved to the expanded panel, where fast-changing text is fine.
@@ -420,7 +445,7 @@ function paintCard(node, card, compact = false) {
   }
   if (showCounters) {
     node.querySelector('.actions').textContent = `${actions} ${actions === 1 ? 'action' : 'actions'}`
-    node.querySelector('.elapsed').textContent = duration(turnStarted)
+    node.querySelector('.elapsed').textContent = turnElapsed(session)
   }
   // The exact call, and what the turn was asked for, are both still one hover
   // away without occupying a row.
@@ -465,7 +490,13 @@ function kindLabel(state, session) {
     // The count is the whole point: it is the reason this is not "Done". Kept
     // short because it shares the status line with the counters, and the
     // longer phrasing was the half that got truncated away.
-    return `Finishing · ${session.outstanding ?? 0} running`
+    //
+    // Zero is possible and must not be printed: the word is held on screen for
+    // a moment after the state that earned it, so the last of the work can
+    // drain inside the hold and leave "Finishing · 0 running" — the count
+    // contradicting the word it exists to justify.
+    const running = runningCount(session)
+    return running > 0 ? `Finishing · ${running} running` : 'Finishing'
   }
   if (state === 'done') return 'Done'
   if (state === 'compacting') return 'Compacting'
@@ -719,7 +750,9 @@ function showNotice(message) {
       activity: '',
       detail: '',
       updated_ms: Date.now(),
-      turn_started_ms: Date.now(),
+      // A notice is not a turn, so it gets no counters. It used to claim one
+      // that had started now and done nothing: "0 actions · 0s", ticking.
+      turn_started_ms: 0,
       turn_tools: 0,
       recent: []
     },
@@ -1633,6 +1666,10 @@ function startBrowserDemo() {
         updated_ms: now,
         started_ms: started,
         turn_started_ms: started,
+        // A finished turn's clock is stopped in a real session, so it has to be
+        // stopped here too — a demo that counts upwards over "Done" would be
+        // designing against a bug the app no longer has.
+        turn_ended_ms: outcome ? now : 0,
         turn_tools: 12 + tick * 3,
         recent: [{ ms: now, state: want, text: `${kind} something` }]
       }

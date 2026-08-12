@@ -166,9 +166,14 @@ work went into not claiming things:
   yields the floor — including when it yields *because* it is waiting, with two
   subagents still reviewing and a release pipeline it started still running. No
   hook fires when either of those finishes. So the card counts the work the turn
-  started, from the ids Claude Code writes into the transcript, and reads
+  started — from the list Claude Code hands the `Stop` hook, corrected between
+  turns by the launches and completions in the transcript — and reads
   **Finishing · 3 running** until the last one reports back. Green means
   finished, the way the sidebar's blue dot does.
+- **The counters belong to the turn, and stop when it does.** "18 actions · 3m"
+  is the turn's own work and the turn's own length, so a subagent's tool calls
+  are not counted as the main agent's, and a finished card's clock does not keep
+  climbing over an answer that arrived four minutes ago.
 - **The tray only blinks for news that held.** The card is in front of you and
   can correct itself; a tray blink is a tap on the shoulder of somebody looking
   elsewhere, so it waits until the completion has survived with nothing still
