@@ -81,14 +81,14 @@ it says and thinks. The last one is the default and the one that feels alive.
   in the desktop app.
 - **Click a finished card and it's gone.** A card that says **Done** waits until
   you've seen it, however long that takes, and then one click anywhere on it
-  swats it away completely — not down to a chip, which would mean something is
+  swats it away completely. Not down to a chip, which would mean something is
   still going on. A card that's still working opens instead, showing the last
   two dozen things that project did.
 - **× dismisses too**, and closes a working card down to a one-line chip.
 - **`Ctrl+Alt+P`** shows and hides the whole thing from anywhere. If another
   program already owns that chord, Pipsqueak takes the next free one and tells
-  you which. (Windows only — on Linux, bind `pipsqueak control toggle` in your
-  desktop's keyboard settings. See [Install](#install).)
+  you which. Windows only; on Linux you bind `pipsqueak control toggle` in your
+  desktop's keyboard settings. See [Install](#install).
 
 ## More than one project
 
@@ -126,8 +126,8 @@ Fedora, RHEL and openSUSE take the `.rpm`:
 sudo dnf install ./Pipsqueak-*.x86_64.rpm
 ```
 
-Anywhere else — Arch, NixOS, a distribution whose package manager you'd rather
-not involve — take the **`.AppImage`**, which needs no install at all:
+Anywhere else (Arch, NixOS, or a distribution whose package manager you'd
+rather not involve) takes the **`.AppImage`**, which needs no install at all:
 
 ```bash
 chmod +x Pipsqueak_*_amd64.AppImage
@@ -138,32 +138,32 @@ Keep the AppImage somewhere permanent before you run it. It registers *itself*
 as the hook program, so moving or deleting the file later leaves Claude Code
 calling a program that isn't there. `~/Applications` is a good home for it.
 
-Built on Ubuntu 22.04. The highest symbol the binary actually asks for is
-`GLIBC_2.34`, so Ubuntu 22.04, Debian 12, Fedora 35 and anything newer are
-fine. The packages pull in what they need; the AppImage expects GTK 3 and
-WebKitGTK 4.1, which any current desktop already has. If it refuses to start,
-install them:
+Built on Ubuntu 22.04. The highest glibc symbol the binary asks for is
+`GLIBC_2.34`, so Ubuntu 22.04, Debian 12, Fedora 35 and anything newer are fine.
+The packages pull in what they need. The AppImage expects GTK 3 and WebKitGTK
+4.1, which any current desktop already has; if it refuses to start, install
+them:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
 ```
 
-**Developed and tested on Wayland** (GNOME 50 / Ubuntu 26.04), which is the
-harder of the two: clicks land on the pet and pass through everywhere else
+**Developed and tested on Wayland** (GNOME 50 on Ubuntu 26.04), which is the
+harder of the two. Clicks land on the pet and pass through everywhere else
 because the overlay sets a real input shape and lets the compositor do the
-routing, rather than polling for a cursor position Wayland will not give it.
-That mechanism is X11's own, so X11 should be no worse — but nobody has sat in
-front of it, and this README does not claim things nobody has checked.
+routing, instead of polling for a cursor position Wayland will not give it. That
+mechanism started life on X11, so X11 should work too. I haven't run it there,
+so I'm not going to tell you it does.
 
-Two things are missing on Linux, and they are limits rather than bugs:
+Two things Linux doesn't get:
 
 - **The pet doesn't follow your cursor with its eyes.** A Wayland client is not
   allowed to know where the pointer is unless it is over the window, and a
   click-through window never is. Everything else about the pet is the same.
 - **No global hotkey.** `Ctrl+Alt+P` is a Windows registration, and Wayland has
   no equivalent a normal application can make. The tray icon does the same job,
-  and one line in your desktop's own keyboard settings does it properly —
-  bind a custom shortcut to:
+  and your desktop's own keyboard settings do it properly. Bind a custom
+  shortcut to:
 
   ```bash
   pipsqueak control toggle
@@ -179,9 +179,9 @@ step that touches your config, and it says exactly what it edits. Then restart
 Claude Code, because it reads its hooks at startup. That's the whole setup.
 
 It also registers itself to start with the machine, because a status overlay
-that doesn't survive a reboot isn't one — the Run key on Windows, an XDG
-autostart entry on Linux. The welcome panel says so and turns it off in one
-click, as does `pipsqueak autostart off`.
+that doesn't survive a reboot isn't much of one. That's the Run key on Windows
+and an XDG autostart entry on Linux. The welcome panel says so and turns it off
+in one click, as does `pipsqueak autostart off`.
 
 There's a plugin too, if you'd rather drive the pet from inside a session:
 
@@ -189,12 +189,12 @@ There's a plugin too, if you'd rather drive the pet from inside a session:
 /plugin marketplace add tristanmuzzu/Pets-for-Claude-Code
 ```
 
-> macOS is untested. It builds and the bundle target exists, but nobody has run
-> it, and autostart there isn't implemented. A report either way is welcome.
+> macOS is untested. It builds and the bundle target exists, but I haven't run
+> it, and autostart isn't implemented there. A report either way is welcome.
 
 ### Building it yourself
 
-Both platforms, from a clone — the details are in
+Both platforms, from a clone. Prerequisites and the rest are in
 [building](docs/project/building.md):
 
 ```bash
@@ -208,9 +208,9 @@ first, refuses to run if it isn't valid JSON, and only ever removes entries whos
 command path contains `pipsqueak`.
 
 The Windows uninstaller takes the hooks with it. `apt remove`, `dnf remove` and
-a deleted AppImage do not — a package manager doesn't know about a file in your
-home directory — so on Linux run `pipsqueak uninstall` before removing the
-program. Leaving them behind costs a few milliseconds per hook and nothing
+a deleted AppImage do not, because a package manager doesn't know about a file
+in your home directory. So on Linux, run `pipsqueak uninstall` before you remove
+the program. Leaving them behind costs a few milliseconds per hook and nothing
 else, since a hook whose command is missing simply fails to run.
 
 The hooks are `async` and never write to stdout. That second part is
@@ -248,11 +248,11 @@ The whole thing is worthless if you can't trust one glance at it, so most of the
 work went into not claiming things:
 
 - **"Done" only when everything is done.** `Stop` fires whenever the assistant
-  yields the floor — including when it yields *because* it is waiting, with two
+  yields the floor, including when it yields *because* it is waiting, with two
   subagents still reviewing and a release pipeline it started still running. No
   hook fires when either of those finishes. So the card counts the work the turn
-  started — from the list Claude Code hands the `Stop` hook, corrected between
-  turns by the launches and completions in the transcript — and reads
+  started, taken from the list Claude Code hands the `Stop` hook and corrected
+  between turns by the launches and completions in the transcript. It reads
   **Finishing · 3 running** until the last one reports back. Green means
   finished, the way the sidebar's blue dot does.
 - **The counters belong to the turn, and stop when it does.** "18 actions · 3m"
