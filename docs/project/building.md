@@ -4,13 +4,33 @@
 
 ## Build
 
-Needs Node 20+, a Rust toolchain, and on Windows the MSVC C++ build tools.
+Needs Node 20+ and a Rust toolchain everywhere, plus the platform's own
+prerequisites.
+
+**Windows:** the MSVC C++ build tools.
+
+**Linux (Debian/Ubuntu):** Tauri is a GTK and WebKit application, and none of
+that is installed by default.
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+                 librsvg2-dev libxdo-dev libssl-dev build-essential \
+                 patchelf file
+```
+
+`libwebkit2gtk-4.1` specifically — Tauri v2 does not use the 4.0 series. Fedora
+wants `webkit2gtk4.1-devel`, `libappindicator-gtk3-devel`, `librsvg2-devel` and
+`libxdo-devel`. Then, on either:
 
 ```bash
 npm install
 npm run sprites
 npm run app:build
 ```
+
+That produces `.deb`, `.rpm` and `.AppImage` under
+`src-tauri/target/release/bundle/`, or the NSIS and MSI installers on Windows.
+`--bundles deb` and friends narrow it down when only one is wanted.
 
 `npm run app:dev` runs it with hot reload.
 
@@ -40,7 +60,14 @@ has.
 ```bash
 npm test                                   # the pure display logic and the pet manifests
 cargo test --manifest-path src-tauri/Cargo.toml
+npm run check:sprites                      # the atlases still match their generators
 ```
+
+`check:sprites` regenerates the atlases and compares them to the committed ones
+**by pixel**, then puts the committed bytes back. Not by file: a PNG ends in a
+deflate stream, and two zlib builds handed identical pixels emit different
+bytes for them, so a file comparison passes on whichever machine generated the
+atlas and fails on every other one.
 
 The JavaScript tests run under Node's own runner. No framework, no config
 file. `src/derive.js` holds every judgement about whether a card is telling the
@@ -59,9 +86,14 @@ against the release checklist below.
 2. `npm run verify:release` asserts all three agree, that the notes exist, and
    that the tag matches.
 3. `npm test && cargo test --manifest-path src-tauri/Cargo.toml`
-4. Push the tag. CI runs the same checks before it builds anything, then
-   produces a **draft** release.
-5. Work through the checklist, then publish the draft.
+4. Push the tag. `release` opens the draft, then builds Windows and Linux in
+   parallel, running the same tests, clippy and fmt gates on each before either
+   is allowed to bundle. The Linux job runs on **ubuntu-22.04** on purpose:
+   glibc is forward-compatible and not backward, so the runner's version is the
+   floor for everyone who downloads the result, and 22.04 is the oldest image
+   that still carries webkit2gtk-4.1.
+5. Work through the checklist, then publish the draft. Six assets: `.exe` and
+   `.msi` from Windows, `.deb`, `.rpm` and `.AppImage` from Linux.
 
 ### Release checklist
 
@@ -90,6 +122,18 @@ than assumed.
 - [ ] Start with Windows survives a reboot.
 - [ ] Dragging to a second monitor, then unplugging it, leaves the pet reachable.
 
-**macOS / Linux**
+**Linux**
+
+- [ ] The `.deb` installs and `pipsqueak` is on `PATH`.
+- [ ] The `.AppImage` runs from a fresh download, and the hook command it
+      registers in `~/.claude/settings.json` is the path of the AppImage file
+      itself — not a `/tmp/.mount_*` path, which is gone the moment it quits.
+- [ ] `~/.config/autostart/pipsqueak.desktop` appears on first run and the pet
+      is there after a log out and back in.
+- [ ] Clicks land on the cards and pass through everywhere else, on Wayland and
+      on X11.
+- [ ] The pet survives a display-scale change without shrinking.
+
+**macOS**
 
 - [ ] Builds at all. If there is no hardware to check on, say so in the notes.
