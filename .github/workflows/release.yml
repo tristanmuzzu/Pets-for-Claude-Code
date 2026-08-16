@@ -11,8 +11,17 @@ permissions:
 jobs:
   # Everything here fails in seconds. Doing it before the build means a
   # mismatched version number costs a coffee rather than a full toolchain run.
+  #
+  # It also opens the draft release, so the two builds have something that
+  # already exists to upload into. Letting each of them create-or-find the
+  # release by tag is the documented pattern and is a race: two runners
+  # starting within a second of each other can both decide the release is
+  # missing, and a tag that produces two drafts produces a Releases page where
+  # half the platforms are on the wrong one.
   check:
     runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.draft.outputs.id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,11 +30,62 @@ jobs:
       - name: Versions agree, and the release has notes
         run: node scripts/verify-release.mjs
 
+      # The notes are already written, in the file `verify-release.mjs` insists
+      # exists. Pointing at them from the release body meant everyone reading
+      # the Releases page got the sentence "See docs/releases/v0.7.3.md"
+      # instead of the release notes.
+      - name: Open the draft release, with the notes as its body
+        id: draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --draft \
+              --title "Pipsqueak $TAG" \
+              --notes-file "docs/releases/$TAG.md"
+          fi
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
   build:
     needs: check
-    runs-on: windows-latest
+    strategy:
+      # One platform failing should not deny the other its artifact. A release
+      # with a Windows installer and a visibly missing Linux one is a better
+      # thing to wake up to than a release with nothing.
+      fail-fast: false
+      matrix:
+        include:
+          # Not ubuntu-latest. glibc is forward-compatible and not backward, so
+          # the runner's version becomes the floor for everyone who downloads
+          # the result: building on 24.04 produces a binary that refuses to
+          # start on 22.04 with `GLIBC_2.38 not found`. 22.04 is the oldest
+          # image that still carries webkit2gtk-4.1, which Tauri v2 requires.
+          - platform: ubuntu-22.04
+            bundles: deb,appimage,rpm
+          - platform: windows-latest
+            bundles: nsis,msi
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      # Tauri on Linux is a GTK/WebKit app and none of that is on the runner.
+      # libayatana-appindicator3-dev is what the tray icon needs, and its
+      # absence is a link error rather than a tray that quietly does nothing.
+      - name: System libraries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            file
 
       - uses: actions/setup-node@v4
         with:
@@ -39,6 +99,9 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # Two platforms now share this workflow, and a cache keyed only by
+          # lockfile would have them overwrite each other's target directory.
+          key: ${{ matrix.platform }}
 
       - run: npm ci
 
@@ -55,35 +118,20 @@ jobs:
       # and did, at v0.7.2 — build a green release out of a commit whose `ci`
       # run was red. A release workflow that is weaker than the branch check is
       # a release workflow that ships the thing the branch check refused.
+      #
+      # Run on both platforms deliberately: most of this program is portable,
+      # but the parts that are not are exactly the parts a single-platform
+      # clippy run cannot see.
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       - name: Verify the sprite atlases are in sync with their generators
-        run: |
-          npm run sprites
-          git diff --exit-code public/pets
-
-      # The notes are already written, in the file `verify-release.mjs` insists
-      # exists. Pointing at them from the release body meant everyone reading
-      # the Releases page got the sentence "See docs/releases/v0.7.3.md"
-      # instead of the release notes.
-      - name: Take the release body from the notes
-        id: notes
-        shell: bash
-        run: |
-          {
-            echo 'body<<PIPSQUEAK_NOTES_EOF'
-            cat "docs/releases/${{ github.ref_name }}.md"
-            echo 'PIPSQUEAK_NOTES_EOF'
-          } >> "$GITHUB_OUTPUT"
+        run: npm run check:sprites
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Pipsqueak ${{ github.ref_name }}
-          releaseDraft: true
-          releaseBody: ${{ steps.notes.outputs.body }}
-          args: --bundles nsis,msi
+          releaseId: ${{ needs.check.outputs.release_id }}
+          args: --bundles ${{ matrix.bundles }}

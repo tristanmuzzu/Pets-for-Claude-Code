@@ -7,9 +7,33 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    # Both, because the interesting failures are the ones that only exist on
+    # one of them. Every Linux fix in this repository so far — the input shape,
+    # the compositor resizing the window, a path split on the wrong separator —
+    # compiled and passed perfectly well on Windows.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+
+      # Same list as the release workflow. Kept in step with it by hand, which
+      # is survivable for seven package names; a drift shows up as a link error
+      # on the next tag rather than silently.
+      - name: System libraries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf \
+            file
 
       - uses: actions/setup-node@v4
         with:
@@ -23,6 +47,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.platform }}
 
       - run: npm ci
 
@@ -39,8 +64,7 @@ jobs:
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       # The atlases are generated, so a hand-edited PNG would silently diverge
-      # from the code that is supposed to produce it.
-      - name: Sprites are reproducible
-        run: |
-          npm run sprites
-          git diff --exit-code public/pets
+      # from the code that is supposed to produce it. Compared by pixel rather
+      # than by file: a PNG ends in a deflate stream, and two zlib builds given
+      # the same pixels do not emit the same bytes for them.
+      - run: npm run check:sprites
