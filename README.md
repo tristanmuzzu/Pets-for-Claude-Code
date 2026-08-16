@@ -138,9 +138,11 @@ Keep the AppImage somewhere permanent before you run it. It registers *itself*
 as the hook program, so moving or deleting the file later leaves Claude Code
 calling a program that isn't there. `~/Applications` is a good home for it.
 
-Built on Ubuntu 22.04, so anything with glibc 2.35 or newer will run it. The
-packages pull in what they need; the AppImage expects GTK 3 and WebKitGTK 4.1,
-which any current desktop already has. If it refuses to start, install them:
+Built on Ubuntu 22.04. The highest symbol the binary actually asks for is
+`GLIBC_2.34`, so Ubuntu 22.04, Debian 12, Fedora 35 and anything newer are
+fine. The packages pull in what they need; the AppImage expects GTK 3 and
+WebKitGTK 4.1, which any current desktop already has. If it refuses to start,
+install them:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
