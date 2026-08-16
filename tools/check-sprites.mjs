@@ -47,6 +47,23 @@ for (const generator of GENERATORS) {
 
 const problems = []
 
+/**
+ * The manifest is text, so compare it as text — with the line endings taken
+ * out of the argument.
+ *
+ * Git on Windows checks these files out as CRLF; the generator writes `\n`.
+ * A byte comparison therefore failed on the Windows runner for three files
+ * whose content was identical, which is the same mistake as comparing the
+ * PNGs by file, wearing different clothes. The old `git diff --exit-code`
+ * never saw it because git normalises line endings back before diffing.
+ */
+const textDiff = (name, committedBytes, regeneratedBytes) => {
+  const text = (buf) => buf.toString('utf8').replace(/\r\n/g, '\n')
+  return text(committedBytes) === text(regeneratedBytes)
+    ? null
+    : `${name} differs from what the generators produce`
+}
+
 const pixelDiff = (name, committedBytes, regeneratedBytes) => {
   const a = decodePng(committedBytes)
   const b = decodePng(regeneratedBytes)
@@ -73,10 +90,8 @@ for (const pet of PETS) {
   const committed = before.get(pet)
   const regenerated = { png: readFileSync(atlas(pet)), json: readFileSync(manifest(pet)) }
 
-  // The manifest is JSON, so bytes are the right comparison there.
-  if (!committed.json.equals(regenerated.json)) {
-    problems.push(`${pet}/pet.json differs from what ${GENERATORS} produce`)
-  }
+  const manifestDifference = textDiff(`${pet}/pet.json`, committed.json, regenerated.json)
+  if (manifestDifference) problems.push(manifestDifference)
 
   const difference = pixelDiff(`${pet}/spritesheet.png`, committed.png, regenerated.png)
   if (difference) problems.push(difference)
