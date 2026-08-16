@@ -31,9 +31,10 @@ pub const EVENTS: &[&str] = &[
 const MARKER: &str = "pipsqueak";
 
 fn exe_path() -> Result<String, String> {
-    std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .map_err(|e| format!("cannot resolve own path: {e}"))
+    // Not `current_exe`: inside an AppImage that is a temporary mount which is
+    // unmounted on quit, and a hook command is a path Claude Code will run
+    // hours later. See `desktop::own_program`.
+    crate::desktop::own_program().map(|p| p.to_string_lossy().to_string())
 }
 
 fn read_settings() -> Result<(Value, bool, String), String> {

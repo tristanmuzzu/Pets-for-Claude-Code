@@ -58,7 +58,15 @@ pub fn start(app: AppHandle) -> Result<String, String> {
             platform::pump(&app);
             return;
         }
-        let _ = tx.send(Err("every candidate chord is already taken".to_string()));
+        // Two different failures wearing the same face. On Windows every
+        // chord really was taken by somebody else; elsewhere there is no
+        // registration to lose, and saying "already taken" would send a
+        // reader hunting for a program that is not there.
+        #[cfg(windows)]
+        let reason = "every candidate chord is already taken".to_string();
+        #[cfg(not(windows))]
+        let reason = "no global hotkey on this platform — bind `pipsqueak control toggle` in your desktop's keyboard settings".to_string();
+        let _ = tx.send(Err(reason));
     });
 
     // The thread answers as soon as it has tried the list; the timeout only
@@ -216,6 +224,14 @@ mod platform {
     }
 }
 
+/// No global hotkey outside Windows.
+///
+/// Not an oversight and not a missing crate: Wayland deliberately has no way
+/// for an ordinary client to claim a chord the compositor is not already
+/// routing to it, and the portal that is supposed to replace `RegisterHotKey`
+/// is not carried by every desktop. The honest answer is the one the tray menu
+/// and `pipsqueak control toggle` already give, and the caller says so rather
+/// than reporting a chord that would never fire.
 #[cfg(not(windows))]
 mod platform {
     use tauri::AppHandle;

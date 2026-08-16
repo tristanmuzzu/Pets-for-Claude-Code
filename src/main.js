@@ -762,8 +762,8 @@ function showNotice(message) {
 }
 
 // --- updates -------------------------------------------------------------
-const RELEASES_API = 'https://api.github.com/repos/tristanmuzzu/pipsqueak/releases/latest'
-const RELEASES_PAGE = 'https://github.com/tristanmuzzu/pipsqueak/releases'
+const RELEASES_API = 'https://api.github.com/repos/tristanmuzzu/Pets-for-Claude-Code/releases/latest'
+const RELEASES_PAGE = 'https://github.com/tristanmuzzu/Pets-for-Claude-Code/releases'
 /** Never at launch, and never at the same moment on every machine. */
 const FIRST_CHECK_MS = 2 * 60_000
 const FIRST_CHECK_JITTER_MS = 3 * 60_000
@@ -910,11 +910,15 @@ function autostartLine() {
   const row = document.createElement('div')
   const label = para('')
   row.append(label)
+  // Windows starts the program with the operating system; an XDG autostart
+  // entry starts it when the desktop session begins. The backend owns which
+  // sentence is true, and the fallback is the one that is true everywhere.
+  let atLogin = 'when you log in'
   const paint = (enabled) => {
     label.textContent = enabled
-      ? 'It starts with Windows, so it is there when you get back.'
-      : 'It does not start with Windows.'
-    button.textContent = enabled ? 'Do not start with Windows' : 'Start with Windows'
+      ? `It starts ${atLogin}, so it is there when you get back.`
+      : `It does not start ${atLogin}.`
+    button.textContent = enabled ? `Do not start ${atLogin}` : `Start ${atLogin}`
   }
   const button = action('', async () => {
     const enabled = await invoke('autostart_enabled').catch(() => false)
@@ -923,9 +927,13 @@ function autostartLine() {
     paint(!enabled)
   })
   row.append(button)
-  invoke('autostart_enabled')
-    .then(paint)
-    .catch(() => paint(false))
+  Promise.all([
+    invoke('at_login').catch(() => atLogin),
+    invoke('autostart_enabled').catch(() => false)
+  ]).then(([phrase, enabled]) => {
+    atLogin = phrase
+    paint(enabled)
+  })
   return row
 }
 
@@ -1059,6 +1067,7 @@ async function openMenu() {
   const pets = await invoke('list_pets').catch(() => [])
   const installed = await invoke('hooks_installed').catch(() => false)
   const autostart = await invoke('autostart_enabled').catch(() => false)
+  const atLogin = await invoke('at_login').catch(() => 'when you log in')
   const chord = await invoke('hotkey_binding').catch(() => '')
   const children = []
 
@@ -1224,7 +1233,7 @@ async function openMenu() {
     )
     children.push(
       button(
-        'Start with Windows',
+        `Start ${atLogin}`,
         async () => {
           const result = await invoke('set_autostart', { enabled: !autostart }).catch((e) =>
             String(e)
