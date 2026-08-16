@@ -10,7 +10,8 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <a href="https://github.com/tristanmuzzu/pipsqueak/releases"><img src="https://img.shields.io/badge/Windows-installer-0a7bbb" alt="Windows installer"></a>
+  <a href="https://github.com/tristanmuzzu/Pets-for-Claude-Code/releases/latest"><img src="https://img.shields.io/badge/Windows-installer-0a7bbb" alt="Windows installer"></a>
+  <a href="https://github.com/tristanmuzzu/Pets-for-Claude-Code/releases/latest"><img src="https://img.shields.io/badge/Linux-deb%20%C2%B7%20AppImage%20%C2%B7%20rpm-e95420" alt="Linux packages"></a>
   <a href="#how-it-actually-works"><img src="https://img.shields.io/badge/Claude%20Code-hooks-d97757" alt="Driven by Claude Code hooks"></a>
   <a href="#privacy"><img src="https://img.shields.io/badge/telemetry-none-2ea44f" alt="No telemetry"></a>
   <a href="#the-pets"><img src="https://img.shields.io/badge/pets-3%20built--in-b26efa" alt="Three pets built in"></a>
@@ -86,7 +87,8 @@ it says and thinks. The last one is the default and the one that feels alive.
 - **× dismisses too**, and closes a working card down to a one-line chip.
 - **`Ctrl+Alt+P`** shows and hides the whole thing from anywhere. If another
   program already owns that chord, Pipsqueak takes the next free one and tells
-  you which.
+  you which. (Windows only — on Linux, bind `pipsqueak control toggle` in your
+  desktop's keyboard settings. See [Install](#install).)
 
 ## More than one project
 
@@ -100,33 +102,114 @@ Anything that starts needing you takes the card back on its own.
 
 ## Install
 
-**Windows 10 or 11.** Download the installer from
-[Releases](https://github.com/tristanmuzzu/pipsqueak/releases) and run it. It
-needs the Edge WebView2 runtime, which ships with Windows 11 and installs itself
-if it's missing.
+Everything is on the
+[Releases page](https://github.com/tristanmuzzu/Pets-for-Claude-Code/releases/latest).
+Pick your platform; the rest of the setup is identical.
+
+### Windows 10 or 11
+
+Download **`Pipsqueak_<version>_x64-setup.exe`** and run it. It needs the Edge
+WebView2 runtime, which ships with Windows 11 and installs itself if it's
+missing. There's an `.msi` next to it if your organisation prefers one.
+
+### Linux (Ubuntu, Debian, Fedora, or anything else)
+
+The `.deb` is the one to take on Ubuntu and Debian. Download it, then:
+
+```bash
+sudo apt install ./Pipsqueak_*_amd64.deb
+```
+
+Fedora, RHEL and openSUSE take the `.rpm`:
+
+```bash
+sudo dnf install ./Pipsqueak-*.x86_64.rpm
+```
+
+Anywhere else — Arch, NixOS, a distribution whose package manager you'd rather
+not involve — take the **`.AppImage`**, which needs no install at all:
+
+```bash
+chmod +x Pipsqueak_*_amd64.AppImage
+./Pipsqueak_*_amd64.AppImage
+```
+
+Keep the AppImage somewhere permanent before you run it. It registers *itself*
+as the hook program, so moving or deleting the file later leaves Claude Code
+calling a program that isn't there. `~/Applications` is a good home for it.
+
+Built on Ubuntu 22.04, so anything with glibc 2.35 or newer will run it. The
+packages pull in what they need; the AppImage expects GTK 3 and WebKitGTK 4.1,
+which any current desktop already has. If it refuses to start, install them:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+```
+
+**Developed and tested on Wayland** (GNOME 50 / Ubuntu 26.04), which is the
+harder of the two: clicks land on the pet and pass through everywhere else
+because the overlay sets a real input shape and lets the compositor do the
+routing, rather than polling for a cursor position Wayland will not give it.
+That mechanism is X11's own, so X11 should be no worse — but nobody has sat in
+front of it, and this README does not claim things nobody has checked.
+
+Two things are missing on Linux, and they are limits rather than bugs:
+
+- **The pet doesn't follow your cursor with its eyes.** A Wayland client is not
+  allowed to know where the pointer is unless it is over the window, and a
+  click-through window never is. Everything else about the pet is the same.
+- **No global hotkey.** `Ctrl+Alt+P` is a Windows registration, and Wayland has
+  no equivalent a normal application can make. The tray icon does the same job,
+  and one line in your desktop's own keyboard settings does it properly —
+  bind a custom shortcut to:
+
+  ```bash
+  pipsqueak control toggle
+  ```
+
+  which works whether or not the pet is already running. On GNOME that's
+  Settings → Keyboard → View and Customise Shortcuts → Custom Shortcuts.
+
+### Then, on both
 
 On first launch a panel offers to register the Claude Code hooks. That's the only
 step that touches your config, and it says exactly what it edits. Then restart
 Claude Code, because it reads its hooks at startup. That's the whole setup.
 
-It also registers itself to start with Windows, because a status overlay that
-doesn't survive a reboot isn't one. The welcome panel says so and turns it off
-in one click, as does `pipsqueak autostart off`.
+It also registers itself to start with the machine, because a status overlay
+that doesn't survive a reboot isn't one — the Run key on Windows, an XDG
+autostart entry on Linux. The welcome panel says so and turns it off in one
+click, as does `pipsqueak autostart off`.
 
 There's a plugin too, if you'd rather drive the pet from inside a session:
 
 ```bash
-/plugin marketplace add tristanmuzzu/pipsqueak
+/plugin marketplace add tristanmuzzu/Pets-for-Claude-Code
 ```
 
-> macOS and Linux are untested. The code is portable and the bundle targets
-> exist, so if you build it there, a report either way is welcome.
+> macOS is untested. It builds and the bundle target exists, but nobody has run
+> it, and autostart there isn't implemented. A report either way is welcome.
+
+### Building it yourself
+
+Both platforms, from a clone — the details are in
+[building](docs/project/building.md):
+
+```bash
+npm install && npm run app:build
+```
 
 ### What it does to your settings
 
 `~/.claude/settings.json` is usually hand-tuned, so the installer copies it
 first, refuses to run if it isn't valid JSON, and only ever removes entries whose
-command path contains `pipsqueak`. Uninstalling takes the hooks with it.
+command path contains `pipsqueak`.
+
+The Windows uninstaller takes the hooks with it. `apt remove`, `dnf remove` and
+a deleted AppImage do not — a package manager doesn't know about a file in your
+home directory — so on Linux run `pipsqueak uninstall` before removing the
+program. Leaving them behind costs a few milliseconds per hook and nothing
+else, since a hook whose command is missing simply fails to run.
 
 The hooks are `async` and never write to stdout. That second part is
 load-bearing: a hook that prints on `PermissionRequest` can approve or deny the

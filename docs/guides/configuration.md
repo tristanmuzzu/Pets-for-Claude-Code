@@ -22,7 +22,7 @@ parsed at all is moved to `config.json.bak` rather than overwritten.
 | `update_check` | ask GitHub about new releases (off by default) |
 | `update_dismissed` | a version you have already been told about |
 | `welcomed` | whether the first-run panel has been dismissed |
-| `autostart_initialised` | whether the start-with-Windows decision has been made; managed for you |
+| `autostart_initialised` | whether the start-with-the-machine decision has been made; managed for you |
 | `x` / `y` | window position, saved when you drag the pet |
 
 A config written by a newer version of Pipsqueak is read but never written back
@@ -32,7 +32,8 @@ about.
 ## Keyboard shortcut
 
 `Ctrl+Alt+P` shows and hides the pet from anywhere, so you never have to go
-looking for the tray icon.
+looking for the tray icon. **Windows only** — see [On Linux](#on-linux) below
+for the equivalent.
 
 If pressing it appears to do nothing, open **Check my setup**. The keyboard
 shortcut row says which chord registered and how many times it has actually
@@ -54,6 +55,26 @@ and `Win` plus a letter, digit or function key works. A chord with no modifier
 is refused, since it would take that key away from everything else on the
 machine.
 
+### On Linux
+
+There is no global hotkey, and this is a limit rather than a missing feature.
+Wayland has no way for an ordinary application to claim a chord the compositor
+is not already routing to it — that is the point of the design — and the portal
+meant to replace it is not carried by every desktop. `hotkey` in `config.json`
+is ignored, and the log says so at startup rather than reporting a chord that
+would never fire.
+
+The desktop's own keyboard settings do the job properly. Bind a custom shortcut
+to:
+
+```bash
+pipsqueak control toggle
+```
+
+which starts the overlay if it is not running, so it is the only command the
+shortcut needs. On GNOME: Settings → Keyboard → View and Customise Shortcuts →
+Custom Shortcuts.
+
 ## When it stops behaving
 
 `~/.pipsqueak/log.txt` records what the overlay did: when it started and from
@@ -74,10 +95,13 @@ overlay** in the tray menu forces one on demand.
 
 ## After a reboot
 
-Pipsqueak registers itself to start with Windows on its first run, because an
-overlay that is not running is indistinguishable from one that is broken —
+Pipsqueak registers itself to start with the machine on its first run, because
+an overlay that is not running is indistinguishable from one that is broken —
 and the shortcut that would bring it back belongs to the process that is not
-there. **Check my setup** has a row for it, and:
+there. On Windows that is a value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it is
+`~/.config/autostart/pipsqueak.desktop`, which every XDG-compliant desktop
+reads at login. Either way **Check my setup** has a row for it, and:
 
 ```bash
 pipsqueak autostart status   # also: on, off
@@ -89,9 +113,17 @@ pointing at the old path is present, plausible, and starts nothing.
 
 If the pet is running but Claude Code events never arrive, the program may have
 been removed from disk while it was still running. Windows keeps a deleted
-program running, so it looks healthy while every hook points at a path that no
+program running, and Unix keeps the inode alive for anything that has the file
+open, so on both it looks healthy while every hook points at a path that no
 longer exists. The overlay checks for this and says so, and **Check my setup**
 reports it under "Hook program".
+
+Running from an **AppImage** is the easy way to reach that state: moving or
+deleting the file after the hooks are registered leaves Claude Code calling
+something that is not there. The registered command is the `.AppImage` itself
+rather than the temporary mount it runs from, so keeping it in one place is
+enough; if it has already moved, run `pipsqueak install` from the new location
+to point the hooks at it.
 
 ## CLI
 
@@ -99,7 +131,7 @@ reports it under "Hook program".
 pipsqueak                 # run the overlay
 pipsqueak control on      # show it, starting it if needed (also: off, toggle, quit, status)
 pipsqueak control byte    # switch pet
-pipsqueak autostart on    # start with Windows (also: off, status)
+pipsqueak autostart on    # start with the machine (also: off, status)
 pipsqueak sessions        # what the overlay would draw right now, as JSON
 pipsqueak install         # register the Claude Code hooks
 pipsqueak uninstall       # remove them (backs up settings.json first)
@@ -124,7 +156,7 @@ On Windows the binary is a GUI-subsystem app, so CLI output is also written to
 There is a small plugin so you never have to open a terminal:
 
 ```bash
-/plugin marketplace add tristanmuzzu/pipsqueak
+/plugin marketplace add tristanmuzzu/Pets-for-Claude-Code
 ```
 
 ```bash
@@ -149,6 +181,13 @@ overlay first if it isn't up.
 ## Uninstalling
 
 1. Right-click the pet → **Quit**.
-2. Uninstall the app. The uninstaller removes the hooks for you; `pipsqueak
-   uninstall` does the same thing by hand.
-3. Delete `~/.pipsqueak` if you want the config gone too.
+2. Run `pipsqueak uninstall`, which removes the hooks and backs up
+   `settings.json` first. On Windows the uninstaller does this for you; a `.deb`
+   or `.rpm` removal and a deleted AppImage do not, so run it before the program
+   is gone.
+3. Remove the app: **Add or remove programs** on Windows,
+   `sudo apt remove pipsqueak` or `sudo dnf remove Pipsqueak` for the packages,
+   or delete the `.AppImage`.
+4. Delete `~/.pipsqueak` if you want the config gone too, and
+   `~/.config/autostart/pipsqueak.desktop` if `pipsqueak autostart off` was
+   never run.
