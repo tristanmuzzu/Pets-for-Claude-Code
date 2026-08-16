@@ -109,7 +109,7 @@ fn send(action: &str) -> Result<(), String> {
 /// Starts the overlay detached. The binary is a GUI-subsystem app, so this
 /// never flashes a console window.
 fn launch() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = crate::desktop::own_program()?;
     crate::desktop::quiet_command(&exe)
         .spawn()
         .map(|_| ())

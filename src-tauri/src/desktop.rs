@@ -3,6 +3,32 @@
 //!
 //! Dependency-free on purpose: a handful of `user32` calls and the `reg`
 //! command are cheaper than pulling a Windows crate graph into an 8 MB app.
+//! The Linux side is the same bargain — an XDG autostart entry is a text file,
+//! and writing it costs nothing that a crate would save.
+
+/// Where this program lives from the point of view of anything that has to
+/// launch it later.
+///
+/// Not always `current_exe()`. An AppImage is a self-mounting archive: the
+/// running binary is `/tmp/.mount_PipsqXXXXXX/usr/bin/pipsqueak`, and that
+/// mount is gone the moment the app exits. Registering *that* as the hook
+/// command produces a setup where every light is green until the first quit,
+/// after which Claude Code spawns a path that no longer exists and the pet
+/// never sees another event. The launcher exports `APPIMAGE` with the path of
+/// the `.AppImage` file itself, which is the thing that actually persists.
+pub fn own_program() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    if let Some(bundle) = std::env::var_os("APPIMAGE") {
+        let path = std::path::PathBuf::from(bundle);
+        // A relative or empty value would be worse than no value at all: it
+        // resolves against whatever directory the launching process happened
+        // to be in.
+        if path.is_absolute() {
+            return Ok(path);
+        }
+    }
+    std::env::current_exe().map_err(|e| format!("cannot resolve own path: {e}"))
+}
 
 /// Builds a `Command` that never flashes a console window.
 ///
@@ -10,6 +36,9 @@
 /// rectangle on screen for a frame, which is the one thing a quiet desktop
 /// overlay must not do.
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    // Nothing to set anywhere else, so the binding is only ever mutated on
+    // Windows. Elsewhere this is `Command::new` with a comment.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut command = std::process::Command::new(program);
     #[cfg(windows)]
     {
@@ -66,6 +95,32 @@ pub fn alert() {
     }
 }
 
+/// What "start with the machine" is called where the user can see it.
+///
+/// The mechanism differs, and so does the honest sentence: Windows starts the
+/// program with the operating system, an XDG autostart entry starts it when
+/// the desktop session begins.
+pub const AT_LOGIN: &str = if cfg!(windows) {
+    "with Windows"
+} else {
+    "when you log in"
+};
+
+/// Are these two path strings the same program?
+///
+/// Windows: case and slash direction do not make two programs. Elsewhere they
+/// do — `/opt/Pipsqueak` and `/opt/pipsqueak` are two different files on a
+/// case-sensitive filesystem, and folding them would report a stale autostart
+/// entry as healthy.
+pub fn same_program(a: &str, b: &str) -> bool {
+    let trim = |p: &str| p.trim().trim_matches('"').to_string();
+    #[cfg(windows)]
+    let normalise = |p: &str| trim(p).replace('/', "\\").to_lowercase();
+    #[cfg(not(windows))]
+    let normalise = trim;
+    normalise(a) == normalise(b)
+}
+
 pub fn autostart_enabled() -> bool {
     autostart_command().is_some()
 }
@@ -97,19 +152,68 @@ pub fn autostart_command() -> Option<String> {
             .to_string();
         (!value.is_empty()).then_some(value)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let raw = std::fs::read_to_string(autostart_entry()).ok()?;
+        // A desktop entry can be disabled without being deleted, and something
+        // that will not launch is not autostart however present the file is.
+        if raw.lines().any(|line| {
+            line.trim()
+                .eq_ignore_ascii_case("X-GNOME-Autostart-enabled=false")
+        }) {
+            return None;
+        }
+        let exec = raw
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Exec="))?
+            .trim();
+        let command = unquote_exec(exec);
+        (!command.is_empty()).then_some(command)
+    }
+    #[cfg(target_os = "macos")]
     {
         None
     }
 }
 
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let entry = autostart_entry();
+        if !enabled {
+            return match std::fs::remove_file(&entry) {
+                Ok(()) => Ok(()),
+                // Already absent is the state that was asked for.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(format!("cannot remove {}: {err}", entry.display())),
+            };
+        }
+        let exe = own_program()?;
+        if let Some(dir) = entry.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        // Terminal=false and NoDisplay=true keep it out of the applications
+        // menu: this file exists to start the overlay at login, and a second
+        // copy of Pipsqueak in the launcher grid is not a feature.
+        let entry_text = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Pipsqueak\n\
+             Comment=Desktop pet for Claude Code\n\
+             Exec={}\n\
+             Icon=pipsqueak\n\
+             Terminal=false\n\
+             NoDisplay=true\n\
+             X-GNOME-Autostart-enabled=true\n",
+            quote_exec(&exe.to_string_lossy())
+        );
+        crate::state::write_atomic(&entry, entry_text.as_bytes())
+            .map_err(|e| format!("cannot write {}: {e}", entry.display()))
+    }
     #[cfg(windows)]
     {
-        let exe = std::env::current_exe()
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .to_string();
+        let exe = own_program()?.to_string_lossy().to_string();
         let status = if enabled {
             quiet_command("reg")
                 .args([
@@ -135,11 +239,59 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
             Err(err) => Err(err.to_string()),
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
         let _ = enabled;
-        Err("autostart is only implemented on Windows so far".to_string())
+        Err("autostart is not implemented on macOS yet".to_string())
     }
+}
+
+/// The XDG autostart entry: every desktop that implements the spec reads this
+/// folder at login, so one file covers GNOME, KDE, XFCE and the rest.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn autostart_entry() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| crate::state::home_dir().join(".config"));
+    base.join("autostart").join("pipsqueak.desktop")
+}
+
+/// Quotes a program path for a desktop entry's `Exec=` key.
+///
+/// The spec reserves a small pile of characters, and an unquoted path
+/// containing any of them is not merely wrong, it is a different command. An
+/// AppImage in `~/Downloads/My Apps/` is the ordinary case.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn quote_exec(path: &str) -> String {
+    let needs_quoting = path.chars().any(|c| " \t\n\"'\\><~|&;$*?#()`".contains(c));
+    if !needs_quoting {
+        return path.to_string();
+    }
+    let escaped = path.replace('\\', r"\\").replace('"', r#"\""#);
+    format!("\"{escaped}\"")
+}
+
+/// The inverse, tolerant of an entry somebody wrote by hand.
+///
+/// Only the program is wanted, so anything after it is dropped — including the
+/// `%f`-style field codes the spec allows.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unquote_exec(exec: &str) -> String {
+    let exec = exec.trim();
+    if let Some(rest) = exec.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => break,
+                _ => out.push(c),
+            }
+        }
+        return out;
+    }
+    exec.split_whitespace().next().unwrap_or("").to_string()
 }
 
 #[cfg(windows)]
@@ -266,5 +418,38 @@ mod windows_impl {
             }
             SetForegroundWindow(search.best) != 0
         }
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod tests {
+    use super::{quote_exec, unquote_exec};
+
+    #[test]
+    fn a_plain_path_is_left_alone() {
+        assert_eq!(quote_exec("/usr/bin/pipsqueak"), "/usr/bin/pipsqueak");
+    }
+
+    #[test]
+    fn a_path_with_a_space_survives_the_round_trip() {
+        let path = "/home/me/My Apps/Pipsqueak_0.7.4_amd64.AppImage";
+        assert_eq!(unquote_exec(&quote_exec(path)), path);
+    }
+
+    #[test]
+    fn quotes_and_backslashes_survive_too() {
+        let path = r#"/home/me/it's "here"/pip\squeak"#;
+        assert_eq!(unquote_exec(&quote_exec(path)), path);
+    }
+
+    /// The point of reading `Exec=` at all is to compare it with our own path,
+    /// so a trailing field code must not end up part of the program.
+    #[test]
+    fn field_codes_are_not_part_of_the_program() {
+        assert_eq!(unquote_exec("/usr/bin/pipsqueak %U"), "/usr/bin/pipsqueak");
+        assert_eq!(
+            unquote_exec(r#""/usr/bin/pip squeak" %U"#),
+            "/usr/bin/pip squeak"
+        );
     }
 }

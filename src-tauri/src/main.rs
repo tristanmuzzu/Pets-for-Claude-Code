@@ -25,7 +25,7 @@ Pipsqueak, a desktop pet that shows what Claude Code is doing.
 USAGE:
   pipsqueak                 Run the overlay (default)
   pipsqueak control <what>  on | off | toggle | quit | status | <pet name>
-  pipsqueak autostart <on>  on | off | status: start with Windows
+  pipsqueak autostart <on>  on | off | status: start with the machine
   pipsqueak sessions        Print what the overlay would show right now, as JSON
   pipsqueak install         Register Claude Code hooks in ~/.claude/settings.json
   pipsqueak uninstall       Remove them again
@@ -78,21 +78,21 @@ fn sessions() -> Result<String, String> {
 fn autostart(what: Option<&str>) -> Result<String, String> {
     match what.unwrap_or("status") {
         "status" | "" => Ok(match desktop::autostart_command() {
-            Some(exe) => format!("Starts with Windows, running {exe}"),
-            None => "Does not start with Windows.".to_string(),
+            Some(exe) => format!("Starts {}, running {exe}", desktop::AT_LOGIN),
+            None => format!("Does not start {}.", desktop::AT_LOGIN),
         }),
         "on" | "enable" | "yes" => {
             // Record the decision so the first-run default cannot undo it.
             let mut config = state::load_config();
             config.autostart_initialised = true;
             let _ = state::save_config(&config);
-            desktop::set_autostart(true).map(|()| "Will start with Windows.".to_string())
+            desktop::set_autostart(true).map(|()| format!("Will start {}.", desktop::AT_LOGIN))
         }
         "off" | "disable" | "no" => {
             let mut config = state::load_config();
             config.autostart_initialised = true;
             let _ = state::save_config(&config);
-            desktop::set_autostart(false).map(|()| "Will not start with Windows.".to_string())
+            desktop::set_autostart(false).map(|()| format!("Will not start {}.", desktop::AT_LOGIN))
         }
         other => Err(format!("unknown autostart option: {other}")),
     }

@@ -28,17 +28,27 @@ const POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// the first one has to be quick, and only while the cursor is right there.
 /// Polling this fast all the time would keep a core busy for an overlay you
 /// are not even pointing at.
+///
+/// All of this is compiled out on Linux, where the cursor is not knowable and
+/// `spawn_hit_test` does nothing (see there).
+#[cfg(not(target_os = "linux"))]
 const HIT_TEST_NEAR: Duration = Duration::from_millis(12);
+#[cfg(not(target_os = "linux"))]
 const HIT_TEST_APPROACHING: Duration = Duration::from_millis(50);
+#[cfg(not(target_os = "linux"))]
 const HIT_TEST_FAR: Duration = Duration::from_millis(220);
 /// Roughly a card's own height: far enough out that a fast flick is caught
 /// before it lands.
+#[cfg(not(target_os = "linux"))]
 const NEAR_PX: f64 = 90.0;
+#[cfg(not(target_os = "linux"))]
 const APPROACHING_PX: f64 = 320.0;
 /// How far outside the window a cursor is still worth telling the pet about,
 /// and how often to say so. A pet that can look at things wants this often
 /// enough to track a moving cursor and rarely enough to be free.
+#[cfg(not(target_os = "linux"))]
 const LOOK_RADIUS_PX: f64 = 420.0;
+#[cfg(not(target_os = "linux"))]
 const LOOK_INTERVAL: Duration = Duration::from_millis(60);
 /// Often enough that a crashed session disappears while you are still looking
 /// at the card, rare enough that it costs nothing.
@@ -74,6 +84,10 @@ pub struct Rect {
     pub h: f64,
 }
 
+/// Only the hit-test loop asks a rectangle anything, and that loop does not
+/// exist on Linux. The type itself still does: it is what the frontend reports
+/// its clickable regions in, on every platform.
+#[cfg(not(target_os = "linux"))]
 impl Rect {
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
@@ -493,6 +507,16 @@ fn autostart_enabled() -> bool {
     desktop::autostart_enabled()
 }
 
+/// The platform's own words for starting with the machine.
+///
+/// The panel used to say "Start with Windows" on every platform, which on
+/// Linux is both wrong and the kind of wrong that tells a reader the Linux
+/// build was an afterthought.
+#[tauri::command]
+fn at_login() -> &'static str {
+    desktop::AT_LOGIN
+}
+
 #[tauri::command]
 fn set_autostart(enabled: bool) -> Result<(), String> {
     // Turning it off is a decision, and `ensure_autostart` must not helpfully
@@ -835,11 +859,11 @@ fn spawn_hit_test(app: AppHandle) {
     // shape that actually works there. The cost is that the pet does not follow
     // the cursor with its eyes on Linux; the alternative is a pet nobody can
     // click.
+    // No `return` here: on Linux the block below is compiled out, so this is
+    // already the end of the function, and clippy is right that returning from
+    // it is noise.
     #[cfg(target_os = "linux")]
-    {
-        let _ = app;
-        return;
-    }
+    let _ = app;
     #[cfg(not(target_os = "linux"))]
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
@@ -1002,14 +1026,14 @@ fn spawn_poller(app: AppHandle) {
 /// 2. The entry pointed at a path the program no longer lives at, after an
 ///    install to a different location. Present, plausible, and inert.
 fn ensure_autostart(config: &Config) {
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = desktop::own_program() else {
         return;
     };
     let exe = exe.to_string_lossy().to_string();
     match desktop::autostart_command() {
         // Registered, but for a program that is not this one. Rewrite it: a
         // stale entry silently stops the pet coming back after a reboot.
-        Some(registered) if !same_program(&registered, &exe) => {
+        Some(registered) if !desktop::same_program(&registered, &exe) => {
             log::write(&format!(
                 "autostart pointed at {registered}, correcting it to {exe}"
             ));
@@ -1027,28 +1051,28 @@ fn ensure_autostart(config: &Config) {
             // not retried on every launch forever.
             let _ = state::save_config(&stored);
             match desktop::set_autostart(true) {
-                Ok(()) => log::write("first run: registered to start with Windows"),
+                Ok(()) => log::write(&format!(
+                    "first run: registered to start {}",
+                    desktop::AT_LOGIN
+                )),
                 Err(err) => log::write(&format!("could not register autostart: {err}")),
             }
         }
     }
 }
 
-/// Windows path comparison: case and slash direction do not make two programs.
-fn same_program(a: &str, b: &str) -> bool {
-    let normalise = |p: &str| p.trim().trim_matches('"').replace('/', "\\").to_lowercase();
-    normalise(a) == normalise(b)
-}
-
 /// Notices that the program has been deleted out from under itself.
 ///
 /// Windows keeps a running image mapped after its file is gone, so the overlay
 /// carries on looking healthy while every hook Claude Code fires is pointing
-/// at a path that no longer exists. Nothing recovers from this on its own, and
-/// the only honest thing to do is say so once, loudly, and keep the record.
+/// at a path that no longer exists. Unix does the same by keeping the inode
+/// alive for the open file, and an AppImage moved or deleted while running is
+/// the ordinary way to reach that state there. Nothing recovers from this on
+/// its own, and the only honest thing to do is say so once, loudly, and keep
+/// the record.
 fn check_own_binary(app: &AppHandle) {
     static REPORTED: AtomicBool = AtomicBool::new(false);
-    let Ok(exe) = std::env::current_exe() else {
+    let Ok(exe) = desktop::own_program() else {
         return;
     };
     if exe.exists() {
@@ -1397,6 +1421,7 @@ pub fn run() {
             clear_attention,
             hotkey_binding,
             autostart_enabled,
+            at_login,
             set_autostart,
             quit,
             hide_window,
@@ -1433,7 +1458,7 @@ pub fn run() {
                 "started {} pid {} from {}",
                 env!("CARGO_PKG_VERSION"),
                 std::process::id(),
-                std::env::current_exe()
+                desktop::own_program()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| "an unknown path".into())
             ));

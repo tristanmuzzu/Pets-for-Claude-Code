@@ -154,7 +154,7 @@ fn hooks_check() -> Check {
 }
 
 fn binary_check() -> Check {
-    let Ok(current) = std::env::current_exe() else {
+    let Ok(current) = crate::desktop::own_program() else {
         return warn(
             "binary",
             "Hook program",
@@ -307,12 +307,15 @@ fn fired_summary() -> String {
 /// where somebody looks for the answer. A setup that will lose the pet at the
 /// next restart used to pass with every light green.
 fn autostart_check() -> Check {
-    let current = std::env::current_exe().unwrap_or_default();
+    let current = crate::desktop::own_program().unwrap_or_default();
     match crate::desktop::autostart_command() {
         None => warn(
             "autostart",
             "After a reboot",
-            "Will not start with Windows. Turn it back on from the menu, or run `pipsqueak autostart on`.".into(),
+            format!(
+                "Will not start {}. Turn it back on from the menu, or run `pipsqueak autostart on`.",
+                crate::desktop::AT_LOGIN
+            ),
         ),
         Some(registered) => {
             let same = std::path::Path::new(&registered)
@@ -321,15 +324,13 @@ fn autostart_check() -> Check {
                 .zip(current.canonicalize().ok())
                 .map(|(a, b)| a == b)
                 .unwrap_or_else(|| {
-                    registered
-                        .replace('/', "\\")
-                        .eq_ignore_ascii_case(&current.to_string_lossy().replace('/', "\\"))
+                    crate::desktop::same_program(&registered, &current.to_string_lossy())
                 });
             if same {
                 ok(
                     "autostart",
                     "After a reboot",
-                    "Starts with Windows.".into(),
+                    format!("Starts {}.", crate::desktop::AT_LOGIN),
                 )
             } else {
                 warn(
