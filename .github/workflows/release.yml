@@ -40,13 +40,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
+          # Not /releases/tags/<tag>: that endpoint resolves a *tag*, and a
+          # draft release has no tag attached to it until it is published — its
+          # URL is literally `untagged-<hash>`. Asking for one 404s, which is
+          # how v0.8.0's first attempt died. The list endpoint does report the
+          # tag_name a draft is going to get, so match on that.
+          find_id() {
+            gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | head -n 1
+          }
+          id=$(find_id)
+          if [ -z "$id" ]; then
             gh release create "$TAG" \
               --draft \
               --title "Pipsqueak $TAG" \
               --notes-file "docs/releases/$TAG.md"
+            id=$(find_id)
           fi
-          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq .id)
+          if [ -z "$id" ]; then
+            echo "no release for ${TAG} after trying to create one" >&2
+            exit 1
+          fi
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   build:
