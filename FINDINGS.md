@@ -282,19 +282,22 @@ focused window, which is the one thing it should never be.
   focus on map and ignores its saved position. Not a regression and not
   fixable from the client side (xdg-shell has no way to refuse keyboard focus);
   the README now says so and says to use `GDK_BACKEND=x11`.
+- **L-3** `app.rs:1033`, `desktop.rs:124` — found while testing L-1, three
+  times over: `ensure_autostart` rewrote the XDG entry whenever its `Exec` was
+  not literally this binary, and "not this binary" is not "dead". An entry that
+  launches the pet through a wrapper script — to set the `GDK_BACKEND=x11` L-2
+  needs, or to wait for the shell's tray support — was replaced by a bare path
+  on every single start, silently undoing both, and the doctor told the owner
+  of that entry to reinstall and finish the job. FIXED — an entry is corrected
+  only when the program it names is gone (`program_is_present`: a file that
+  exists and can be executed, a bare name resolved against `PATH`), and the
+  doctor says the entry is being left alone rather than advising a reinstall.
+  Verified on both branches: a wrapper entry came through a start byte for byte
+  identical, and an entry pointing at a path that does not exist was still
+  corrected.
 
 ## Parked (recorded, not fixed — reasons given)
 
-- **L-3 (autostart correction overwrites a hand-written entry)** `app.rs:1028`
-  — `ensure_autostart` rewrites the XDG entry whenever its `Exec` is not
-  literally this binary, and `same_program` is a string compare. An entry that
-  launches the pet through a wrapper script (to set `GDK_BACKEND=x11`, or to
-  wait for the shell's tray support) is therefore replaced by a bare path on
-  the next start, silently undoing both. Seen twice on 2026-08-16 while testing
-  a local build. The rewrite is right for a stale path and wrong for a working
-  one, so the fix is to leave an entry alone while the program it names still
-  exists and is executable — needs a decision about what "still ours" means for
-  a wrapper.
 - **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,
   `state.rs:477` — `FileLock::acquire` gives up after ~200ms and writes
   unlocked, and it will steal a lock older than 2s from a holder that is still

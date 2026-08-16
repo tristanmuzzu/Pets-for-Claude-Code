@@ -121,6 +121,53 @@ pub fn same_program(a: &str, b: &str) -> bool {
     normalise(a) == normalise(b)
 }
 
+/// Is there a program at the other end of this command?
+///
+/// The difference between an autostart entry worth correcting and one worth
+/// leaving alone. A stale entry names a path the app was installed to two
+/// versions ago and starts nothing; an entry that launches the pet through a
+/// wrapper script also names something that is not this binary, and works.
+/// Rewriting the second kind throws away whatever the wrapper existed to do —
+/// on the machine this was found on, the `GDK_BACKEND=x11` without which the
+/// pet is not on top of anything (2026-08-16).
+///
+/// A bare name is resolved against `PATH`, because `Exec=pipsqueak` is a legal
+/// entry and calling it missing would delete somebody's working setup.
+pub fn program_is_present(command: &str) -> bool {
+    let command = command.trim().trim_matches('"');
+    if command.is_empty() {
+        return false;
+    }
+    let path = std::path::Path::new(command);
+    if path.components().count() > 1 || path.is_absolute() {
+        return is_runnable(path);
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| is_runnable(&dir.join(command)))
+}
+
+fn is_runnable(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    // A file nobody may execute cannot start the pet, and on Windows the
+    // question does not arise: being there is the whole test.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 pub fn autostart_enabled() -> bool {
     autostart_command().is_some()
 }
@@ -423,7 +470,43 @@ mod windows_impl {
 
 #[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
-    use super::{quote_exec, unquote_exec};
+    use super::{program_is_present, quote_exec, unquote_exec};
+
+    #[test]
+    fn a_path_that_is_not_there_is_not_a_program() {
+        assert!(!program_is_present(
+            "/nonexistent/pipsqueak-from-two-versions-ago"
+        ));
+        assert!(!program_is_present(""));
+    }
+
+    /// The wrapper case, which is the whole point: something that is not this
+    /// binary, exists, and must survive the next start.
+    #[test]
+    fn an_executable_that_is_there_is_a_program() {
+        assert!(program_is_present("/bin/sh"));
+    }
+
+    /// A directory and a file nobody can run are both present and neither can
+    /// start anything.
+    #[test]
+    fn present_is_not_enough() {
+        let dir = std::env::temp_dir();
+        assert!(!program_is_present(&dir.to_string_lossy()));
+
+        let plain = dir.join("pipsqueak-not-executable-test");
+        std::fs::write(&plain, b"not a program").unwrap();
+        assert!(!program_is_present(&plain.to_string_lossy()));
+        let _ = std::fs::remove_file(&plain);
+    }
+
+    /// `Exec=pipsqueak` is a legal entry, so a bare name is looked for on PATH
+    /// rather than called missing.
+    #[test]
+    fn a_bare_name_is_resolved_against_path() {
+        assert!(program_is_present("sh"));
+        assert!(!program_is_present("pipsqueak-that-nobody-installed"));
+    }
 
     #[test]
     fn a_plain_path_is_left_alone() {

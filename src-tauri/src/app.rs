@@ -1025,19 +1025,33 @@ fn spawn_poller(app: AppHandle) {
 ///    The first run now registers it and says so; turning it off keeps it off.
 /// 2. The entry pointed at a path the program no longer lives at, after an
 ///    install to a different location. Present, plausible, and inert.
+///
+/// "Not this binary" is not the same question as "dead", which is the mistake
+/// this used to make: it rewrote an entry that launched the pet through a
+/// wrapper script, on every single start, and each rewrite lost the
+/// environment the wrapper set.
 fn ensure_autostart(config: &Config) {
     let Ok(exe) = desktop::own_program() else {
         return;
     };
     let exe = exe.to_string_lossy().to_string();
     match desktop::autostart_command() {
-        // Registered, but for a program that is not this one. Rewrite it: a
-        // stale entry silently stops the pet coming back after a reboot.
+        // Registered, but for a program that is not this one. Only worth
+        // rewriting if what it names has gone away: a stale entry silently
+        // stops the pet coming back after a reboot, while an entry that starts
+        // the pet through a wrapper is somebody's deliberate setup and taking
+        // it over deletes whatever the wrapper was for.
         Some(registered) if !desktop::same_program(&registered, &exe) => {
-            log::write(&format!(
-                "autostart pointed at {registered}, correcting it to {exe}"
-            ));
-            let _ = desktop::set_autostart(true);
+            if desktop::program_is_present(&registered) {
+                log::write(&format!(
+                    "autostart starts {registered}, which is not this program but does exist — left alone"
+                ));
+            } else {
+                log::write(&format!(
+                    "autostart pointed at {registered}, which is not there any more; correcting it to {exe}"
+                ));
+                let _ = desktop::set_autostart(true);
+            }
         }
         Some(_) => {}
         None => {

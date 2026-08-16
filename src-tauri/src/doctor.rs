@@ -332,11 +332,25 @@ fn autostart_check() -> Check {
                     "After a reboot",
                     format!("Starts {}.", crate::desktop::AT_LOGIN),
                 )
+            } else if crate::desktop::program_is_present(&registered) {
+                // Left alone on purpose: this is what a wrapper script looks
+                // like from here, and the pet no longer takes such an entry
+                // over. Saying "reinstalling corrects it" would be advice to
+                // undo a working setup.
+                warn(
+                    "autostart",
+                    "After a reboot",
+                    format!(
+                        "Starts {registered}, which is not this program but does exist. \
+                         Left alone in case it launches the pet for you; \
+                         run `pipsqueak autostart on` to point it here instead."
+                    ),
+                )
             } else {
                 warn(
                     "autostart",
                     "After a reboot",
-                    format!("Starts {registered}, which is not this program. Reinstalling corrects it."),
+                    format!("Starts {registered}, which is not there any more. Reinstalling corrects it."),
                 )
             }
         }
