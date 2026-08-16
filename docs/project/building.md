@@ -132,6 +132,10 @@ than assumed.
       is there after a log out and back in.
 - [ ] Clicks land on the cards and pass through everywhere else, on Wayland and
       on X11.
+- [ ] Clicking a card does not move the keyboard: with something full screen
+      behind it, poke a card and check the space bar still reaches what was
+      focused before. Needs `GDK_BACKEND=x11`; a Wayland-native client cannot
+      refuse focus.
 - [ ] The pet survives a display-scale change without shrinking.
 
 **macOS**

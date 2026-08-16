@@ -258,8 +258,43 @@ hook payloads.
   to be working, with a card, a slot and the pet animating as busy, on no
   evidence. FIXED — seeded `idle`.
 
+## After v0.8.0 — the click that took the keyboard
+
+Reported from the desktop it runs on (GNOME 50.1, Ubuntu 26.04, pet under
+XWayland): clicking a card while a video was full screen left space and escape
+going nowhere until the video was clicked again. The overlay had become the
+focused window, which is the one thing it should never be.
+
+- **L-1** `tauri.conf.json` — the window was created focusable, so mutter gave
+  it the keyboard on the first click. `focus: false` only covers the *initial
+  map*, and setting the GTK input hint from `setup()` does not survive either:
+  tao restores `accept_focus(true)` on the first draw of a window built
+  `focusable && !focused`
+  (`tao-0.35.3/src/platform_impl/linux/window.rs:221`). FIXED — `focusable:
+  false` on the window, which tao turns into the ICCCM input hint on X11,
+  `WS_EX_NOACTIVATE` on Windows and `canBecomeKeyWindow: NO` on macOS, and
+  which also stops the draw-time restore from running. Measured before and
+  after with a click driven onto the pet sprite: before, focus moved from
+  Chrome to Pipsqueak; after, the pet collapsed its cards (so the click landed)
+  while a separate window kept receiving every keystroke typed either side of
+  the click.
+- **L-2** — a Wayland-native run drops the request entirely: the window takes
+  focus on map and ignores its saved position. Not a regression and not
+  fixable from the client side (xdg-shell has no way to refuse keyboard focus);
+  the README now says so and says to use `GDK_BACKEND=x11`.
+
 ## Parked (recorded, not fixed — reasons given)
 
+- **L-3 (autostart correction overwrites a hand-written entry)** `app.rs:1028`
+  — `ensure_autostart` rewrites the XDG entry whenever its `Exec` is not
+  literally this binary, and `same_program` is a string compare. An entry that
+  launches the pet through a wrapper script (to set `GDK_BACKEND=x11`, or to
+  wait for the shell's tray support) is therefore replaced by a bare path on
+  the next start, silently undoing both. Seen twice on 2026-08-16 while testing
+  a local build. The rewrite is right for a stale path and wrong for a working
+  one, so the fix is to leave an entry alone while the program it names still
+  exists and is executable — needs a decision about what "still ours" means for
+  a wrapper.
 - **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,
   `state.rs:477` — `FileLock::acquire` gives up after ~200ms and writes
   unlocked, and it will steal a lock older than 2s from a holder that is still

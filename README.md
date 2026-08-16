@@ -155,6 +155,15 @@ routing, instead of polling for a cursor position Wayland will not give it. That
 mechanism started life on X11, so X11 should work too. I haven't run it there,
 so I'm not going to tell you it does.
 
+Clicking the pet does not take your keyboard. The window asks the window
+manager not to focus it at all, so a click still reaches the card you aimed at
+and the keys keep going wherever they were already going: poke a card while a
+video is full screen and space still pauses the video. The request has to be
+made in an X11 window to mean anything: under XWayland GNOME honours it, and a
+Wayland-native client is simply given the keyboard anyway. Measured on GNOME
+50.1: that run also ignored the pet's saved position and put the window in the
+middle of the screen. Run it with `GDK_BACKEND=x11` and both work.
+
 Two things Linux doesn't get:
 
 - **The pet doesn't follow your cursor with its eyes.** A Wayland client is not
