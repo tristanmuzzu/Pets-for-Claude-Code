@@ -75,6 +75,7 @@ let noticeTimer = null
  */
 const HINT_DELAY_MS = 2500
 let hintTimer = null
+
 let stackHidden = false
 let seenSessions = new Set()
 
@@ -1304,6 +1305,35 @@ async function saveConfig() {
 }
 
 // --- interaction --------------------------------------------------------
+/**
+ * Take the hint down, and cancel one that has not appeared yet.
+ *
+ * THE BUG THIS EXISTS FOR
+ *
+ * The hint used to be dismissed by `pointerleave` alone, and that event does
+ * not arrive. The window only accepts the cursor where the pet and its cards
+ * are; step off the pet and the compositor routes the pointer to whatever is
+ * underneath, so the page is told nothing — no leave, no out, and `:hover`
+ * stays stuck on. Measured on GNOME 50.1 / Wayland, 2026-08-18, by counting
+ * events while moving the pointer off the pet: `pet-pointerenter:1
+ * pet-pointerover:1 hov:1` before, the same after, nothing added by the move.
+ *
+ * So the hint could appear seconds after the cursor had left, and then sit
+ * there. What does know is one layer down: GTK gets the Wayland leave, and
+ * `pipsqueak://pointer-left` carries it up. On the platforms that hit-test by
+ * polling the cursor instead, `pipsqueak://cursor` answers the same question.
+ */
+function hideHint() {
+  clearTimeout(hintTimer)
+  el.hint.hidden = true
+}
+
+/** Whether a window-local cursor position is inside the pet. */
+function overPet(x, y) {
+  const r = el.pet.getBoundingClientRect()
+  return x >= r.x && y >= r.y && x <= r.x + r.width && y <= r.y + r.height
+}
+
 function wireInteraction() {
   let origin = null
   let dragging = false
@@ -1348,10 +1378,6 @@ function wireInteraction() {
     }, HINT_DELAY_MS)
   })
 
-  const hideHint = () => {
-    clearTimeout(hintTimer)
-    el.hint.hidden = true
-  }
   el.pet.addEventListener('pointerleave', hideHint)
   el.pet.addEventListener('pointerdown', hideHint)
 
@@ -1479,6 +1505,11 @@ async function boot() {
 
   await listen('pipsqueak://notice', (event) => showNotice(String(event.payload)))
 
+  // The pointer has left everything this window accepts it on, which is the
+  // only notice the page gets of it (see hideHint). Linux only: elsewhere the
+  // cursor poll below answers the same question.
+  await listen('pipsqueak://pointer-left', hideHint)
+
   // The cursor, in this window's own coordinates, while it is somewhere near.
   // Pets drawn with the two look rows turn to face it; the rest never hear
   // about it, because the renderer drops it.
@@ -1486,8 +1517,12 @@ async function boot() {
     const at = event.payload
     if (!Array.isArray(at)) {
       renderer.lookAt(null, null)
+      hideHint()
       return
     }
+    // The only honest answer to "is the cursor still on the pet". Off it by so
+    // much as a pixel and the hint goes, pending or showing.
+    if (!overPet(at[0], at[1])) hideHint()
     const rect = el.pet.getBoundingClientRect()
     renderer.lookAt(at[0] - (rect.x + rect.width / 2), at[1] - (rect.y + rect.height / 2))
   })

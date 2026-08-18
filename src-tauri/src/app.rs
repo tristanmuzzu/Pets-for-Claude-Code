@@ -286,6 +286,36 @@ fn apply_input_shape(app: &AppHandle, rects: Vec<Rect>) {
     });
 }
 
+/// Tells the page when the pointer has left everything the window accepts it
+/// on, because the page itself is never told.
+///
+/// Outside the input shape the compositor routes the pointer to whatever is
+/// underneath, and WebKit sees no crossing event at all: no `pointerleave`, no
+/// `pointerout`, and `:hover` stuck on whatever the cursor was last over. That
+/// is what left the pet's hint on screen after the cursor had gone. GTK does
+/// get the Wayland leave, one layer down, so that is where it has to be read.
+///
+/// Enter needs no equivalent: inside the shape the page gets its own events.
+#[cfg(target_os = "linux")]
+fn watch_pointer_crossing(app: &AppHandle) {
+    use gtk::prelude::*;
+
+    let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
+        return;
+    };
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let Ok(gtk_window) = window.gtk_window() else {
+            return;
+        };
+        gtk_window.add_events(gdk::EventMask::LEAVE_NOTIFY_MASK);
+        gtk_window.connect_leave_notify_event(move |_, _| {
+            let _ = app.emit("pipsqueak://pointer-left", ());
+            gtk::glib::Propagation::Proceed
+        });
+    });
+}
+
 #[tauri::command]
 fn save_position(app: AppHandle, x: i32, y: i32) -> Result<(), String> {
     let _ = app;
@@ -1496,6 +1526,8 @@ pub fn run() {
             // call landing in that gap launched a second overlay.
             beat();
             spawn_poller(handle.clone());
+            #[cfg(target_os = "linux")]
+            watch_pointer_crossing(&handle);
             spawn_hit_test(handle);
             Ok(())
         })
