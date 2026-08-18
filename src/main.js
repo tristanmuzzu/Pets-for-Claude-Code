@@ -75,6 +75,19 @@ let noticeTimer = null
  */
 const HINT_DELAY_MS = 2500
 let hintTimer = null
+/** Whether the cursor is on the pet right now. See greetPet. */
+let hovering = false
+/**
+ * How long a departure reported by the window waits to be believed. Long
+ * enough to be cancelled by the movement that proves the cursor is still here,
+ * short enough that nobody sees the hint linger. See maybeLeftPet.
+ */
+const LEAVE_GRACE_MS = 150
+let leaveTimer = null
+/** Where the cursor was last reported, as "x,y". See maybeLeftPet. */
+let lastPointerAt = ''
+/** Where it was when the window said it had gone, or "" if it has not. */
+let leftFrom = ''
 
 let stackHidden = false
 let seenSessions = new Set()
@@ -1328,6 +1341,65 @@ function hideHint() {
   el.hint.hidden = true
 }
 
+/**
+ * The cursor has arrived on the pet: greet it, and start the hint's wait.
+ *
+ * THE OTHER HALF OF THE SAME BUG
+ *
+ * `pointerenter` cannot be trusted to say this either, and for the mirror
+ * reason: the page is never told the cursor left, so as far as WebKit is
+ * concerned it never did, and coming back produces no crossing event at all.
+ * One drag was enough to poison it for good — dragging the pet takes the
+ * pointer out of the window under a grab, and afterwards the pet neither
+ * jumped nor showed its hint again, however many times the cursor arrived.
+ * Movement is the reliable signal, so arrival is read from that, and `hovering`
+ * is what keeps it to once per visit.
+ */
+function greetPet() {
+  clearTimeout(leaveTimer)
+  leftFrom = ''
+  if (hovering) return
+  hovering = true
+  renderer.playOnce(JUMP_ROW)
+  // Long enough that reaching past the pet for something else never brings it
+  // up. It is only useful to someone who has stopped and is wondering.
+  clearTimeout(hintTimer)
+  // The hint is not in the hit rects on purpose: it cannot be clicked, so the
+  // window stays click-through underneath it.
+  hintTimer = setTimeout(() => {
+    el.hint.hidden = false
+  }, HINT_DELAY_MS)
+}
+
+/** The cursor is off the pet, and the page saw it happen. */
+function leftPet() {
+  clearTimeout(leaveTimer)
+  leftFrom = ''
+  hovering = false
+  hideHint()
+}
+
+/**
+ * The window says the pointer has gone. Believe it in a moment, not now.
+ *
+ * The signal is honest but ambiguous: *arriving* on the pet after a drag
+ * produces one too, because the compositor's grab ends as the pointer comes
+ * back. Measured on GNOME 50.1 / Wayland, 2026-08-18 — dragging the pet and
+ * then returning to it logged `mode=Ungrab detail=Virtual` at the release and
+ * `mode=Normal detail=NonlinearVirtual` at the return, the second one at the
+ * pet's own position and indistinguishable from a real departure.
+ *
+ * What tells them apart is what follows: a cursor that is really on the pet
+ * goes on moving there. So a departure waits out a grace period that any
+ * arrival cancels, which is invisible for a hint that takes 2.5s to appear
+ * anyway.
+ */
+function maybeLeftPet() {
+  clearTimeout(leaveTimer)
+  leftFrom = lastPointerAt
+  leaveTimer = setTimeout(leftPet, LEAVE_GRACE_MS)
+}
+
 /** Whether a window-local cursor position is inside the pet. */
 function overPet(x, y) {
   const r = el.pet.getBoundingClientRect()
@@ -1336,24 +1408,41 @@ function overPet(x, y) {
 
 function wireInteraction() {
   let origin = null
-  let dragging = false
 
   el.pet.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return
     origin = { x: event.clientX, y: event.clientY }
-    dragging = false
   })
 
   el.pet.addEventListener('pointermove', (event) => {
-    if (!origin || dragging) return
+    if (!origin) {
+      // Arriving counts whether or not the crossing event ever came (see
+      // greetPet) — but only if the cursor is really here. Two kinds of move
+      // say it is when it is not: one delivered to the pet while the cursor is
+      // elsewhere, and the trailing pair WebKit sends *after* a departure, at
+      // the position the cursor left from. Both used to cancel the departure
+      // the window had just reported, which put the hint back on screen for
+      // good. A repeat of the position we were told about is not news.
+      const at = `${Math.round(event.clientX)},${Math.round(event.clientY)}`
+      if (at === leftFrom) return
+      if (overPet(event.clientX, event.clientY)) greetPet()
+      return
+    }
     if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 3) {
-      dragging = true
+      // The press is the compositor's from here: it moves the window and
+      // swallows the release, so the `pointerup` that would normally clear
+      // this never comes. Letting it stand meant every later move on the pet
+      // was read as "still dragging" — after one drag the pet stopped jumping
+      // and stopped ever showing its hint again.
+      origin = null
       appWindow?.startDragging().catch(() => {})
     }
   })
 
   el.pet.addEventListener('pointerup', () => {
-    if (origin && !dragging) {
+    // `origin` is already gone if this turned into a drag, so a drag can never
+    // be mistaken for the click that hides the cards.
+    if (origin) {
       // A click outside the menu can't reach us, because the window is
       // click-through there, so the pet itself is what dismisses it.
       if (!el.menu.hidden) el.menu.hidden = true
@@ -1366,20 +1455,25 @@ function wireInteraction() {
   })
 
   // Poking it should do something. Cheap, and the first thing anyone tries.
-  el.pet.addEventListener('pointerenter', () => {
-    renderer.playOnce(JUMP_ROW)
-    // Long enough that reaching past the pet for something else never brings
-    // it up. It is only useful to someone who has stopped and is wondering.
-    clearTimeout(hintTimer)
-    // Not added to the hit rects on purpose: it cannot be clicked, so the
-    // window stays click-through underneath it.
-    hintTimer = setTimeout(() => {
-      el.hint.hidden = false
-    }, HINT_DELAY_MS)
-  })
-
-  el.pet.addEventListener('pointerleave', hideHint)
+  el.pet.addEventListener('pointerenter', greetPet)
+  el.pet.addEventListener('pointerleave', leftPet)
   el.pet.addEventListener('pointerdown', hideHint)
+
+  // Leaving the pet for a card stays inside the page, so no signal from the
+  // window arrives, and `pointerleave` is no more reliable in this direction
+  // than the other one. Where the cursor is, is: any movement not on the pet
+  // is the cursor not being on the pet.
+  document.addEventListener(
+    'pointermove',
+    (event) => {
+      const at = `${Math.round(event.clientX)},${Math.round(event.clientY)}`
+      if (at === leftFrom) return
+      lastPointerAt = at
+      if (!overPet(event.clientX, event.clientY)) leftPet()
+    },
+    true
+  )
+
 
   el.pet.addEventListener('contextmenu', (event) => {
     event.preventDefault()
@@ -1508,7 +1602,7 @@ async function boot() {
   // The pointer has left everything this window accepts it on, which is the
   // only notice the page gets of it (see hideHint). Linux only: elsewhere the
   // cursor poll below answers the same question.
-  await listen('pipsqueak://pointer-left', hideHint)
+  await listen('pipsqueak://pointer-left', maybeLeftPet)
 
   // The cursor, in this window's own coordinates, while it is somewhere near.
   // Pets drawn with the two look rows turn to face it; the rest never hear
@@ -1517,12 +1611,13 @@ async function boot() {
     const at = event.payload
     if (!Array.isArray(at)) {
       renderer.lookAt(null, null)
-      hideHint()
+      leftPet()
       return
     }
     // The only honest answer to "is the cursor still on the pet". Off it by so
     // much as a pixel and the hint goes, pending or showing.
-    if (!overPet(at[0], at[1])) hideHint()
+    if (!overPet(at[0], at[1])) leftPet()
+    else greetPet()
     const rect = el.pet.getBoundingClientRect()
     renderer.lookAt(at[0] - (rect.x + rect.width / 2), at[1] - (rect.y + rect.height / 2))
   })

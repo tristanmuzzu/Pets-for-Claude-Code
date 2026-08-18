@@ -84,16 +84,15 @@ pub struct Rect {
     pub h: f64,
 }
 
-/// Only the hit-test loop asks a rectangle anything, and that loop does not
-/// exist on Linux. The type itself still does: it is what the frontend reports
-/// its clickable regions in, on every platform.
-#[cfg(not(target_os = "linux"))]
 impl Rect {
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
 
-    /// Distance from the point to the nearest edge; zero inside.
+    /// Distance from the point to the nearest edge; zero inside. Only the
+    /// cursor-polling hit test asks this, and that loop does not exist on
+    /// Linux; `contains` is used on every platform.
+    #[cfg(not(target_os = "linux"))]
     fn distance_to(&self, x: f64, y: f64) -> f64 {
         let dx = (self.x - x).max(0.0).max(x - (self.x + self.w));
         let dy = (self.y - y).max(0.0).max(y - (self.y + self.h));
@@ -310,13 +309,16 @@ fn watch_pointer_crossing(app: &AppHandle) {
         };
         gtk_window.add_events(gdk::EventMask::LEAVE_NOTIFY_MASK);
         gtk_window.connect_leave_notify_event(move |_, event| {
-            // Only a leave the pointer itself caused. Reshaping the input
-            // region — which happens on every render, because the cards are
-            // what it is made of — also delivers a leave, with the mode set to
-            // "state changed" rather than "normal". Acting on those was worse
-            // than the bug being fixed: while the pet was working, the shape
-            // churned faster than the hint's own delay, so it could never
-            // appear at all.
+            // Only a crossing the pointer itself made. A drag ends with the
+            // compositor dropping its grab, and that arrives here as a leave
+            // too — `mode=Ungrab detail=Virtual`, measured on GNOME 50.1 /
+            // Wayland, 2026-08-18, immediately after dragging the pet.
+            //
+            // Nothing here can tell where the pointer went: GTK reports the
+            // position it left *from*, which for a departure straight off the
+            // pet is the pet. The page settles that instead — it re-reads the
+            // cursor from movement, so a leave that turns out to be wrong
+            // costs one re-arm and nothing else.
             if event.mode() == gdk::CrossingMode::Normal {
                 let _ = app.emit("pipsqueak://pointer-left", ());
             }
