@@ -712,14 +712,25 @@ fn stop_disposition(payload: &Value, last_message: &str) -> Stop {
     if non_empty_list("session_crons") {
         return Stop::KeepWorking("Scheduled work still running");
     }
-    // Set when Claude is continuing *because* a stop hook asked it to, so a
-    // further Stop is already on its way.
+    // `stop_hook_active` is set on the Stop that *ends* a turn a stop hook
+    // extended, not on the one it vetoed — the veto has already happened and
+    // Claude has already done the extra work. Reading it as "still working"
+    // meant that anyone with a blocking stop hook installed (a completion
+    // gate, a journal prompt, a review loop) never saw a finished card at all:
+    // every turn ended on this branch and stayed grey. Measured 2026-08-18
+    // with the installed 0.8.0 build, one synthetic Stop per case:
+    //   stop_hook_active=false -> state=idle kind=Done outcome=done
+    //   stop_hook_active=true  -> state=running kind=Working outcome=""
+    //
+    // It is still a stop that can be vetoed again, so it takes the same hold
+    // as the rest: a further veto means more work, and work clears a pending
+    // outcome before it is ever shown.
     if payload
         .get("stop_hook_active")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Stop::KeepWorking("A stop hook is still working");
+        return Stop::Finished { settle_ms: 2_000 };
     }
     if non_empty_list("background_tasks") {
         return if last_message.trim().is_empty() {
@@ -1044,14 +1055,12 @@ mod tests {
         assert!(update.detail.contains("Details follow."));
     }
 
-    /// The three ways `Stop` arrives while Claude is about to carry on. Each
-    /// one used to produce a "Done" card that then sat there for 30 seconds
-    /// being wrong.
+    /// The ways `Stop` arrives while Claude is about to carry on. Each one used
+    /// to produce a "Done" card that then sat there for 30 seconds being wrong.
     #[test]
     fn stop_while_still_working_is_not_a_completion() {
         let cases = [
             json!({ "session_crons": [{ "id": "nightly" }] }),
-            json!({ "stop_hook_active": true }),
             json!({ "background_tasks": [{ "id": "build" }] }),
         ];
         for payload in cases {
@@ -1062,6 +1071,26 @@ mod tests {
             );
             assert_eq!(update.state, "running");
         }
+    }
+
+    /// A turn a stop hook extended still ends, and the Stop carrying
+    /// `stop_hook_active` is that ending. Treating the flag as "still working"
+    /// is why a session with any blocking stop hook installed never went green.
+    #[test]
+    fn stop_after_a_hook_extended_the_turn_is_a_completion() {
+        let update = classify(
+            "Stop",
+            &json!({
+                "stop_hook_active": true,
+                "last_assistant_message": "Wrote the journal entry."
+            }),
+        )
+        .unwrap();
+        assert_eq!(update.outcome, "done");
+        assert_eq!(update.state, "idle");
+        // Held, not announced: another veto is still possible, and any work
+        // that follows clears a pending outcome before it is ever shown.
+        assert_eq!(update.settle_ms, 2_000);
     }
 
     /// Claude said its piece but something is still finishing behind it. That

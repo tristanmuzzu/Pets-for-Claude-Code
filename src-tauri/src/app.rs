@@ -309,8 +309,17 @@ fn watch_pointer_crossing(app: &AppHandle) {
             return;
         };
         gtk_window.add_events(gdk::EventMask::LEAVE_NOTIFY_MASK);
-        gtk_window.connect_leave_notify_event(move |_, _| {
-            let _ = app.emit("pipsqueak://pointer-left", ());
+        gtk_window.connect_leave_notify_event(move |_, event| {
+            // Only a leave the pointer itself caused. Reshaping the input
+            // region — which happens on every render, because the cards are
+            // what it is made of — also delivers a leave, with the mode set to
+            // "state changed" rather than "normal". Acting on those was worse
+            // than the bug being fixed: while the pet was working, the shape
+            // churned faster than the hint's own delay, so it could never
+            // appear at all.
+            if event.mode() == gdk::CrossingMode::Normal {
+                let _ = app.emit("pipsqueak://pointer-left", ());
+            }
             gtk::glib::Propagation::Proceed
         });
     });
