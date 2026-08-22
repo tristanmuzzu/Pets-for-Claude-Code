@@ -85,13 +85,14 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Both methods serve only the cursor-polling hit test, and that loop
+    /// does not exist on Linux (the input shape does its job there).
+    #[cfg(not(target_os = "linux"))]
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
 
-    /// Distance from the point to the nearest edge; zero inside. Only the
-    /// cursor-polling hit test asks this, and that loop does not exist on
-    /// Linux; `contains` is used on every platform.
+    /// Distance from the point to the nearest edge; zero inside.
     #[cfg(not(target_os = "linux"))]
     fn distance_to(&self, x: f64, y: f64) -> f64 {
         let dx = (self.x - x).max(0.0).max(x - (self.x + self.w));
