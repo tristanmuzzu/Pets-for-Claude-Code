@@ -296,6 +296,25 @@ focused window, which is the one thing it should never be.
   identical, and an entry pointing at a path that does not exist was still
   corrected.
 
+## After v0.8.0 — audit 2026-08-22
+
+- **A-1** `app.rs:88` — `e242576` compiled the cursor-polling loop out on
+  Linux, which left `Rect::contains` with no caller there; its doc comment
+  claimed "used on every platform" and was wrong the day it was written. The
+  release gates caught it as designed: `clippy -D warnings` failed the
+  ubuntu job on the last two pushes to `main` while the Windows job stayed
+  green, so `main` has been unreleasable for three days. FIXED — both helpers
+  carry the same `cfg` as the loop they serve, comment now says so.
+- **A-2** `main.js:1592` — pruning `acknowledged` kept every key whose session
+  was still live, so a long-lived chat accumulated one dead key per dismissed
+  completion; a superseded key can never match again (suppression compares
+  the current `outcome_ms`), so this was a bounded leak, not wrong behavior.
+  FIXED — keys are pruned against the incoming sessions' current outcome
+  keys, which also covers the gone-session case the old check was for. The
+  prune runs only in the Tauri event path, which the browser demo does not
+  drive; verified by the hint suite passing and reasoning at the line, not by
+  executing the branch.
+
 ## Parked (recorded, not fixed — reasons given)
 
 - **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,

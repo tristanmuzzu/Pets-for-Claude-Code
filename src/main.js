@@ -1587,10 +1587,12 @@ async function boot() {
     }
     const live = new Set(incoming.map((s) => s.session_id))
     seenSessions = new Set([...seenSessions].filter((id) => live.has(id)))
-    // A session that is gone can never show its card again, so remembering
-    // that it was acknowledged is just a leak.
+    // An acknowledgement matters only while its exact outcome is still the
+    // one on the session; a gone session or a superseded outcome can never
+    // show that card again, so remembering either is just a leak.
+    const current = new Set(incoming.map(outcomeKey))
     for (const key of acknowledged) {
-      if (!live.has(key.slice(0, key.lastIndexOf('@')))) acknowledged.delete(key)
+      if (!current.has(key)) acknowledged.delete(key)
     }
     const kept = notice ? sessions.filter((s) => s.session_id === 'notice') : []
     sessions = [...kept, ...incoming]
