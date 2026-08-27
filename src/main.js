@@ -65,6 +65,38 @@ let config = {
 let sessions = []
 /** When any project was last doing something, for the doze. */
 let lastLiveAt = Date.now()
+/**
+ * The idle gate.
+ *
+ * An overlay that is always on screen is always being composited, and
+ * anything on it that moves — the sprite loop, the doze, a blinking dot —
+ * keeps WebKit repainting at frame rate around the clock. Fifteen seconds
+ * after the last thing actually happened (a session event, a notice, the
+ * cursor arriving) the page settles: `body.settled` switches the standing
+ * CSS animations off, the sprite loop parks itself (see pet.js), and the
+ * once-a-second clock render drops to once every ten. The very next event
+ * takes it all back instantly. The pet loses nothing by holding still:
+ * colour and text carry every state, which is the same judgement the
+ * reduced-motion rule in style.css already made.
+ */
+const SETTLE_UI_AFTER_MS = 15_000
+let lastEventAt = Date.now()
+let uiSettled = false
+
+/** Something happened: reopen the gate before anyone can see it closed. */
+function markActivity() {
+  lastEventAt = Date.now()
+  if (!uiSettled) return
+  uiSettled = false
+  document.body.classList.remove('settled')
+}
+
+function updateSettled() {
+  const idle = Date.now() - lastEventAt > SETTLE_UI_AFTER_MS
+  if (idle === uiSettled) return
+  uiSettled = idle
+  document.body.classList.toggle('settled', idle)
+}
 let notice = null
 let noticeTimer = null
 /**
@@ -743,6 +775,7 @@ function syncHitRects() {
 }
 
 function showNotice(message) {
+  markActivity()
   notice = message
   clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => {
@@ -1466,6 +1499,9 @@ function wireInteraction() {
   document.addEventListener(
     'pointermove',
     (event) => {
+      // The cursor can only be here at all because it is over something ours,
+      // so movement is activity: it reopens the idle gate.
+      markActivity()
       const at = `${Math.round(event.clientX)},${Math.round(event.clientY)}`
       if (at === leftFrom) return
       lastPointerAt = at
@@ -1578,6 +1614,11 @@ async function boot() {
   })
 
   await listen('pipsqueak://sessions', (event) => {
+    // The poller only emits when the data changed, so an emit *is* activity —
+    // and it wakes a parked sprite loop even when the display state it maps
+    // to is the one already showing.
+    markActivity()
+    renderer.wake()
     const incoming = event.payload ?? []
     for (const session of incoming) {
       if (!seenSessions.has(session.session_id)) {
@@ -1610,6 +1651,7 @@ async function boot() {
   // Pets drawn with the two look rows turn to face it; the rest never hear
   // about it, because the renderer drops it.
   await listen('pipsqueak://cursor', (event) => {
+    markActivity()
     const at = event.payload
     if (!Array.isArray(at)) {
       renderer.lookAt(null, null)
@@ -1663,8 +1705,17 @@ async function boot() {
 
   scheduleUpdateChecks()
 
-  // Ages and elapsed timers tick even when no event arrives.
-  setInterval(render, 1000)
+  // Ages and elapsed timers tick even when no event arrives — every second
+  // while something is moving, every tenth once the page has settled. The
+  // ages a settled page shows are minutes old at best, so a ten-second lag
+  // on them is invisible; the render it saves is a full reconcile plus an
+  // IPC round-trip for the hit rects, sixty times a minute, around the clock.
+  let clockTicks = 0
+  setInterval(() => {
+    updateSettled()
+    clockTicks += 1
+    if (!uiSettled || clockTicks % 10 === 0) render()
+  }, 1000)
 }
 
 /** Built-in pets ship inside the frontend bundle; the rest come from disk. */

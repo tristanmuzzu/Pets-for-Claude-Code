@@ -11,6 +11,7 @@ Root causes found, in order of contribution:
 
 | # | Mechanism | Status |
 | --- | --- | --- |
+| P-1 | Sprite-loop settle clock anchored to `frame === 0`, which a cycling loop leaves within 300ms — the 5s threshold was unreachable, so the canvas repainted at 60fps around the clock (measured 41.9% of a core sustained, 9h18m CPU over 31h incl. idle nights); fixed by anchoring the clock to loop entry + a 15s stale gate for working loops, `body.settled` stops standing CSS animations, clock render drops to 1/10s when settled | FIXED |
 | S-1 | `Stop` with background tasks writes `state:"idle"` + 2s settle; `displayState` returns `idle` during the settle window, card leaves the DOM, returns 1–3s later as done | FIXED |
 | H-2 | First `Stop` gets `settle_ms: 0`; a blocking stop hook (this user runs one) forces continuation and the just-shown Done card is wiped by the next event | FIXED |
 | W-1 | Frontend-liveness watchdog trusts a throttleable JS timer; WebView2 clamps timers for occluded windows to ~1/min, so the overlay hard-reloads every 60s while occluded | FIXED |

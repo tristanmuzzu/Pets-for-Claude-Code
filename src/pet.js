@@ -80,6 +80,20 @@ const FADE_MS = 140
  * wasteful, compositing a frame every 16ms over a video that wants the GPU.
  */
 const SETTLE_AFTER_MS = 5000
+/**
+ * How long a *working* loop keeps animating after the last real event.
+ *
+ * A running animation is a claim that something is happening. The claim is
+ * honest while events arrive — main.js calls `wake` on every one — and stale
+ * fifteen seconds after they stop: a turn that has gone quiet for that long is
+ * either finished (the state will change) or thinking at length (the next
+ * event will wake the loop again). Meanwhile sixty canvas repaints a second
+ * for a pet nobody is being told anything by is the single largest CPU cost
+ * in the app, and it never stopped: the settle below used to anchor its clock
+ * to `frame === 0`, which a cycling loop leaves within 300ms, so the
+ * five-second threshold was unreachable and the loop ran forever.
+ */
+const STALE_AFTER_MS = 15_000
 
 export class PetRenderer {
   constructor(canvas) {
@@ -100,6 +114,9 @@ export class PetRenderer {
     // hard cut. Easier to catch out of the corner of your eye.
     this.outgoing = null
     this.idleSince = 0
+    // When `wake` was last called: the age of the newest thing worth
+    // animating for, in the same timebase as the rAF timestamps.
+    this.wokeAt = 0
   }
 
   async load(id, payload) {
@@ -240,8 +257,9 @@ export class PetRenderer {
   }
 
   /** Resume animating; called whenever something actually changed. */
-  wake() {
+  wake(now = performance.now()) {
     this.idleSince = 0
+    this.wokeAt = now
     if (!this.wanted || this.looping) return
     this.looping = true
     this.last = 0
@@ -283,9 +301,16 @@ export class PetRenderer {
     if (this.looking) {
       if (!this.idleSince) this.idleSince = now
       else if (now - this.idleSince > FADE_MS) this.looping = false
-    } else if (this.state === 'idle' && !this.oneShot && !this.outgoing && this.frame === 0) {
+    } else if (!this.oneShot && !this.outgoing) {
+      // The clock starts when the loop enters a settleable stretch, not when
+      // the frame counter happens to pass zero. Anchored to `frame === 0` — as
+      // this was — the clock reset every time the loop left the first frame,
+      // which a cycling animation does within 300ms, so no threshold was ever
+      // reached and the loop never stopped.
       if (!this.idleSince) this.idleSince = now
-      else if (now - this.idleSince > SETTLE_AFTER_MS) this.looping = false
+      const settleAfter = this.state === 'idle' ? SETTLE_AFTER_MS : STALE_AFTER_MS
+      const restedFor = Math.min(now - this.idleSince, now - this.wokeAt)
+      if (restedFor > settleAfter && this.frame === 0) this.looping = false
     } else {
       this.idleSince = 0
     }

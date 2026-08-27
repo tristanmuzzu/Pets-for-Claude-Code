@@ -242,6 +242,23 @@ body {
   }
 }
 
+/*
+ * The idle gate (see main.js). An infinite animation keeps WebKit repainting
+ * and the compositor compositing for as long as it runs, which for an overlay
+ * that never leaves the screen means around the clock. Fifteen seconds after
+ * the last event the standing loops stop — the same judgement the
+ * reduced-motion rule above already made: colour carries the meaning, motion
+ * decorates it. `!important` because the dot's animation is set on
+ * state-qualified selectors that would otherwise outrank this. The one-shot
+ * entrances (.card-enter, .ask-enter) are left alone: they only ever play at
+ * the moment something happened, which is the moment the gate is open.
+ */
+body.settled .unread,
+body.settled .dot,
+body.settled #pet.asleep {
+  animation: none !important;
+}
+
 .dot {
   width: 7px;
   height: 7px;
