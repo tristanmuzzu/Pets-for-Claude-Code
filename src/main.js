@@ -120,6 +120,28 @@ let leaveTimer = null
 let lastPointerAt = ''
 /** Where it was when the window said it had gone, or "" if it has not. */
 let leftFrom = ''
+/**
+ * Whether the cards are currently accepting clicks. See armCards.
+ *
+ * THE BUG THIS EXISTS FOR
+ *
+ * The cards are the biggest thing the overlay puts on screen, and every one of
+ * them claimed clicks the whole time it was up. Measured on the desktop it
+ * runs on, three cards deep: `28,230 322x98`, `28,333 322x98`, `28,436
+ * 322x98` — a 322x304 block of always-on-top clickable area, sitting over a
+ * full-screen video. A click meant for the video landed on a card instead, so
+ * the video never got the click, never took the keyboard, and space and the
+ * arrow keys went nowhere until it was clicked again somewhere the pet was
+ * not. From the outside that reads as "the pet has taken over the screen",
+ * and it is the correct reading.
+ *
+ * At rest the overlay now claims only what it looks like it claims: the pet
+ * itself. The cards are armed by touching the pet and stay armed while the
+ * cursor is on anything the window accepts, so reaching from the pet up
+ * through the stack works as it always did.
+ */
+let armed = false
+let disarmTimer = null
 
 let stackHidden = false
 let seenSessions = new Set()
@@ -767,10 +789,15 @@ function syncHitRects() {
     if (r.width && r.height) rects.push({ x: r.x, y: r.y, w: r.width, h: r.height })
   }
   add(el.pet)
+  // Both are opened deliberately and both are answered with a click, so
+  // neither waits to be armed: a setup panel you have to stroke the pet to
+  // press is worse than anything this is protecting.
   add(el.menu)
   add(el.panel)
-  if (!el.chips.hidden) add(el.chips)
-  for (const node of cards.values()) add(node)
+  if (armed) {
+    if (!el.chips.hidden) add(el.chips)
+    for (const node of cards.values()) add(node)
+  }
   invoke('set_hit_rects', { rects }).catch(() => {})
 }
 
@@ -1388,7 +1415,32 @@ function hideHint() {
  * Movement is the reliable signal, so arrival is read from that, and `hovering`
  * is what keeps it to once per visit.
  */
+/**
+ * The cursor is on the pet, so the cards become clickable.
+ *
+ * Touching the pet is the one gesture that cannot be aimed at anything behind
+ * the overlay: the pet is opaque and it is the only thing here that always
+ * claims clicks. That makes it the honest signal for "this window is what I
+ * am reaching for", which is what the cards need before they are allowed to
+ * take a click away from whatever is underneath them.
+ */
+function armCards() {
+  clearTimeout(disarmTimer)
+  if (armed) return
+  armed = true
+  syncHitRects()
+}
+
+/** The cursor is off everything the window accepts, so the cards let go. */
+function disarmCards() {
+  clearTimeout(disarmTimer)
+  if (!armed) return
+  armed = false
+  syncHitRects()
+}
+
 function greetPet() {
+  armCards()
   clearTimeout(leaveTimer)
   leftFrom = ''
   if (hovering) return
@@ -1431,6 +1483,13 @@ function maybeLeftPet() {
   clearTimeout(leaveTimer)
   leftFrom = lastPointerAt
   leaveTimer = setTimeout(leftPet, LEAVE_GRACE_MS)
+  // The same grace, for the same reason, and it matters more here: the cards
+  // are stacked with a few pixels between them, and crossing that gap on the
+  // way from the pet to the top card is a real departure from everything the
+  // window accepts. Disarming on it would pull the card out from under the
+  // cursor mid-reach. The movement onto the next card cancels this.
+  clearTimeout(disarmTimer)
+  disarmTimer = setTimeout(disarmCards, LEAVE_GRACE_MS)
 }
 
 /** Whether a window-local cursor position is inside the pet. */
@@ -1443,6 +1502,10 @@ function wireInteraction() {
   let origin = null
 
   el.pet.addEventListener('pointerdown', (event) => {
+    // A press on the pet is the arming gesture too, not only a hover: WebKit's
+    // crossing events are not reliable here (see greetPet), and a click that
+    // arrived without one still means the cursor is on the pet.
+    armCards()
     if (event.button !== 0) return
     origin = { x: event.clientX, y: event.clientY }
   })
@@ -1505,6 +1568,10 @@ function wireInteraction() {
       const at = `${Math.round(event.clientX)},${Math.round(event.clientY)}`
       if (at === leftFrom) return
       lastPointerAt = at
+      // Anywhere in here is somewhere the window accepted the cursor, so the
+      // cards stay armed even though this move is not on the pet — moving off
+      // the pet onto a card is the whole point of arming them.
+      clearTimeout(disarmTimer)
       if (!overPet(event.clientX, event.clientY)) leftPet()
     },
     true
@@ -1656,6 +1723,11 @@ async function boot() {
     if (!Array.isArray(at)) {
       renderer.lookAt(null, null)
       leftPet()
+      // The cursor is far enough away that the poll has stopped following it,
+      // which on the platforms that hit-test is what "gone" means. This is the
+      // counterpart of `pipsqueak://pointer-left`, which those platforms never
+      // send.
+      disarmCards()
       return
     }
     // The only honest answer to "is the cursor still on the pet". Off it by so
