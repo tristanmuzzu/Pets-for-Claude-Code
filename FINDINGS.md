@@ -334,16 +334,19 @@ focused window, which is the one thing it should never be.
   resumed" label was the same lie pointing the other way. FIXED — the
   relabel applies to turns that ended, not turns that died; a failed one is
   recorded silently and the failure stays on the card.
-- **B-3** `hook.rs:337` — a `Notification` arriving after a `StopFailure`
-  blanks `session.detail`, so the error body the failure carried is lost from
-  the expanded panel; the card keeps the word "Failed" with nothing under it.
-  `apply` writes `session.detail = update.detail` unconditionally for any
-  non-silent update, and the notification's is empty. Background failures no
-  longer hit this (B-2 makes them silent), but foreground ones still do.
-  NOT FIXED — the honest fix is to stop blanking `detail` on events that
-  describe no work, which touches every foreground path and wants its own
-  change. Observed 2026-08-29 on session `88b752ad` (`detail: ""` next to
-  `kind: "Failed"`).
+- **B-3** `hook.rs:406` — a `Notification` arriving after a `StopFailure`
+  blanked `session.detail`, so the error body the failure carried was wiped
+  from the expanded panel and the card said a turn had failed without being
+  able to say how. `apply` wrote `session.detail = update.detail`
+  unconditionally for every non-silent update, and the events that carry no
+  long text — notifications, tool calls, permission requests — all supply an
+  empty one. Observed 2026-08-29 on session `88b752ad` (`detail: ""` beside
+  `kind: "Failed"`). FIXED — `Update::detail` is now `Option<String>`, the
+  same idiom `headline` already used in this file: `None` leaves the panel
+  standing, `Some(text)` replaces it, and `Some("")` still clears, so a turn
+  that ends with nothing worth reading cannot leave a stale tool error under
+  the word "Done". Side effect, and an improvement: the prompt no longer
+  vanishes from the expanded card the moment the first tool runs.
 
 ## Parked (recorded, not fixed — reasons given)
 

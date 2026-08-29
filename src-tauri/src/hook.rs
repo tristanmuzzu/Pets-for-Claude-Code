@@ -128,6 +128,7 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
         update.state = "";
         update.kind.clear();
         update.activity.clear();
+        update.detail = None;
         update.headline = None;
         update.silent = true;
     }
@@ -403,7 +404,9 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
             };
         }
         session.activity = update.activity.clone();
-        session.detail = update.detail;
+        if let Some(detail) = update.detail {
+            session.detail = detail;
+        }
         if let Some(headline) = update.headline {
             session.headline = headline;
         }
@@ -513,7 +516,14 @@ struct Update {
     /// The word on the status line. Kept coarse.
     kind: String,
     activity: String,
-    detail: String,
+    /// The expanded panel's longer text: the prompt, an error body, the
+    /// answer. `None` for the many events that carry none, which must leave
+    /// the last one standing rather than blank it — a `Notification` landing
+    /// after a `StopFailure` used to wipe the error out from under the word
+    /// "Failed", leaving a card that said a turn had failed and could not say
+    /// how. `Some("")` still clears, which is what a turn ending with nothing
+    /// worth reading should do.
+    detail: Option<String>,
     /// `None` for the many events that should not disturb what the card says
     /// the turn is about.
     headline: Option<String>,
@@ -596,7 +606,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 state: "thinking",
                 kind: "Thinking".into(),
                 activity: "Thinking…".into(),
-                detail: truncate(&prompt, 400),
+                detail: Some(truncate(&prompt, 400)),
                 headline: Some(
                     summary_of(&prompt).unwrap_or_else(|| truncate(&first_line(&prompt), 90)),
                 ),
@@ -623,7 +633,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             state: "running",
             kind: "Recovering".into(),
             activity: format!("{} failed", pretty_tool(&tool)),
-            detail: truncate(&first_line(&text("error")), 400),
+            detail: Some(truncate(&first_line(&text("error")), 400)),
             hiccup: true,
             ..Default::default()
         },
@@ -732,7 +742,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                     kind: "Done".into(),
                     // The turn is over: a live line would only show a stale
                     // tool call.
-                    detail: truncate(&message, 600),
+                    detail: Some(truncate(&message, 600)),
                     // Nothing worth reading in the answer leaves the headline
                     // alone, and what is already there is what the turn was
                     // asked to do, which is still true.
@@ -748,7 +758,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
             Update {
                 state: "idle",
                 kind: "Failed".into(),
-                detail: truncate(&first_line(&text("error")), 400),
+                detail: Some(truncate(&first_line(&text("error")), 400)),
                 headline: Some(if error_kind.is_empty() {
                     "Turn failed".into()
                 } else {
@@ -1154,7 +1164,7 @@ mod tests {
         assert_eq!(update.headline.as_deref(), Some("Fixed the off-by-one."));
         // The turn is over, so the live line clears rather than showing a stale tool.
         assert!(update.activity.is_empty());
-        assert!(update.detail.contains("Details follow."));
+        assert!(update.detail.as_deref().unwrap().contains("Details follow."));
     }
 
     /// The ways `Stop` arrives while Claude is about to carry on. Each one used
@@ -1900,5 +1910,101 @@ mod tests {
         );
         // Still not a person being asked a question, either.
         assert_eq!(session.waiting_reason, "");
+    }
+
+    /// FINDINGS B-3, and the foreground half of it.
+    ///
+    /// A `Notification` carries no long text, and used to write that emptiness
+    /// over whatever the panel was holding. Landing after a `StopFailure` it
+    /// wiped the error body, so the card said a turn had failed and could not
+    /// say how — the one moment the detail is the whole point.
+    #[test]
+    fn a_notification_does_not_wipe_the_error_it_arrives_after() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "run the migration" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "StopFailure",
+            json!({
+                "prompt_id": "p1",
+                "error_type": "api_error",
+                "error": "API Error: the upstream call timed out"
+            }),
+            9000,
+        );
+        feed(
+            &mut session,
+            "Notification",
+            json!({ "notification_type": "idle_prompt", "prompt_id": "p1" }),
+            9100,
+        );
+        assert_eq!(session.kind, "Failed");
+        assert!(
+            session.detail.contains("timed out"),
+            "the card must still be able to say how: {:?}",
+            session.detail
+        );
+        // Foreground, so the person really is being asked. Unchanged.
+        assert_eq!(session.waiting_reason, "Waiting for your reply");
+    }
+
+    /// The other half of making `detail` optional: `Some("")` still clears.
+    ///
+    /// Without it the rule would only ever accumulate, and a turn that ended
+    /// with nothing worth reading would leave an earlier tool's error sitting
+    /// under the word "Done" — the same lie the other way round.
+    #[test]
+    fn a_turn_ending_with_nothing_to_say_clears_the_panel() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "tidy up" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "PostToolUseFailure",
+            json!({ "tool_name": "Grep", "prompt_id": "p1", "error": "no matches found" }),
+            2000,
+        );
+        assert!(session.detail.contains("no matches"));
+        feed(
+            &mut session,
+            "Stop",
+            json!({ "prompt_id": "p1", "last_assistant_message": "" }),
+            9000,
+        );
+        assert_eq!(session.outcome, "done");
+        assert_eq!(
+            session.detail, "",
+            "a stale tool error must not sit under the word Done"
+        );
+    }
+
+    /// A tool call says nothing long, so it leaves the panel alone. It used to
+    /// blank it, which meant the prompt vanished from the expanded card the
+    /// moment any work started.
+    #[test]
+    fn ordinary_work_leaves_the_panel_standing() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "fix the timezone test" }),
+            1000,
+        );
+        assert!(session.detail.contains("timezone"));
+        feed(&mut session, "PreToolUse", tool_call("p1"), 2000);
+        assert!(
+            session.detail.contains("timezone"),
+            "a tool call is not a reason to empty the panel: {:?}",
+            session.detail
+        );
     }
 }
