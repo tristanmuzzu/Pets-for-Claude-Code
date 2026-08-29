@@ -58,6 +58,43 @@ test('an explicit notification outranks a pending permission', () => {
   assert.equal(blockedOn(session, NOW), 'Waiting for your reply')
 })
 
+test('a background turn ending is not a card that needs you', () => {
+  // The exact shape the hook now writes when a `claude --bg` leg ends a turn:
+  // background, the turn over, and deliberately no `waiting_since` — the
+  // supervisor that started the session resumes it, so there is nobody to
+  // interrupt. This asserts the reader's half of that contract, because the
+  // fix is a field the producer stopped writing and this is what would notice
+  // if it ever came back.
+  const session = quiet({
+    background: true,
+    state: 'idle',
+    kind: 'Done',
+    activity: 'Waiting to be resumed',
+    outcome: 'done',
+    outcome_ms: NOW - 10_000,
+    settles_ms: NOW - 8_000,
+    waiting_since: 0,
+    waiting_reason: ''
+  })
+  assert.equal(blockedOn(session, NOW), '')
+  assert.notEqual(displayState(session, NOW), 'waiting')
+  assert.equal(displayState(session, NOW), 'done')
+})
+
+test('a background session at a permission prompt still needs you', () => {
+  // The other direction, and the reason the fix is gated on *why* a session is
+  // waiting rather than on whether it runs in the background. Nothing resumes
+  // a background agent sitting on a permission prompt.
+  const session = quiet({
+    background: true,
+    pending_since: NOW - WAITING_DEBOUNCE_MS - 1,
+    pending_tool: 'Bash',
+    pending_detail: 'run: rm -rf build'
+  })
+  assert.equal(blockedOn(session, NOW), 'run: rm -rf build')
+  assert.equal(displayState(session, NOW), 'waiting')
+})
+
 test('a completion that has not settled is still a running turn', () => {
   const session = quiet({ state: 'running', outcome: 'done', outcome_ms: NOW, settles_ms: NOW + 2000 })
   assert.equal(displayState(session, NOW), 'running')

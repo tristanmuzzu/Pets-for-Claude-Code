@@ -89,6 +89,18 @@ pub fn run(fallback_event: Option<String>) {
         }
     };
 
+    // Asked again on every event, and allowed to go both ways.
+    //
+    // The tempting version of this is sticky — decide once, on the theory that
+    // a session cannot change what it is. It can: `claude attach <id>` opens a
+    // background session in a terminal, and from that moment a person really
+    // is sitting in front of it and really does want to be told when it needs
+    // them. A flag that only ever went true would have silenced the alert on
+    // exactly the session somebody had just walked over to. Every event of a
+    // background session carries the marker (measured, see `is_background`),
+    // so asking each time costs an environment lookup and stays true.
+    session.background = is_background();
+
     let Some(update) = classify(&event, &payload) else {
         return;
     };
@@ -118,6 +130,29 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
         update.activity.clear();
         update.headline = None;
         update.silent = true;
+    }
+
+    // Nobody is waiting on this one.
+    //
+    // A background agent ends a turn exactly as a chat does, and Claude Code
+    // raises the same idle `Notification` for it — but what answers that
+    // notification is the supervisor that started the session, not a person.
+    // Taken at face value the card said "Needs you" about a session
+    // `claude agents --json` was calling `busy`/`working` at the same moment,
+    // and the one alert that is supposed to mean "go and look" started firing
+    // at sessions running unattended by design.
+    //
+    // Suppressed here rather than in the frontend so the claim never reaches
+    // the file at all: one writer, one rule, and nothing for a second reader
+    // to disagree with. A permission prompt is deliberately not `resumable`
+    // and still alerts — a background agent stopped on one is stuck for good,
+    // which is the case the alert exists for.
+    if session.background && update.resumable {
+        update.waiting.clear();
+        // The turn is over, so it is not running tools; it has not been
+        // abandoned either, and the sweep leaves an idle session alone.
+        update.state = "idle";
+        update.activity = "Waiting to be resumed".to_string();
     }
 
     // An event that reached this file after a later one already did.
@@ -377,6 +412,43 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
     }
 }
 
+/// Is this hook running inside a background agent (`claude --bg`)?
+///
+/// The authoritative answer is `claude agents --json`, which reports
+/// `"kind":"background"` per session — and disagreeing with it is the bug this
+/// exists to fix. It is also an answer this hook cannot afford: it runs on
+/// every event with a 5s budget, and paying a whole CLI startup for a fact
+/// that cannot change would be the pet making the machine slower in order to
+/// describe it.
+///
+/// So it is read from the environment instead, which costs nothing. **Not**
+/// from `CLAUDE_CODE_SESSION_KIND`: that is set on the agent process and is
+/// *not* passed down to hooks — measured, by catching live
+/// `pipsqueak hook` processes in `/proc` and reading their environment while a
+/// real `claude --bg` session ran. What hooks do get is `CLAUDE_JOB_DIR`, the
+/// background job's own directory, and only background sessions have one.
+/// Both are checked because the first is free and the day it starts being
+/// forwarded is a day this gets more reliable, not less.
+///
+/// Measured 2026-08-29 against Claude Code 2.1.251:
+///   background `SessionStart` hook -> CLAUDE_JOB_DIR=~/.claude/jobs/d14b29f0
+///                                     CLAUDE_CODE_SESSION_KIND absent
+///   foreground hooks (any event)   -> neither
+fn is_background() -> bool {
+    reads_as_background(|key| std::env::var(key).ok())
+}
+
+/// The rule itself, with the environment handed to it so it can be examined.
+fn reads_as_background(get: impl Fn(&str) -> Option<String>) -> bool {
+    if get("CLAUDE_JOB_DIR").is_some_and(|dir| !dir.trim().is_empty()) {
+        return true;
+    }
+    matches!(
+        get("CLAUDE_CODE_SESSION_KIND").as_deref(),
+        Some("bg") | Some("background")
+    )
+}
+
 /// Keeps a copy of a raw hook payload, when asked to.
 ///
 /// Off unless `~/.pipsqueak/payloads` exists, which makes turning it on a
@@ -433,6 +505,13 @@ struct Update {
     settle_ms: u64,
     /// Why a human is blocking. Empty means "not waiting".
     waiting: String,
+    /// True when the only thing this wait needs is another turn — the idle
+    /// prompt Claude Code raises at the end of every turn, foreground or not.
+    /// A background agent's supervisor answers that itself, so for those
+    /// sessions it is not a wait on anybody. A permission prompt is never
+    /// this: nothing but a decision resolves one, and a background agent stuck
+    /// on it is stuck for good.
+    resumable: bool,
     /// Change to the live subagent count.
     subagents: i64,
     /// A tool failed mid-turn. Not a failed turn, and not counted anywhere:
@@ -584,13 +663,19 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                 waiting: reason.to_string(),
                 ..Default::default()
             };
+            // The turn simply ended. For a foreground chat that means the
+            // person is up; for a background agent it means the supervisor is.
+            let turn_over = |reason: &str| Update {
+                resumable: true,
+                ..waiting(reason)
+            };
             match notification.as_str() {
                 "permission_prompt" => waiting(if message.is_empty() {
                     "Waiting for permission"
                 } else {
                     &message
                 }),
-                "idle_prompt" => waiting("Waiting for your reply"),
+                "idle_prompt" => turn_over("Waiting for your reply"),
                 "agent_needs_input" => waiting("A teammate needs input"),
                 // `notification_type` is not in the documented payload schema,
                 // so it may simply be absent. Falling back to the message text
@@ -600,7 +685,7 @@ fn classify(event: &str, payload: &Value) -> Option<Update> {
                     if lower.contains("permission") {
                         waiting(&message)
                     } else if lower.contains("waiting for your") || lower.contains("input") {
-                        waiting("Waiting for your reply")
+                        turn_over("Waiting for your reply")
                     } else {
                         return None;
                     }
@@ -1572,5 +1657,182 @@ mod tests {
     fn session_ids_cannot_escape_the_sessions_directory() {
         assert_eq!(crate::state::sanitize("../../etc/passwd"), "etcpasswd");
         assert_eq!(crate::state::sanitize(""), "unknown");
+    }
+
+    /// The bug this whole `background` flag exists for.
+    ///
+    /// A `claude --bg` leg ends a turn and Claude Code raises the same idle
+    /// notification a chat gets. Nobody is being asked anything — the
+    /// supervisor that started the leg resumes it — and
+    /// `claude agents --json` said `busy`/`working` for this very session at
+    /// the moment the card was saying "Needs you".
+    #[test]
+    fn a_background_turn_ending_is_not_a_person_being_asked() {
+        let mut session = Session::default();
+        session.background = true;
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "work milestone M1" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "Stop",
+            json!({ "prompt_id": "p1", "last_assistant_message": "Handed off." }),
+            9000,
+        );
+        feed(
+            &mut session,
+            "Notification",
+            json!({ "notification_type": "idle_prompt", "prompt_id": "p1" }),
+            9100,
+        );
+        assert_eq!(session.waiting_reason, "", "nobody is waiting on this");
+        assert_eq!(session.waiting_since, 0, "so the debounce never starts");
+        assert_eq!(session.activity, "Waiting to be resumed");
+        assert_eq!(session.state, "idle");
+        // The alert the pet does raise is counted somewhere else entirely, and
+        // this must not have quietly invented one.
+        assert_eq!(session.blocked, 0);
+    }
+
+    /// The regression the fix has to not cause: an ordinary chat.
+    #[test]
+    fn a_foreground_turn_ending_still_asks_for_you() {
+        let mut session = Session::default();
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "fix the test" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "Stop",
+            json!({ "prompt_id": "p1", "last_assistant_message": "Fixed it." }),
+            9000,
+        );
+        feed(
+            &mut session,
+            "Notification",
+            json!({ "notification_type": "idle_prompt", "prompt_id": "p1" }),
+            9100,
+        );
+        assert_eq!(session.waiting_reason, "Waiting for your reply");
+        assert_eq!(session.waiting_since, 9100);
+    }
+
+    /// The other direction, and the reason this is gated on *why* the session
+    /// is waiting rather than on whether it is a background one. A background
+    /// agent stopped on a permission prompt is stopped for good: no supervisor
+    /// answers that, and it is exactly the case the alert exists for.
+    #[test]
+    fn a_background_session_at_a_permission_prompt_still_alerts() {
+        let mut session = Session::default();
+        session.background = true;
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "deploy it" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "PermissionRequest",
+            json!({
+                "prompt_id": "p1",
+                "tool_name": "Bash",
+                "tool_input": { "command": "rm -rf build" }
+            }),
+            5000,
+        );
+        feed(
+            &mut session,
+            "Notification",
+            json!({
+                "notification_type": "permission_prompt",
+                "prompt_id": "p1",
+                "message": "Claude needs your permission to run rm -rf build"
+            }),
+            5100,
+        );
+        assert_eq!(session.pending_tool, "Bash", "the prompt is on the record");
+        assert_eq!(session.pending_since, 5000);
+        assert!(
+            session.waiting_reason.contains("permission"),
+            "a permission prompt is never resumable: {}",
+            session.waiting_reason
+        );
+        assert_eq!(session.waiting_since, 5100);
+    }
+
+    /// `notification_type` is absent from the published schema, so the message
+    /// text is the fallback path — and it has to make the same distinction, or
+    /// the fix has a hole in it the width of one missing field.
+    #[test]
+    fn the_message_fallback_knows_the_difference_too() {
+        let idle = classify(
+            "Notification",
+            &json!({ "message": "Claude is waiting for your input" }),
+        )
+        .unwrap();
+        assert!(idle.resumable, "a turn simply ending");
+
+        let prompt = classify(
+            "Notification",
+            &json!({ "message": "Claude needs your permission to use Bash" }),
+        )
+        .unwrap();
+        assert!(!prompt.resumable, "a decision, which only a person makes");
+    }
+
+    /// What a hook actually gets handed, both ways, as measured.
+    ///
+    /// The obvious field — `CLAUDE_CODE_SESSION_KIND=bg` — is on the *agent*
+    /// process and does not reach its hooks, which is why reading it alone
+    /// left every background session looking like a chat. `CLAUDE_JOB_DIR` is
+    /// what does come through, on every event of a background session and on
+    /// none of a foreground one.
+    #[test]
+    fn a_background_hook_is_recognised_by_what_it_is_actually_given() {
+        let env = |pairs: Vec<(&'static str, &'static str)>| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+
+        // Measured 2026-08-29, Claude Code 2.1.251, every event of a
+        // `claude --bg` session: SessionStart, UserPromptSubmit, PreToolUse,
+        // PostToolUse, Stop and Notification all carried this and nothing else
+        // that named the session's kind.
+        assert!(reads_as_background(env(vec![
+            ("CLAUDE_JOB_DIR", "/home/tristan/.claude/jobs/959c74a7"),
+            ("CLAUDE_CODE_SESSION_ID", "959c74a7-8f7c-49e4-a782-42645920b8d2"),
+        ])));
+
+        // The same events in a foreground chat, which is the regression this
+        // whole change has to not cause.
+        assert!(!reads_as_background(env(vec![
+            ("CLAUDE_CODE_SESSION_ID", "7a958c6e-dfb0-4e0c-9cd4-f308894c4615"),
+            ("CLAUDE_PID", "230772"),
+        ])));
+
+        // Kept for the day it is forwarded, and because it is the name
+        // `claude agents --json` uses.
+        assert!(reads_as_background(env(vec![(
+            "CLAUDE_CODE_SESSION_KIND",
+            "bg"
+        )])));
+        assert!(!reads_as_background(env(vec![(
+            "CLAUDE_CODE_SESSION_KIND",
+            "interactive"
+        )])));
+
+        // An empty variable is not a job directory. Shells export those freely.
+        assert!(!reads_as_background(env(vec![("CLAUDE_JOB_DIR", "")])));
     }
 }

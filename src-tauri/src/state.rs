@@ -157,6 +157,17 @@ pub struct Session {
     /// True when the project root is a temp directory: throwaway sessions
     /// from scripted runs, which should not compete with real work.
     pub scratch: bool,
+    /// True when nobody is sitting in front of this session: a background
+    /// agent (`claude --bg`), whose turns are ended and restarted by a
+    /// supervisor rather than by a person.
+    ///
+    /// The distinction matters because Claude Code fires the same idle
+    /// `Notification` at the end of every turn, foreground or not. Read as a
+    /// human being asked a question it is the pet's worst lie: the card says
+    /// "Needs you" about a session that is about to be resumed by a daemon,
+    /// and the one alert that is supposed to mean "go and look" starts firing
+    /// at nothing.
+    pub background: bool,
     pub cwd: String,
     pub event: String,
     pub updated_ms: u64,
