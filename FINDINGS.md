@@ -350,6 +350,13 @@ focused window, which is the one thing it should never be.
 
 ## After v0.8.0 — the overlay measured against a "it eats my clicks" report, 2026-08-29
 
+> **Superseded in part — read the next section first.** The verdict below
+> ("not the cause") was measured with the card stack COLLAPSED, which is the
+> state it is in most of the time and the only state this pass looked at.
+> Expanded, the same overlay claimed a 322x304 block. Everything below about
+> focus, passthrough and the other overlay still holds; the "click area is
+> honest" bullet did not.
+
 Reported from the same desktop as L-1 (GNOME 50.1, Ubuntu 26.04, pet under
 XWayland): "the pet is at the front but its click takes up the entire screen" —
 space not reaching a playing video until the video is clicked again, and a left
@@ -399,6 +406,49 @@ checked against a control. Use `org.gnome.Mutter.RemoteDesktop` (the
 `wayland-computer-use` / `wcu-headless` pointer tools). `xdotool
 getmouselocation` is equally untrustworthy: it reports the root window and a
 stale position whenever the pointer is over a Wayland surface.
+
+## After v0.8.0 — the block the cards were claiming, 2026-08-29
+
+Same report, second pass, after the owner sharpened it: opening a video full
+screen leaves space and the arrow keys dead until the video is clicked again,
+and a click on a link or a button does nothing where the right-click menu still
+works.
+
+- **L-5** `main.js:762` — every card claimed clicks for as long as it was on
+  screen, and the cards are the biggest thing the overlay draws. Caught by a
+  watcher logging the live window's X input shape, three cards deep:
+  `28,230 322x98`, `28,333 322x98`, `28,436 322x98` — a **322x304 block** of
+  always-on-top clickable area, screen `x 1553-1875, y 611-915`, sitting over a
+  full-screen video. A click aimed at the video landed on a card
+  (`main.js:361`, dismiss/expand), so the video never got the click, never took
+  the keyboard, and every keystroke went to whatever had focus before. Clicking
+  the video somewhere the pet was not fixed it, which is exactly what was
+  reported. FIXED — at rest the overlay claims only the 96x96 pet. Touching the
+  pet arms the cards and chips; they stay armed while the cursor is on anything
+  the window accepts, and the existing 150ms leave grace covers the few pixels
+  between two cards so the reach from pet to top card is unbroken. The menu and
+  the setup panel are never gated. Measured on the real binary, three chips up:
+  cursor away `256,536 96x96`; cursor on the pet `28,484 322x50` + the sprite;
+  cursor moved from the pet onto a chip, unchanged; cursor far again, back to
+  the sprite alone. With the cursor parked on one chip, disarmed it does not
+  light up and armed it does — the same pixel, owned by the window below and
+  then by the pet.
+- **Why the first pass missed it.** It sampled the shape by hand, twice, and
+  both times the stack happened to be collapsed to chips (`322x50`). The
+  expanded state only showed up once the shape was logged continuously. A
+  measurement of a state machine taken at one moment is a measurement of one
+  state.
+- **What is NOT reachable from a client here, checked layer by layer.** The
+  owner asked for "get out of the way when the thing underneath is full
+  screen". `org.gnome.Shell.Introspect.GetWindows` → `AccessDenied` (portals
+  only). The session's Wayland globals (40 of them, enumerated over the socket)
+  contain no `foreign_toplevel` and no `layer_shell`. XWayland sees only X
+  windows and the browser is a Wayland client. So on GNOME an ordinary app
+  cannot know another window went full screen; that needs a shell extension.
+  `org.gnome.SessionManager.IsInhibited(12)` is the one standard signal in the
+  area — true while a video is playing — but it means "something is inhibiting
+  idle", not "full screen". Arming on touch was chosen instead because it needs
+  none of this and is not GNOME-specific.
 
 ## Parked (recorded, not fixed — reasons given)
 
