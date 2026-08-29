@@ -148,11 +148,28 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
     // and still alerts — a background agent stopped on one is stuck for good,
     // which is the case the alert exists for.
     if session.background && update.resumable {
+        // Never the words "Waiting for your reply", whichever way this goes:
+        // no reply is what either of these is waiting on.
         update.waiting.clear();
-        // The turn is over, so it is not running tools; it has not been
-        // abandoned either, and the sweep leaves an idle session alone.
-        update.state = "idle";
-        update.activity = "Waiting to be resumed".to_string();
+        if session.outcome == "failed" {
+            // Except when the turn did not end but broke. A leg that died on
+            // an API error is not waiting for a supervisor and will not be
+            // resumed by one: the chain is halted until a person looks at it,
+            // and "Waiting to be resumed" written across that is the same lie
+            // as "Needs you", pointing the other way. Seen live — a mission
+            // leg stopped by a model safeguard, its card reading Failed with
+            // this sentence underneath.
+            //
+            // Silent, so what stays on screen is the failure `StopFailure`
+            // already recorded: the word, the headline, and the error body,
+            // which this event carries none of and would otherwise blank.
+            update.silent = true;
+        } else {
+            // The turn is over, so it is not running tools; it has not been
+            // abandoned either, and the sweep leaves an idle session alone.
+            update.state = "idle";
+            update.activity = "Waiting to be resumed".to_string();
+        }
     }
 
     // An event that reached this file after a later one already did.
@@ -1834,5 +1851,54 @@ mod tests {
 
         // An empty variable is not a job directory. Shells export those freely.
         assert!(!reads_as_background(env(vec![("CLAUDE_JOB_DIR", "")])));
+    }
+
+    /// A background leg that broke rather than ended.
+    ///
+    /// Found live: a mission leg stopped dead by a model safeguard, halted
+    /// until a person looks at it, and the idle notification that followed
+    /// wrote "Waiting to be resumed" over the failure. Nothing was going to
+    /// resume it. The suppression is for turns that ended, not turns that
+    /// died.
+    #[test]
+    fn a_background_leg_that_failed_is_not_waiting_to_be_resumed() {
+        let mut session = Session::default();
+        session.background = true;
+        feed(
+            &mut session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "work milestone M1" }),
+            1000,
+        );
+        feed(
+            &mut session,
+            "StopFailure",
+            json!({
+                "prompt_id": "p1",
+                "error_type": "api_error",
+                "error": "API Error: this message was flagged"
+            }),
+            9000,
+        );
+        feed(
+            &mut session,
+            "Notification",
+            json!({ "notification_type": "idle_prompt", "prompt_id": "p1" }),
+            9100,
+        );
+        assert_eq!(session.outcome, "failed", "the failure still stands");
+        assert_eq!(session.kind, "Failed");
+        assert_eq!(session.headline, "Turn failed: api error");
+        assert_ne!(
+            session.activity, "Waiting to be resumed",
+            "nothing is going to resume a halted leg"
+        );
+        assert!(
+            session.detail.contains("flagged"),
+            "the error body survives the notification: {}",
+            session.detail
+        );
+        // Still not a person being asked a question, either.
+        assert_eq!(session.waiting_reason, "");
     }
 }

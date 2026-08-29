@@ -316,6 +316,35 @@ focused window, which is the one thing it should never be.
   drive; verified by the hint suite passing and reasoning at the line, not by
   executing the branch.
 
+## After v0.8.0 — background sessions, 2026-08-29
+
+- **B-1** `hook.rs:678` — Claude Code fires the idle `Notification` at the end
+  of every turn, background or not, so a `claude --bg` leg ending a turn
+  produced `waiting_reason: "Waiting for your reply"` and a "Needs you" card
+  for a session `claude agents --json` was calling `"busy"/"working"` at the
+  same moment. FIXED — `CLAUDE_JOB_DIR` (the one background marker that
+  actually reaches a hook; `CLAUDE_CODE_SESSION_KIND` is set on the agent
+  process and is *not* passed down, measured from `/proc`) flags the session,
+  and an idle notification for one is relabelled rather than believed. Gated
+  on why the session is waiting, not on whether it is a background one: a
+  permission prompt still alerts.
+- **B-2** `hook.rs:150` — found while verifying B-1, on a live mission leg
+  halted by a model safeguard. A background leg that *failed* is not waiting
+  for a supervisor and will not be resumed by one, so B-1's "Waiting to be
+  resumed" label was the same lie pointing the other way. FIXED — the
+  relabel applies to turns that ended, not turns that died; a failed one is
+  recorded silently and the failure stays on the card.
+- **B-3** `hook.rs:337` — a `Notification` arriving after a `StopFailure`
+  blanks `session.detail`, so the error body the failure carried is lost from
+  the expanded panel; the card keeps the word "Failed" with nothing under it.
+  `apply` writes `session.detail = update.detail` unconditionally for any
+  non-silent update, and the notification's is empty. Background failures no
+  longer hit this (B-2 makes them silent), but foreground ones still do.
+  NOT FIXED — the honest fix is to stop blanking `detail` on events that
+  describe no work, which touches every foreground path and wants its own
+  change. Observed 2026-08-29 on session `88b752ad` (`detail: ""` next to
+  `kind: "Failed"`).
+
 ## Parked (recorded, not fixed — reasons given)
 
 - **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,
