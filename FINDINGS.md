@@ -348,6 +348,58 @@ focused window, which is the one thing it should never be.
   the word "Done". Side effect, and an improvement: the prompt no longer
   vanishes from the expanded card the moment the first tool runs.
 
+## After v0.8.0 — the overlay measured against a "it eats my clicks" report, 2026-08-29
+
+Reported from the same desktop as L-1 (GNOME 50.1, Ubuntu 26.04, pet under
+XWayland): "the pet is at the front but its click takes up the entire screen" —
+space not reaching a playing video until the video is clicked again, and a left
+click on a link doing nothing where a right-click menu still works. The pet was
+the suspect. It was measured and it is not the cause; the measurements are here
+so nobody re-derives them.
+
+- **Click area is honest.** `XShapeGetRectangles(ShapeInput)` on the live
+  overlay returned exactly what is painted: `256,536 96x96` (the sprite) plus
+  the chip row, `29,511 321x23` at the time of measurement. Overlaid on a
+  screenshot of the same window, the rectangles hug the visible chips. There
+  is no invisible region, and nothing outside the 360x640 window can be
+  affected either way.
+- **Clicks outside those rectangles reach the window below.** Reproduced on the
+  headless session: the real binary over a Wayland-native GTK window, and the
+  same window fullscreen. A click in the transparent part of the overlay was
+  logged by the window underneath, and moved focus to it. XWayland does
+  translate the X input shape into the surface's Wayland input region.
+- **The overlay cannot take the keyboard.** With another window focused,
+  clicking the sprite, clicking a button inside its own panel, hiding and
+  re-showing the window, and a click over a *fullscreen* focused window all
+  left focus where it was. An explicit `org.gnome.Mutter` ActivateWindow on it
+  was accepted and then ignored: focus stayed on the other window. L-1's fix
+  holds.
+- **The other always-on-top overlay on that desktop is innocent too.**
+  `claude-brainrot` is `_NET_WM_WINDOW_TYPE_UTILITY`, input hint False, no
+  `WM_TAKE_FOCUS`, and an *empty* input region (0 rectangles — an unshaped
+  window returns 1 covering itself, checked against a control), so it can
+  neither be clicked nor focused.
+- **L-4** `tauri.conf.json` / GTK — LATENT, not the reported bug. The overlay
+  advertises `WM_TAKE_FOCUS` in `WM_PROTOCOLS` while its ICCCM input hint is
+  False. GTK sets that protocol unconditionally at realize and neither tao nor
+  Tauri removes it, so the window is ICCCM "globally active" rather than "no
+  input": mutter is entitled to make it the focus window and hand it
+  `WM_TAKE_FOCUS`, which GTK then declines because `accept_focus` is false —
+  the keyboard would land nowhere. That is exactly the L-1 symptom by a second
+  route. Not observed: every path tried above left focus alone. Fix if it ever
+  is observed — drop `WM_TAKE_FOCUS` from `WM_PROTOCOLS` after realize, which
+  is what makes `claude-brainrot` unfocusable by construction.
+
+Method note for the next person: **XTEST does not work on this desktop.**
+`xdotool click` and `wmctrl` are not routed to the compositor on GNOME 50 and
+asking pops a Remote Desktop consent dialog; a click driven that way lands
+nowhere and looks exactly like a click that was swallowed. Two hours of this
+investigation were spent on measurements taken that way before the readout was
+checked against a control. Use `org.gnome.Mutter.RemoteDesktop` (the
+`wayland-computer-use` / `wcu-headless` pointer tools). `xdotool
+getmouselocation` is equally untrustworthy: it reports the root window and a
+stale position whenever the pointer is over a Wayland surface.
+
 ## Parked (recorded, not fixed — reasons given)
 
 - **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,
