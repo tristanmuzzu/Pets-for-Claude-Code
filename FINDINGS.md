@@ -423,16 +423,24 @@ works.
   (`main.js:361`, dismiss/expand), so the video never got the click, never took
   the keyboard, and every keystroke went to whatever had focus before. Clicking
   the video somewhere the pet was not fixed it, which is exactly what was
-  reported. FIXED — at rest the overlay claims only the 96x96 pet. Touching the
-  pet arms the cards and chips; they stay armed while the cursor is on anything
-  the window accepts, and the existing 150ms leave grace covers the few pixels
-  between two cards so the reach from pet to top card is unbroken. The menu and
-  the setup panel are never gated. Measured on the real binary, three chips up:
-  cursor away `256,536 96x96`; cursor on the pet `28,484 322x50` + the sprite;
-  cursor moved from the pet onto a chip, unchanged; cursor far again, back to
-  the sprite alone. With the cursor parked on one chip, disarmed it does not
-  light up and armed it does — the same pixel, owned by the window below and
-  then by the pet.
+  reported. STILL OPEN — a fix was written, measured and then reverted at the
+  owner's request (`7778c42`, reverted by `1dcc1ed`); the block described above
+  is what the overlay does today.
+
+  What was tried, so the next attempt starts further along: at rest the overlay
+  claimed only the 96x96 pet, and touching the pet armed the cards and chips,
+  which stayed armed while the cursor was on anything the window accepts (the
+  existing 150ms leave grace covering the few pixels between two cards, so the
+  reach from pet to top card was unbroken; menu and setup panel never gated).
+  It worked — measured on the real binary, three chips up: cursor away
+  `256,536 96x96`; cursor on the pet `28,484 322x50` + the sprite; cursor moved
+  from the pet onto a chip, unchanged; cursor far again, back to the sprite
+  alone. With the cursor parked on one chip, disarmed it did not light up and
+  armed it did — the same pixel, owned by the window below and then by the pet.
+  No reason was given for the revert and none is guessed here. The one cost
+  the approach is known to carry, recorded so a later attempt can weigh it:
+  every click on a chip or a card began with a detour to the pet, which is a
+  tax on the gesture the overlay is used with most.
 - **Why the first pass missed it.** It sampled the shape by hand, twice, and
   both times the stack happened to be collapsed to chips (`322x50`). The
   expanded state only showed up once the shape was logged continuously. A
