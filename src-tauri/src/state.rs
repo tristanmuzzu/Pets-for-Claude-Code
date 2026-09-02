@@ -22,6 +22,19 @@ const STALE_AFTER_MS: u64 = 12 * 60 * 60 * 1000;
 /// without a `Stop`, and the card must stop claiming otherwise.
 const WORKING_STALE_MS: u64 = 5 * 60 * 1000;
 
+/// How far before the recorded boot a session's last write must fall before
+/// the reboot is taken as its death. The boot time is read back from the
+/// kernel and the file's stamp from the wall clock, and the two are not the
+/// same clock: an NTP step after boot moves one and not the other.
+const BOOT_MARGIN_MS: u64 = 60 * 1000;
+
+/// How long a turn that yielded the floor with background work still running
+/// may go without an event. Nothing fires while a background command runs,
+/// and it reports back into the same turn when it finishes, so this silence
+/// is the wait itself. Bounded, because a task the overlay never hears from
+/// again should not hold a card open all night.
+const BACKGROUND_STALE_MS: u64 = 60 * 60 * 1000;
+
 pub fn home_dir() -> PathBuf {
     #[cfg(windows)]
     let raw = std::env::var_os("USERPROFILE");
@@ -205,6 +218,16 @@ pub struct Session {
     /// Why the pending command looks irreversible. A hint for the card only.
     /// Nothing here approves, denies, or blocks anything.
     pub pending_risk: String,
+    /// Which agent raised the prompt: empty for the session's own agent, the
+    /// `agent_id` for a subagent's. Only that agent's next event, or any
+    /// event of the main agent, may clear it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pending_agent: String,
+    /// The latest moment a tool call now in flight may still be running
+    /// without any further event having fired. The sweep does not read
+    /// silence as death before it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tool_deadline_ms: u64,
     /// Tool calls the auto-mode classifier refused inside the current turn.
     ///
     /// Policy, not failure, and the one number here a person can act on: it
@@ -295,14 +318,14 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn push_recent(&mut self, state: &str, text: &str) {
+    pub fn push_recent(&mut self, state: &str, text: &str, now: u64) {
         if let Some(last) = self.recent.last() {
             if last.state == state && last.text == text {
                 return;
             }
         }
         self.recent.push(Entry {
-            ms: now_ms(),
+            ms: now,
             state: state.to_string(),
             text: text.to_string(),
         });
@@ -330,6 +353,7 @@ impl Session {
         self.pending_tool.clear();
         self.pending_detail.clear();
         self.pending_risk.clear();
+        self.pending_agent.clear();
         self.pending_since = 0;
     }
 }
@@ -499,6 +523,39 @@ pub fn save_config(config: &Config) -> std::io::Result<()> {
     write_atomic(&config_path(), &bytes)
 }
 
+/// Removes `*.tmp` files a hard stop left behind.
+///
+/// `write_atomic` writes a temp file and renames it; a machine that loses
+/// power between the two leaves an empty `running.json.<pid>.tmp` that
+/// nothing else ever looks at. Two of them were the tell that a phantom card
+/// had come from an unclean stop, which is worth knowing once and not worth
+/// keeping. Anything older than a minute is nobody's in-flight write.
+pub fn remove_stale_temp_files() -> usize {
+    let mut removed = 0;
+    for dir in [root(), sessions_dir()] {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("tmp") {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .map(|age| age.as_secs() >= 60)
+                .unwrap_or(false);
+            if old && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 /// Write via temp file + rename so a reader never sees a half-written file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -536,11 +593,16 @@ impl FileLock {
     /// Losing an event is worse than an interleaved write: hooks are the only
     /// source of truth here, and a hook that gives up writes nothing at all.
     pub fn acquire(target: &Path) -> Self {
+        Self::acquire_within(target, 200)
+    }
+
+    /// The same lock, with a caller-chosen patience.
+    pub fn acquire_within(target: &Path, wait_ms: u64) -> Self {
         let path = target.with_extension("json.lock");
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        for attempt in 0..40 {
+        for attempt in 0..(wait_ms / 5).max(1) {
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -630,21 +692,42 @@ fn attention_rank(session: &Session) -> u8 {
 
 /// Retires sessions that are no longer telling the truth.
 ///
-/// Three rules, in order of how confident each is:
+/// Four rules, in order of how confident each is:
 ///
 /// 1. The agent process is gone. Certain, so delete the session outright.
-/// 2. Nothing has happened for [`WORKING_STALE_MS`] while the card claims work
+/// 2. The file was last written before this machine booted. Whatever process
+///    wrote it did not survive the reboot, whether or not the hook ever
+///    learned its pid. Certain, so delete. This is the rule that catches a
+///    session recorded by a build that knew no process identity on this
+///    platform, and it is why a "Needs you" card no longer outlives the
+///    machine that asked.
+/// 3. Nothing has happened for [`WORKING_STALE_MS`] while the card claims work
 ///    is in progress. Claude Code fires a hook per tool call, so that silence
 ///    means the turn died without a `Stop`. Downgrade rather than delete, since
 ///    the session may still be resumed. A session genuinely *waiting* on a
 ///    human is left alone: that claim stays true no matter how long it takes.
-/// 3. Nothing at all for [`STALE_AFTER_MS`]. Delete.
+/// 4. Nothing at all for [`STALE_AFTER_MS`]. Delete.
+///
+/// Every retirement is logged with the rule that made it, because the one
+/// question a stale card raises — "why is this still here?" — is otherwise
+/// unanswerable after the fact.
 ///
 /// Returns the number of files it changed, so callers can skip a redraw.
 pub fn sweep() -> usize {
     let now = now_ms();
     let Ok(entries) = fs::read_dir(sessions_dir()) else {
         return 0;
+    };
+    let boot_cutoff = process::boot_time_ms().map(|boot| boot.saturating_sub(BOOT_MARGIN_MS));
+    let retire = |path: &Path, session: &Session, why: &str| {
+        let _ = fs::remove_file(path);
+        crate::log::write(&format!(
+            "retired session {} ({}, {}, last event {}s ago): {why}",
+            session.session_id.chars().take(8).collect::<String>(),
+            session.project,
+            session.kind,
+            now.saturating_sub(session.updated_ms) / 1000,
+        ));
     };
     let mut changed = 0;
     for entry in entries.flatten() {
@@ -677,16 +760,30 @@ pub fn sweep() -> usize {
         let age = now.saturating_sub(session.updated_ms);
 
         if session.agent_pid != 0 && !process::is_alive(session.agent_pid, session.agent_created) {
-            let _ = fs::remove_file(&path);
+            retire(
+                &path,
+                &session,
+                &format!("agent process {} is gone", session.agent_pid),
+            );
             changed += 1;
             continue;
         }
-        if age > STALE_AFTER_MS {
-            let _ = fs::remove_file(&path);
+        if boot_cutoff.is_some_and(|cutoff| session.updated_ms < cutoff) {
+            retire(&path, &session, "written before this boot");
             changed += 1;
             continue;
         }
-        if has_stopped_responding(&session, age) {
+        // A prompt the agent is still sitting at is exempt from age, as the
+        // README promises — but only once the agent is known to be there.
+        // An unknown process (no pid recorded) waiting for twelve hours is
+        // the phantom card this sweep exists to remove.
+        let known_to_be_waiting = session.waiting_since > 0 && session.agent_pid != 0;
+        if age > STALE_AFTER_MS && !known_to_be_waiting {
+            retire(&path, &session, "no event for twelve hours");
+            changed += 1;
+            continue;
+        }
+        if has_stopped_responding(&session, age, now) {
             session.state = "idle".to_string();
             session.kind = "Idle".to_string();
             session.activity.clear();
@@ -723,14 +820,26 @@ pub fn sweep() -> usize {
 ///
 /// A session whose agent process is genuinely gone is retired before this is
 /// ever asked, which is the honest test.
-fn has_stopped_responding(session: &Session, age: u64) -> bool {
+fn has_stopped_responding(session: &Session, age: u64, now: u64) -> bool {
     if age <= WORKING_STALE_MS || !session.is_running() {
         return false;
     }
     if !session.outcome.is_empty() {
         return false;
     }
-    session.waiting_since == 0 && session.pending_since == 0
+    if session.waiting_since > 0 || session.pending_since > 0 {
+        return false;
+    }
+    // A tool call that declared a long budget is allowed its silence.
+    if session.tool_deadline_ms > now {
+        return false;
+    }
+    // So is a turn that yielded the floor with background work outstanding:
+    // the next event is that work reporting back, and it may be a while.
+    if session.event == "Stop" && !session.tasks.is_empty() && age <= BACKGROUND_STALE_MS {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -754,16 +863,49 @@ mod tests {
 
         let mut asked = quiet("running");
         asked.waiting_since = 1;
-        assert!(!has_stopped_responding(&asked, long));
+        assert!(!has_stopped_responding(&asked, long, NOW));
 
         let mut pending = quiet("running");
         pending.pending_since = 1;
-        assert!(!has_stopped_responding(&pending, long));
+        assert!(!has_stopped_responding(&pending, long, NOW));
 
         // Silence with nobody being asked anything is the case this is for.
-        assert!(has_stopped_responding(&quiet("running"), long));
+        assert!(has_stopped_responding(&quiet("running"), long, NOW));
         // And it takes more than a pause between tool calls.
-        assert!(!has_stopped_responding(&quiet("running"), 1000));
+        assert!(!has_stopped_responding(&quiet("running"), 1000, NOW));
+    }
+
+    const NOW: u64 = 1_000_000_000;
+
+    /// A seven-minute build is one tool call and one long silence. The call
+    /// said how long it might take; the sweep has to believe it.
+    #[test]
+    fn a_tool_call_inside_its_budget_is_not_dead() {
+        let long = WORKING_STALE_MS * 2;
+        let mut building = quiet("running");
+        building.tool_deadline_ms = NOW + 1;
+        assert!(!has_stopped_responding(&building, long, NOW));
+        building.tool_deadline_ms = NOW - 1;
+        assert!(has_stopped_responding(&building, long, NOW));
+    }
+
+    /// The floor was yielded while background work ran. The silence is the
+    /// wait, for a while.
+    #[test]
+    fn waiting_on_background_work_is_not_dead_for_an_hour() {
+        let mut parked = quiet("running");
+        parked.event = "Stop".into();
+        parked.tasks = vec!["b1".into()];
+        assert!(!has_stopped_responding(&parked, WORKING_STALE_MS * 2, NOW));
+        assert!(has_stopped_responding(
+            &parked,
+            BACKGROUND_STALE_MS + 1,
+            NOW
+        ));
+        // Without anything outstanding, silence after a Stop that kept the
+        // state running is the usual rule.
+        parked.tasks.clear();
+        assert!(has_stopped_responding(&parked, WORKING_STALE_MS * 2, NOW));
     }
 
     /// A turn that said how it ended is not stuck, however long ago that was.
@@ -771,10 +913,11 @@ mod tests {
     fn a_finished_turn_is_not_a_dead_one() {
         let mut done = quiet("running");
         done.outcome = "done".into();
-        assert!(!has_stopped_responding(&done, WORKING_STALE_MS * 100));
+        assert!(!has_stopped_responding(&done, WORKING_STALE_MS * 100, NOW));
         assert!(!has_stopped_responding(
             &quiet("idle"),
-            WORKING_STALE_MS * 100
+            WORKING_STALE_MS * 100,
+            NOW
         ));
     }
 

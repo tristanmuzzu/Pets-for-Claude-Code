@@ -53,6 +53,15 @@ const LOOK_INTERVAL: Duration = Duration::from_millis(60);
 /// Often enough that a crashed session disappears while you are still looking
 /// at the card, rare enough that it costs nothing.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// The heartbeat other invocations read to tell an overlay is up. Its
+/// readers allow six seconds of silence, so writing it on every 300ms poll
+/// was an atomic file write — create, write, rename — three times a second,
+/// around the clock, for a three-times-a-second answer nobody asked for. This
+/// keeps a three-fold margin under the readers' timeout.
+const BEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// A `pipsqueak control` command older than this was meant for a pet that is
+/// no longer the one reading it.
+const COMMAND_STALE_MS: u64 = 10_000;
 /// How long the frontend may go quiet before we assume the page is dead.
 ///
 /// It reports its clickable regions at least once a second. Generous anyway,
@@ -573,7 +582,7 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
 
 #[tauri::command]
 fn quit(app: AppHandle) {
-    shutdown(&app);
+    shutdown(&app, "the panel");
 }
 
 /// Stops the overlay, and stops it claiming to be running.
@@ -583,7 +592,11 @@ fn quit(app: AppHandle) {
 /// behind meant quitting and immediately starting again did nothing at all,
 /// silently — the single-instance guard causing the complaint it exists to
 /// prevent.
-fn shutdown(app: &AppHandle) {
+fn shutdown(app: &AppHandle, why: &str) {
+    // Logged, because a log with a hundred "started" lines and no "quit"
+    // lines cannot tell a crash from a logout from somebody clicking Quit —
+    // which was the question a card surviving a reboot raised.
+    log::write(&format!("quit via {why}"));
     let _ = fs::remove_file(state::heartbeat_path());
     app.exit(0);
 }
@@ -1008,6 +1021,7 @@ fn spawn_poller(app: AppHandle) {
         // with a config reading 1514,425:
         //   clamped (0,0) -> (69,33) with window inner 360x640 ...
         let mut next_rescue = Instant::now() + SWEEP_INTERVAL;
+        let mut next_beat = Instant::now();
         loop {
             // Hooks can only ever say what happened; nothing writes a file to
             // report that Claude Code died. The sweep is the only thing that
@@ -1049,7 +1063,10 @@ fn spawn_poller(app: AppHandle) {
             if changed {
                 let _ = app.emit("pipsqueak://sessions", &sessions);
             }
-            beat();
+            if Instant::now() >= next_beat {
+                beat();
+                next_beat = Instant::now() + BEAT_INTERVAL;
+            }
             drain_commands(&app);
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -1225,27 +1242,63 @@ fn beat() {
 /// Applies whatever `pipsqueak control …` left for us, then clears it.
 fn drain_commands(app: &AppHandle) {
     let path = state::command_path();
-    let Ok(raw) = fs::read_to_string(&path) else {
+    if !path.is_file() {
+        return;
+    }
+    // Claimed by rename before it is read, so a command written between the
+    // read and the delete is not thrown away unread.
+    let claimed = path.with_extension("json.busy");
+    if fs::rename(&path, &claimed).is_err() {
+        return;
+    }
+    let Ok(raw) = fs::read_to_string(&claimed) else {
+        let _ = fs::remove_file(&claimed);
         return;
     };
-    let Some(action) = serde_json::from_str::<Value>(&raw).ok().and_then(|value| {
+    let parsed = serde_json::from_str::<Value>(&raw).ok();
+    let Some(action) = parsed.as_ref().and_then(|value| {
         value
             .get("action")
             .and_then(Value::as_str)
             .map(String::from)
     }) else {
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&claimed);
         return;
     };
+    // A command nobody was around to drain — written in the last moment
+    // before a logout or a crash — used to run on the first tick of the next
+    // login: the pet quit, or came up hidden, with nothing in the log to say
+    // why. A command is an instruction for now, not for whenever.
+    let age_ms = parsed
+        .as_ref()
+        .and_then(|value| value.get("ms"))
+        .and_then(Value::as_u64)
+        .map(|ms| state::now_ms().saturating_sub(ms))
+        .unwrap_or(0);
+    if age_ms > COMMAND_STALE_MS {
+        log::write(&format!(
+            "ignored a {action} command from {}s ago",
+            age_ms / 1000
+        ));
+        let _ = fs::remove_file(&claimed);
+        return;
+    }
     // A pet switch is delivered as an event, and an event emitted before the
     // page's listeners attach is dropped while the CLI has already printed
-    // "Pet switched". Leave the command for a later tick instead.
+    // "Pet switched". Leave the command for a later tick instead — unless a
+    // newer one has arrived in the meantime, which supersedes it.
     if action.starts_with("pet:")
         && app.state::<Frontend>().last_seen_ms.load(Ordering::Relaxed) == 0
     {
+        if path.exists() {
+            let _ = fs::remove_file(&claimed);
+        } else {
+            let _ = fs::rename(&claimed, &path);
+        }
         return;
     }
-    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&claimed);
+    log::write(&format!("command: {action}"));
 
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return;
@@ -1269,7 +1322,7 @@ fn drain_commands(app: &AppHandle) {
             let _ = window.hide();
         }
         "toggle" => toggle_window(app),
-        "quit" => shutdown(app),
+        "quit" => shutdown(app, "a control command"),
         other => {
             if let Some(pet) = other.strip_prefix("pet:") {
                 let _ = window.show();
@@ -1380,7 +1433,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 };
                 let _ = app.emit("pipsqueak://notice", message);
             }
-            "quit" => shutdown(app),
+            "quit" => shutdown(app, "the tray menu"),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -1417,6 +1470,12 @@ pub fn run() {
     let _ = fs::create_dir_all(sessions_dir());
     let _ = fs::create_dir_all(pets_dir());
     let _ = fs::create_dir_all(root());
+    let stale = state::remove_stale_temp_files();
+    if stale > 0 {
+        log::write(&format!(
+            "removed {stale} leftover temp file(s): the previous stop was not clean"
+        ));
+    }
     state::sweep();
 
     tauri::Builder::default()

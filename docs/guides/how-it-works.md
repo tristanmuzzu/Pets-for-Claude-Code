@@ -194,21 +194,48 @@ Nothing writes a file to say Claude Code crashed. A sweep runs every ten
 seconds:
 
 - The agent process is gone → the session is retired immediately. Identity is
-  `(pid, process creation time)`, never the pid alone, because Windows reuses
-  pids and a reused one would report a dead session as alive.
+  `(pid, process creation time)`, never the pid alone, because every OS reuses
+  pids and a reused one would report a dead session as alive. The hook finds
+  the agent by walking up from itself past any shell in between: the process
+  table on Windows, `/proc` on Linux, `proc_pidinfo` on macOS (the last by
+  inspection only, with the kernel's own echo of the pid as the layout check).
+- The file was last written before the machine booted → retired immediately.
+  Whatever wrote it did not survive the reboot, and this needs no pid at all,
+  so it also covers files written by older builds. Until this change the two rules
+  above were Windows-only; on Linux a chat that had asked a question stayed
+  "Needs you" for twelve hours after the reboot that killed it.
 - Running with no events for five minutes → dropped to idle. Claude Code fires a
   hook per tool call, so that silence means the turn died without a `Stop`. Not
   a completion: it says "stopped responding", because that is what happened.
-- Nothing at all for twelve hours → deleted.
+  Two silences are allowed to run longer: a tool call that declared its own
+  timeout (a ten-minute `Bash` build is one call and one long silence, and the
+  hook records the budget it was given), and a turn that yielded the floor
+  with background work still listed, for up to an hour.
+- Nothing at all for twelve hours → deleted, unless the session is waiting on
+  you *and* its agent process is known and still alive.
 
-A session that is genuinely *waiting on you* is never retired by age. That claim
-stays true no matter how long you take — and the five-minute rule above
-explicitly exempts it, because a session blocked on a human produces no events
-*by definition*. Until v0.7.4 it did not, so a prompt you walked away from for
-five minutes came back reading "Stopped responding" with the question still on
-the card. The two claims came from the same silence and only one of them was
-checkable. An agent that has actually died is caught by the process check
-above, which is evidence rather than inference.
+Each retirement is written to `~/.pipsqueak/log.txt` with the rule that made
+it, so "why was that card still there" can be answered afterwards.
+
+A session that is genuinely *waiting on you* is never retired by age while its
+agent is there to be answered. That claim stays true no matter how long you
+take — the five-minute rule above explicitly exempts it, because a session
+blocked on a human produces no events *by definition*, and the twelve-hour rule
+exempts it once the process behind it is known. Until v0.7.4 it did not, so a
+prompt you walked away from for five minutes came back reading "Stopped
+responding" with the question still on the card. The two claims came from the
+same silence and only one of them was checkable. An agent that has actually
+died is caught by the process check above, which is evidence rather than
+inference; a session whose process was never learned still ages out at twelve
+hours, because a claim nobody can check is the phantom card this sweep exists
+to remove.
+
+One more word on "Waiting for your reply". Claude Code raises that notification
+sixty seconds after *every* answer, so a finished chat you have not typed into
+for a minute reads as needing you. The card says so — it is what Claude Code
+said — but a click puts it away, the same as a Done card, because a finished
+turn is not a question. A real permission prompt cannot be dismissed that way:
+the question is still being asked.
 
 ## When it isn't working
 

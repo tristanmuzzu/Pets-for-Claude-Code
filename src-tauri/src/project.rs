@@ -88,9 +88,31 @@ fn git_root(start: &Path) -> Option<PathBuf> {
 
 fn worktree_owner(marker: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(marker).ok()?;
-    let raw = text.split_once("gitdir:")?.1.trim().replace('\\', "/");
-    let idx = raw.find("/.git/worktrees/")?;
-    Some(PathBuf::from(&raw[..idx]))
+    let raw = text.split_once("gitdir:")?.1.trim().to_string();
+    // Git 2.48+ can write the pointer relative to the marker
+    // (`worktree.useRelativePaths`), which read as a project called "..".
+    let gitdir = if Path::new(&raw).is_absolute() {
+        PathBuf::from(&raw)
+    } else {
+        marker.parent()?.join(&raw)
+    };
+    let gitdir = gitdir.canonicalize().unwrap_or(gitdir);
+    owner_of_gitdir(&gitdir.to_string_lossy())
+}
+
+/// The repository a worktree's `gitdir` pointer belongs to.
+///
+/// `<repo>/.git/worktrees/<name>` for an ordinary checkout, and
+/// `<repo>.git/worktrees/<name>` for a bare one, whose "project" is the bare
+/// directory itself.
+fn owner_of_gitdir(gitdir: &str) -> Option<PathBuf> {
+    let gitdir = gitdir.replace('\\', "/");
+    if let Some(idx) = gitdir.find("/.git/worktrees/") {
+        return Some(PathBuf::from(&gitdir[..idx]));
+    }
+    let idx = gitdir.find("/worktrees/")?;
+    let owner = &gitdir[..idx];
+    owner.ends_with(".git").then(|| PathBuf::from(owner))
 }
 
 fn is_scratch(root: &Path) -> bool {
@@ -112,6 +134,24 @@ fn is_scratch(root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both shapes git writes, and the one that is not a worktree at all.
+    #[test]
+    fn a_worktree_pointer_names_its_repository() {
+        assert_eq!(
+            owner_of_gitdir("/home/t/projects/eliza/.git/worktrees/wt-p1"),
+            Some(PathBuf::from("/home/t/projects/eliza"))
+        );
+        assert_eq!(
+            owner_of_gitdir("/srv/git/eliza.git/worktrees/wt-p1"),
+            Some(PathBuf::from("/srv/git/eliza.git"))
+        );
+        assert_eq!(
+            owner_of_gitdir("C:\\code\\eliza\\.git\\worktrees\\wt-p1"),
+            Some(PathBuf::from("C:/code/eliza"))
+        );
+        assert_eq!(owner_of_gitdir("/home/t/projects/eliza/.git"), None);
+    }
 
     #[test]
     fn a_plain_directory_is_its_own_project() {

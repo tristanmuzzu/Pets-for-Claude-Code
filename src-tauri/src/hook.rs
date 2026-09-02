@@ -61,7 +61,14 @@ pub fn run(fallback_event: Option<String>) {
         // this delete. The lock file itself is left alone: removing it out
         // from under a live holder lets a third writer into the critical
         // section, and an orphaned lock expires on its own.
-        let _lock = FileLock::acquire(&path);
+        //
+        // Patiently: `acquire` gives up after 200ms and proceeds unlocked,
+        // which is right for an event (losing it is worse than an interleaved
+        // write) and wrong here, where deleting under a holder mid-write lets
+        // its rename bring the whole session back as a zombie card. This
+        // hook is async and nothing is waiting on it, so it can afford to
+        // wait for a slow `project::resolve` to finish.
+        let _lock = FileLock::acquire_within(&path, 3_000);
         let _ = fs::remove_file(&path);
         return;
     }
@@ -123,7 +130,14 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
     // work. Taking it at face value cleared the outcome and relabelled a
     // finished card "Delegating", so the turn that had just been announced as
     // done went back to looking busy with nothing running.
-    let trailing_subagent = is_trailing_subagent(event, session);
+    // Which agent this event belongs to. A subagent's tool calls arrive on
+    // the *parent's* session id with `agent_id` set; see below.
+    let by_subagent = payload
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    let trailing_subagent = is_trailing_subagent(event, &by_subagent, session);
     if trailing_subagent {
         update.state = "";
         update.kind.clear();
@@ -212,20 +226,15 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
             session.transcript = transcript.to_string();
         }
     }
-    // Which agent this event belongs to, and which turn.
+    // Which turn this event belongs to.
     //
-    // Both are in every hook payload and neither was being read. A subagent's
-    // tool calls arrive on the *parent's* session id with `agent_id` set, so
-    // without this the card counted three subagents' work as the main agent's
-    // actions and flipped its own status line to whatever a subagent happened
-    // to be doing — "Editing spiralplan.py" while the main agent was sitting
-    // still waiting for them. Narration already refuses sidechain voices for
-    // exactly this reason; the tool line had no equivalent.
-    let by_subagent = payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_default();
+    // `agent_id` and `prompt_id` are in every hook payload and neither was
+    // being read. Without the first, the card counted three subagents' work
+    // as the main agent's actions and flipped its own status line to whatever
+    // a subagent happened to be doing — "Editing spiralplan.py" while the
+    // main agent was sitting still waiting for them. Narration already
+    // refuses sidechain voices for exactly this reason; the tool line had no
+    // equivalent.
     let prompt_id = payload
         .get("prompt_id")
         .and_then(Value::as_str)
@@ -259,6 +268,10 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
         session.agents.clear();
     }
     if event == "PreToolUse" {
+        // The longest this call may legitimately run without any further
+        // event. Extends, never shortens: two calls in flight are covered by
+        // the later deadline, and a finished call simply lets it expire.
+        session.tool_deadline_ms = session.tool_deadline_ms.max(now + tool_budget_ms(payload));
         session.tools += 1;
         // The status line reads "N actions · 4m", and the clock beside it is
         // the *turn's*. So the count has to be the turn's own work, not the
@@ -272,9 +285,22 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
     // it was blocked on. Without this, a denied permission followed by the
     // turn ending left "Needs you" on the card for hours — the outcome the
     // same event carries is applied just below, after the slate is clean.
+    //
+    // Only the main agent's own events count. A subagent that outlives the
+    // answer keeps making tool calls on the parent's session id, and taking
+    // those as progress cleared the outcome — a finished card went back to
+    // "Delegating" with nothing running — and cleared a permission prompt the
+    // main agent was still sitting at.
     let resolves = PROGRESS_EVENTS.contains(&event) || event == "Stop" || event == "StopFailure";
-    if resolves && !trailing_subagent && !out_of_order {
+    if resolves && !trailing_subagent && !out_of_order && by_subagent.is_empty() {
         session.clear_pending();
+        // Work resuming inside the same turn — a stop hook sent it back, or
+        // it carried on after a `Stop` the sweep had read as the end — is the
+        // turn's clock starting again. Left frozen at the vetoed `Stop`, a
+        // card read "12m" over a turn forty-six minutes in.
+        if PROGRESS_EVENTS.contains(&event) {
+            session.turn_ended_ms = 0;
+        }
     }
     // Anything other than the prompt itself means the prompt is over.
     //
@@ -308,20 +334,34 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
         "Stop",
         "StopFailure",
     ];
+    //
+    // ...and only by the agent that was asked. A subagent's prompt used to be
+    // recorded and then unclearable: only a main-agent event could clear it,
+    // so an answered prompt kept "Needs you" on the card for as long as the
+    // subagent ran. The main agent's own events still clear anything, since
+    // the main agent moving means Claude Code is no longer blocked.
     let answers_prompt = ANSWERS_PROMPT.contains(&event);
-    if !session.pending_tool.is_empty() && answers_prompt && by_subagent.is_empty() {
+    let same_asker = by_subagent.is_empty() || by_subagent == session.pending_agent;
+    if !session.pending_tool.is_empty() && answers_prompt && same_asker {
         session.clear_permission();
     }
     // Compare the detail too: two consecutive prompts for the same tool but
     // different commands must not leave the previous command's text, risk
     // label, and an already-elapsed debounce clock on the new prompt.
+    //
+    // Never from a straggler: a `PermissionRequest` for the last tool of a
+    // turn can land after the `Stop` (auto-mode answers in milliseconds, and
+    // three hook processes race), and nothing in that turn will ever arrive
+    // to clear a prompt raised on a finished card.
     if !update.permission.is_empty()
+        && !out_of_order
         && (session.pending_tool != update.permission
             || session.pending_detail != update.permission_detail)
     {
         session.pending_tool = update.permission.clone();
         session.pending_detail = update.permission_detail.clone();
         session.pending_risk = update.permission_risk.to_string();
+        session.pending_agent = by_subagent.clone();
         session.pending_since = now;
     }
     if !update.state.is_empty() && !out_of_order {
@@ -373,9 +413,11 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
     }
     session.subagents = session.agents.len() as u64;
 
-    // What Claude Code itself says is still in flight. Present on the `Stop`
-    // family only, which is exactly where it is needed: the moment the card
-    // chooses between "Done" and "Finishing".
+    // What Claude Code itself says is still in flight. Carried by the `Stop`
+    // family, which is where it is needed — the moment the card chooses
+    // between "Done" and "Finishing" — and, as it turns out, by
+    // `SubagentStop` too (observed live: two background shells listed on
+    // one). Whoever carries it, the newest answer wins.
     if let Some(tasks) = payload.get("background_tasks").and_then(Value::as_array) {
         session.tasks = tasks
             .iter()
@@ -411,9 +453,12 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
             session.headline = headline;
         }
     }
+    // High-water marks. A straggler used to move `event_ms` *backwards* to
+    // its own stamp, so the ordering guard held for exactly one straggler and
+    // the second one un-finished the turn.
     session.event = event.to_string();
-    session.event_ms = now;
-    session.updated_ms = now;
+    session.event_ms = session.event_ms.max(now);
+    session.updated_ms = session.updated_ms.max(now);
     if !update.silent && !update.activity.is_empty() {
         let tag = if !update.outcome.is_empty() {
             update.outcome
@@ -428,7 +473,7 @@ fn apply(session: &mut Session, event: &str, payload: &Value, mut update: Update
         } else {
             update.state
         };
-        session.push_recent(tag, &update.activity);
+        session.push_recent(tag, &update.activity, now);
     }
 }
 
@@ -877,7 +922,6 @@ fn kind_of(tool: &str) -> String {
         "Task" | "Agent" => "Delegating",
         "Skill" => "Running a skill",
         "TodoWrite" | "TaskCreate" | "TaskUpdate" | "TaskList" | "TaskGet" => "Planning",
-        "" => "Working",
         _ => "Working",
     }
     .to_string()
@@ -1025,8 +1069,11 @@ fn short(value: &str, fallback: &str) -> String {
 /// A subagent event that arrives after the turn it belonged to has ended.
 ///
 /// Claude Code sends `SubagentStop` for work that outlives the answer, so this
-/// is routine rather than exceptional, and it must not restart the turn.
-fn is_trailing_subagent(event: &str, session: &Session) -> bool {
+/// is routine rather than exceptional, and it must not restart the turn. The
+/// same goes for every tool call that subagent makes in the meantime: they
+/// arrive stamped with its `agent_id` on the parent's session, and the turn
+/// that announced itself done is still done while they happen.
+fn is_trailing_subagent(event: &str, by_subagent: &str, session: &Session) -> bool {
     match event {
         "SubagentStart" => !session.outcome.is_empty(),
         // A `SubagentStop` with nothing outstanding is also bookkeeping when
@@ -1034,8 +1081,37 @@ fn is_trailing_subagent(event: &str, session: &Session) -> bool {
         // check, a straggler from the previous turn relabelled a fresh
         // "Thinking…" card as "Delegating" with nothing running.
         "SubagentStop" => !session.outcome.is_empty() || session.subagents == 0,
-        _ => false,
+        _ => !by_subagent.is_empty() && !session.outcome.is_empty(),
     }
+}
+
+/// How long a tool call may run before silence means something is wrong.
+///
+/// The sweep reads five minutes without an event as a turn that died, on the
+/// grounds that Claude Code fires a hook per tool call. One tool call can
+/// legally take longer than that: `Bash` accepts a timeout of up to ten
+/// minutes, and a seven-minute build was twice called "Stopped responding"
+/// while its process was alive and working. The call's own timeout is the
+/// honest budget when the payload carries one; otherwise the longest budget
+/// Claude Code allows, plus a moment for the hook after it to arrive.
+fn tool_budget_ms(payload: &Value) -> u64 {
+    const DEFAULT_MS: u64 = 10 * 60 * 1000;
+    const CEILING_MS: u64 = 60 * 60 * 1000;
+    const GRACE_MS: u64 = 60 * 1000;
+    let declared = payload
+        .get("tool_input")
+        .and_then(|input| input.get("timeout"))
+        .and_then(Value::as_u64)
+        // Bash declares milliseconds; a tool that declares seconds would
+        // read as a value no millisecond timeout ever takes.
+        .map(|timeout| {
+            if timeout < 1000 {
+                timeout * 1000
+            } else {
+                timeout
+            }
+        });
+    declared.unwrap_or(DEFAULT_MS).min(CEILING_MS) + GRACE_MS
 }
 
 #[cfg(test)]
@@ -1164,7 +1240,11 @@ mod tests {
         assert_eq!(update.headline.as_deref(), Some("Fixed the off-by-one."));
         // The turn is over, so the live line clears rather than showing a stale tool.
         assert!(update.activity.is_empty());
-        assert!(update.detail.as_deref().unwrap().contains("Details follow."));
+        assert!(update
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("Details follow."));
     }
 
     /// The ways `Stop` arrives while Claude is about to carry on. Each one used
@@ -1266,6 +1346,185 @@ mod tests {
 
     fn tool_call(prompt: &str) -> serde_json::Value {
         json!({ "tool_name": "Read", "prompt_id": prompt, "tool_input": { "file_path": "a.rs" } })
+    }
+
+    fn prompt(session: &mut Session) {
+        feed(
+            session,
+            "UserPromptSubmit",
+            json!({ "prompt_id": "p1", "prompt": "go" }),
+            1000,
+        );
+    }
+
+    fn stop(session: &mut Session, now: u64) {
+        feed(
+            session,
+            "Stop",
+            json!({ "prompt_id": "p1", "last_assistant_message": "Done." }),
+            now,
+        );
+    }
+
+    /// A subagent that outlives the answer keeps making tool calls, and they
+    /// arrive on the parent's session id. They used to un-finish the turn:
+    /// the card went from "Done" back to "Delegating" with nothing that would
+    /// ever set it right again.
+    #[test]
+    fn a_subagents_tool_call_after_stop_does_not_unfinish_the_turn() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        feed(
+            &mut session,
+            "SubagentStart",
+            json!({ "prompt_id": "p1", "agent_id": "a1", "agent_type": "x" }),
+            1100,
+        );
+        stop(&mut session, 9000);
+        assert_eq!(session.outcome, "done");
+
+        let mut delegated = tool_call("p1");
+        delegated["agent_id"] = json!("a1");
+        feed(&mut session, "PreToolUse", delegated, 9500);
+        assert_eq!(session.outcome, "done");
+        assert_eq!(session.state, "idle");
+        assert_eq!(session.kind, "Done");
+        // The call still happened and is still counted.
+        assert_eq!(session.tools, 1);
+
+        // The main agent picking the work back up is a different matter.
+        feed(&mut session, "PreToolUse", tool_call("p1"), 9600);
+        assert_eq!(session.outcome, "");
+        assert_eq!(session.state, "running");
+    }
+
+    /// The main agent is at a permission prompt while a subagent works on.
+    #[test]
+    fn a_subagents_tool_call_does_not_answer_the_main_agents_prompt() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        feed(
+            &mut session,
+            "PermissionRequest",
+            json!({ "prompt_id": "p1", "tool_name": "Bash", "tool_input": { "command": "rm -rf build" } }),
+            2000,
+        );
+        feed(
+            &mut session,
+            "Notification",
+            json!({ "prompt_id": "p1", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash" }),
+            2100,
+        );
+        assert_eq!(session.waiting_since, 2100);
+
+        let mut delegated = tool_call("p1");
+        delegated["agent_id"] = json!("a1");
+        feed(&mut session, "PreToolUse", delegated, 2500);
+        assert!(session.pending_since > 0);
+        assert_eq!(session.waiting_since, 2100);
+    }
+
+    /// A stop-hook continuation keeps the prompt id. The turn's clock has to
+    /// start again when the work does, or the card freezes at "12m" over a
+    /// turn that is forty minutes in.
+    #[test]
+    fn the_turn_clock_restarts_when_the_same_turn_resumes() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        stop(&mut session, 9000);
+        assert_eq!(session.turn_ended_ms, 9000);
+
+        feed(&mut session, "PreToolUse", tool_call("p1"), 12000);
+        assert_eq!(session.outcome, "");
+        assert_eq!(session.state, "running");
+        assert_eq!(session.turn_ended_ms, 0);
+
+        stop(&mut session, 15000);
+        assert_eq!(session.turn_ended_ms, 15000);
+    }
+
+    /// The ordering guard used to hold for exactly one straggler: the first
+    /// moved the high-water mark backwards, and the second walked straight
+    /// past it.
+    #[test]
+    fn the_high_water_mark_survives_two_stragglers() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        stop(&mut session, 9000);
+        feed(&mut session, "PreToolUse", tool_call("p1"), 8500);
+        assert_eq!(session.outcome, "done");
+        assert_eq!(session.event_ms, 9000);
+        feed(&mut session, "PostToolUse", tool_call("p1"), 8700);
+        assert_eq!(session.outcome, "done");
+        assert_eq!(session.state, "idle");
+    }
+
+    /// A `PermissionRequest` that lands after the turn ended is asking nobody
+    /// anything, and nothing in that turn will ever arrive to clear it.
+    #[test]
+    fn a_straggling_permission_request_raises_no_prompt() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        stop(&mut session, 9000);
+        feed(
+            &mut session,
+            "PermissionRequest",
+            json!({ "prompt_id": "p1", "tool_name": "Bash", "tool_input": { "command": "ls" } }),
+            8900,
+        );
+        assert_eq!(session.pending_since, 0);
+    }
+
+    /// A subagent's own prompt, answered, is cleared by that subagent's tool
+    /// running — and not by another subagent's.
+    #[test]
+    fn a_subagents_prompt_is_cleared_by_the_subagent_that_asked() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        feed(
+            &mut session,
+            "PermissionRequest",
+            json!({ "prompt_id": "p1", "agent_id": "a1", "tool_name": "Bash", "tool_input": { "command": "ls" } }),
+            2000,
+        );
+        assert_eq!(session.pending_since, 2000);
+        assert_eq!(session.pending_agent, "a1");
+
+        let mut other = tool_call("p1");
+        other["agent_id"] = json!("a2");
+        feed(&mut session, "PostToolUse", other, 2200);
+        assert_eq!(
+            session.pending_since, 2000,
+            "another agent's work is not an answer"
+        );
+
+        let mut own = tool_call("p1");
+        own["agent_id"] = json!("a1");
+        feed(&mut session, "PostToolUse", own, 2500);
+        assert_eq!(session.pending_since, 0);
+        assert_eq!(session.pending_agent, "");
+    }
+
+    /// One `Bash` call may run for ten minutes. The session file has to say
+    /// so, or the sweep reads the silence as death.
+    #[test]
+    fn a_tool_call_declares_how_long_it_may_be_silent() {
+        let mut session = Session::default();
+        prompt(&mut session);
+        let mut long = json!({ "tool_name": "Bash", "prompt_id": "p1", "tool_input": { "command": "make", "timeout": 600_000 } });
+        feed(&mut session, "PreToolUse", long.clone(), 2000);
+        assert_eq!(session.tool_deadline_ms, 2000 + 600_000 + 60_000);
+
+        // A shorter call in parallel does not shorten the budget.
+        long["tool_input"]["timeout"] = json!(5_000);
+        feed(&mut session, "PreToolUse", long, 2100);
+        assert_eq!(session.tool_deadline_ms, 2000 + 600_000 + 60_000);
+
+        // No timeout declared: the longest Claude Code allows.
+        let mut fresh = Session::default();
+        prompt(&mut fresh);
+        feed(&mut fresh, "PreToolUse", tool_call("p1"), 3000);
+        assert_eq!(fresh.tool_deadline_ms, 3000 + 600_000 + 60_000);
     }
 
     /// A subagent's tool calls arrive on the *parent's* session id, so without
@@ -1601,15 +1860,19 @@ mod tests {
             subagents,
             ..Session::default()
         };
-        assert!(is_trailing_subagent("SubagentStop", &with("done", 1)));
-        assert!(is_trailing_subagent("SubagentStart", &with("failed", 0)));
-        assert!(!is_trailing_subagent("SubagentStop", &with("", 2)));
-        assert!(!is_trailing_subagent("PreToolUse", &with("done", 0)));
+        assert!(is_trailing_subagent("SubagentStop", "", &with("done", 1)));
+        assert!(is_trailing_subagent(
+            "SubagentStart",
+            "",
+            &with("failed", 0)
+        ));
+        assert!(!is_trailing_subagent("SubagentStop", "", &with("", 2)));
+        assert!(!is_trailing_subagent("PreToolUse", "", &with("done", 0)));
         // A new prompt cleared the outcome, but nothing is outstanding: this
         // stop belongs to the previous turn and must stay bookkeeping.
-        assert!(is_trailing_subagent("SubagentStop", &with("", 0)));
+        assert!(is_trailing_subagent("SubagentStop", "", &with("", 0)));
         // A genuine stop for a subagent this turn started is progress.
-        assert!(!is_trailing_subagent("SubagentStop", &with("", 1)));
+        assert!(!is_trailing_subagent("SubagentStop", "", &with("", 1)));
     }
 
     /// A blocking stop hook can veto this stop and have the turn carry on;
@@ -1838,13 +2101,19 @@ mod tests {
         // that named the session's kind.
         assert!(reads_as_background(env(vec![
             ("CLAUDE_JOB_DIR", "/home/tristan/.claude/jobs/959c74a7"),
-            ("CLAUDE_CODE_SESSION_ID", "959c74a7-8f7c-49e4-a782-42645920b8d2"),
+            (
+                "CLAUDE_CODE_SESSION_ID",
+                "959c74a7-8f7c-49e4-a782-42645920b8d2"
+            ),
         ])));
 
         // The same events in a foreground chat, which is the regression this
         // whole change has to not cause.
         assert!(!reads_as_background(env(vec![
-            ("CLAUDE_CODE_SESSION_ID", "7a958c6e-dfb0-4e0c-9cd4-f308894c4615"),
+            (
+                "CLAUDE_CODE_SESSION_ID",
+                "7a958c6e-dfb0-4e0c-9cd4-f308894c4615"
+            ),
             ("CLAUDE_PID", "230772"),
         ])));
 

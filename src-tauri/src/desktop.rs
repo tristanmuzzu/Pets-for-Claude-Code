@@ -93,6 +93,29 @@ pub fn alert() {
         // MB_ICONASTERISK: the quiet "something happened" sound.
         windows_impl::MessageBeep(0x00000040);
     }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = quiet_command("afplay")
+            .arg("/System/Library/Sounds/Ping.aiff")
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // The desktop's own "message" event sound through libcanberra, which
+        // honours the user's sound theme and their mute; the freedesktop
+        // file directly when that helper is not installed. Silent until now:
+        // the menu offered "Play a sound when Claude needs you" and nothing
+        // on this platform ever played one.
+        let played = quiet_command("canberra-gtk-play")
+            .args(["-i", "message"])
+            .spawn()
+            .is_ok();
+        if !played {
+            let _ = quiet_command("paplay")
+                .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+                .spawn();
+        }
+    }
 }
 
 /// What "start with the machine" is called where the user can see it.
@@ -204,9 +227,12 @@ pub fn autostart_command() -> Option<String> {
         let raw = std::fs::read_to_string(autostart_entry()).ok()?;
         // A desktop entry can be disabled without being deleted, and something
         // that will not launch is not autostart however present the file is.
+        // `Hidden=true` is the XDG way (and what KDE's settings write);
+        // GNOME's key is honoured too.
         if raw.lines().any(|line| {
-            line.trim()
-                .eq_ignore_ascii_case("X-GNOME-Autostart-enabled=false")
+            let line = line.trim();
+            line.eq_ignore_ascii_case("X-GNOME-Autostart-enabled=false")
+                || line.eq_ignore_ascii_case("Hidden=true")
         }) {
             return None;
         }
@@ -236,6 +262,17 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
             };
         }
         let exe = own_program()?;
+        // An entry that starts something else which exists is a launcher for
+        // the pet — a wrapper that sets the environment or waits for the
+        // tray — and turning autostart "on" over it replaced it with the bare
+        // binary and silently undid whatever the wrapper was for. Already on,
+        // so leave it.
+        if let Some(registered) = autostart_command() {
+            if !same_program(&registered, &exe.to_string_lossy()) && program_is_present(&registered)
+            {
+                return Ok(());
+            }
+        }
         if let Some(dir) = entry.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;

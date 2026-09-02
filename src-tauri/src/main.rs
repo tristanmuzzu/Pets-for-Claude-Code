@@ -27,6 +27,7 @@ USAGE:
   pipsqueak control <what>  on | off | toggle | quit | status | <pet name>
   pipsqueak autostart <on>  on | off | status: start with the machine
   pipsqueak sessions        Print what the overlay would show right now, as JSON
+  pipsqueak doctor          The same report as the tray's Check my setup
   pipsqueak install         Register Claude Code hooks in ~/.claude/settings.json
   pipsqueak uninstall       Remove them again
   pipsqueak hook <Event>    Internal: consume one hook payload on stdin
@@ -42,7 +43,11 @@ fn main() {
         Some("hook") => hook::run(args.get(1).cloned()),
         Some("control") => report(control::run(args.get(1).cloned())),
         Some("autostart") => report(autostart(args.get(1).map(String::as_str))),
-        Some("sessions") => report(sessions()),
+        // Not recorded: the report holds every card's headline and answer
+        // text, which is the kind of content the payload capture is opt-in
+        // for, and it is being printed to whoever asked anyway.
+        Some("sessions") => report_without_record(sessions()),
+        Some("doctor") => report(Ok(doctor::markdown(&doctor::run("")))),
         Some("install") | Some("--install") => report(install::install()),
         Some("uninstall") | Some("--uninstall") => report(install::uninstall()),
         // Through `report` like everything else. A bare `println!` panics when
@@ -105,6 +110,14 @@ fn autostart(what: Option<&str>) -> Result<String, String> {
 /// and with `panic = "abort"` that killed the process before it could record
 /// anything, so write the file first and treat printing as best-effort.
 fn report(result: Result<String, String>) {
+    finish(result, true)
+}
+
+fn report_without_record(result: Result<String, String>) {
+    finish(result, false)
+}
+
+fn finish(result: Result<String, String>, record: bool) {
     use std::io::Write;
 
     let (message, code) = match result {
@@ -112,8 +125,10 @@ fn report(result: Result<String, String>) {
         Err(message) => (format!("error: {message}"), 1),
     };
 
-    let _ = fs::create_dir_all(state::root());
-    let _ = fs::write(state::root().join("last-cli-result.txt"), &message);
+    if record {
+        let _ = fs::create_dir_all(state::root());
+        let _ = fs::write(state::root().join("last-cli-result.txt"), &message);
+    }
 
     let mut out = std::io::stdout();
     let _ = writeln!(out, "{message}");

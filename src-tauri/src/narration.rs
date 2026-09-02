@@ -103,6 +103,9 @@ struct Watch {
     /// The last authoritative correction taken from a hook payload, so it is
     /// applied once instead of on every one of the three polls a second.
     synced_ms: u64,
+    /// The session's `updated_ms` at the last read, so a session that has
+    /// had no event since is not reopened.
+    seen_updated_ms: u64,
 }
 
 fn cache() -> &'static Mutex<HashMap<PathBuf, Watch>> {
@@ -135,7 +138,22 @@ pub fn decorate(sessions: &mut [Session], mode: Mode) {
             watch.synced_ms = session.tasks_ms;
             watch.outstanding = session.tasks.iter().cloned().collect();
         }
-        follow(&path, watch, mode);
+        // A transcript only grows while something is happening: a turn fires
+        // hook events, and background work reports into the file before the
+        // hook that follows it. So a session that is not running, has nothing
+        // outstanding, and has had no event since the last read cannot have
+        // appended a byte — and opening its file three times a second, for
+        // every idle chat on the machine, was three quarters of the poller's
+        // file traffic. First reads always happen, so the card of a finished
+        // chat still gets its last line.
+        let quiet = watch.offset > 0
+            && !session.is_running()
+            && watch.outstanding.is_empty()
+            && watch.seen_updated_ms == session.updated_ms;
+        if !quiet {
+            follow(&path, watch, mode);
+            watch.seen_updated_ms = session.updated_ms;
+        }
         if mode != Mode::Off && !watch.line.is_empty() {
             session.narration = watch.line.clone();
         }

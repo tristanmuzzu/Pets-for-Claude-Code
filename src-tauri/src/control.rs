@@ -108,9 +108,35 @@ fn send(action: &str) -> Result<(), String> {
 
 /// Starts the overlay detached. The binary is a GUI-subsystem app, so this
 /// never flashes a console window.
+///
+/// Through the login launcher when there is one that is not this binary: a
+/// wrapper that sets `GDK_BACKEND=x11` or waits for the tray is the way the
+/// owner wants the pet started, and starting the bare binary from here gave
+/// a pet with no always-on-top and a blank tray menu. Detached on Unix as
+/// well — its own process group, no inherited pipes — because the pet used
+/// to die with the shell that ran `pipsqueak control on`, and held the
+/// `/pet` skill's stdout open for as long as it lived.
 fn launch() -> Result<(), String> {
     let exe = crate::desktop::own_program()?;
-    crate::desktop::quiet_command(&exe)
+    let launcher = crate::desktop::autostart_command().filter(|registered| {
+        !crate::desktop::same_program(registered, &exe.to_string_lossy())
+            && crate::desktop::program_is_present(registered)
+    });
+    let mut command = match &launcher {
+        Some(registered) => crate::desktop::quiet_command(registered),
+        None => crate::desktop::quiet_command(&exe),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+    }
+    command
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("cannot start Pipsqueak: {e}"))

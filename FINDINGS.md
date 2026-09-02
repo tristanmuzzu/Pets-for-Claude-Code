@@ -458,7 +458,188 @@ works.
   idle", not "full screen". Arming on touch was chosen instead because it needs
   none of this and is not GNOME-specific.
 
+## After v0.8.0 — the card that survived a reboot, and the audit of 2026-09-02
+
+Reported from the desktop it runs on (Ubuntu 26.04 / GNOME 50.1): three cards
+up, two chats actually working, the third reading "Needs you · Waiting for your
+reply" for a worktree session nobody could find. It was `91b7b58e`, written
+last at 22:03 and the machine rebooted at 22:57; the card was six hours old when
+reported. Root cause in one line: on Linux the pet never knew which process
+owned a session, so nothing but the twelve-hour rule could ever retire one.
+Fixed first, then a four-lens audit (Fable 5.1: lifecycle, overlay cost,
+frontend, platform) whose findings follow. IDs: `L-` Linux, `T-` lifecycle,
+`R-` running cost, `FE-` frontend, `X-` platform.
+
+- **L-6** `process.rs:25`, `state.rs:679` — `process::owner()` and
+  `is_alive()` were Windows-only; every Linux and macOS session ran with
+  `agent_pid: 0`, "unknown" read as alive, and rule 1 of the sweep never
+  fired. A waiting session is exempt from every other rule but twelve hours,
+  so a reboot left "Needs you" up until then. FIXED — `/proc` on Linux (parent
+  walk past shells to the first non-shell ancestor, identity `(pid, start
+  ticks since boot)`, zombies count as gone, an unreadable `/proc/<pid>` that
+  exists still counts as alive), `proc_pidinfo` on macOS by inspection only
+  (the kernel's echo of the pid is the layout check; a mismatch degrades to
+  "unknown"), and a fourth rule on every platform: a file written before the
+  current boot (`btime`, `GetTickCount64`, `kern.boottime`, with a 60s margin
+  for clock steps) is dead whatever it says. Every retirement is now logged
+  with its rule. Verified live: the new binary retired seven pre-boot files at
+  startup including the reported one, and the three live chats carry the pids
+  of their real `claude` processes.
+- **T-1** `hook.rs:275` — a subagent that outlives the answer keeps making
+  tool calls on the parent's session id, and they counted as progress: the
+  outcome cleared, the card went "Done" → "Delegating" with nothing that would
+  ever set it right, and a permission prompt the *main* agent was sitting at
+  was cleared by a subagent's `PreToolUse`. FIXED — progress is the main
+  agent's own events; any subagent event after the outcome is bookkeeping.
+- **T-2** `state.rs:23`, `hook.rs` — the five-minute rule assumed a hook per
+  tool call; one `Bash` call may legally run ten minutes, and a live
+  `claude --bg` session running a seven-minute loop was called "Stopped
+  responding" twice while its process was alive. FIXED — `PreToolUse` records
+  a `tool_deadline_ms` from the call's own `timeout` (ten minutes when none is
+  declared, plus a minute for the hook after it; extends, never shortens), and
+  the sweep does not read silence as death before it. Same for a `Stop` that
+  kept working with background tasks listed, for up to an hour.
+- **T-3** `hook.rs:254` — `turn_ended_ms` was zeroed only on a prompt-id
+  change, so a stop-hook continuation froze the card's clock at the vetoed
+  `Stop`: "12m" over a turn forty-six minutes in (live, `570dd5ed`). FIXED —
+  main-agent progress inside the same turn restarts the clock, and
+  `derive.js` reads the stamp only when the turn is actually over
+  (`turnOver`), which also covers files written by older builds.
+- **T-4** `hook.rs:415` — `event_ms = now` was written for a straggler too, so
+  the high-water mark moved *backwards* and the ordering guard held for
+  exactly one straggler; the second one un-finished the turn. FIXED — both
+  stamps are monotonic.
+- **T-5** `hook.rs:318` — a `PermissionRequest` landing after `Stop` raised a
+  prompt on a finished card that nothing in that turn would ever clear.
+  FIXED — not from a straggler.
+- **T-6** `hook.rs:312` — a subagent's own prompt was recorded but only a
+  main-agent event could clear it, so an answered prompt kept "Needs you" up
+  for as long as the subagent ran. FIXED — `pending_agent` records who asked;
+  that agent's next event, or any main-agent event, clears it.
+- **T-7** `hook.rs:64` — `SessionEnd` deleted after a 200ms lock wait, which
+  is the wait an event should give up after and not the one a delete should:
+  a holder mid-write renamed the whole session back. FIXED — `SessionEnd`
+  waits up to three seconds; it is async and nothing is waiting on it.
+- **T-10** `state.rs:684` vs `how-it-works.md` — the doc said a waiting
+  session is never retired by age; the code deleted at twelve hours
+  regardless. FIXED both ways — exempt when the agent process is known and
+  alive, aged out when it is not, and the doc says so.
+- **T-11/T-14/T-15** — `background_tasks` also arrives on `SubagentStop`
+  (comment fixed), a duplicate match arm, and `recent` entries stamped after
+  the lock wait instead of with the event's own time. FIXED.
+- **FE-1** `main.js:1606` — the boot notice ("Updated to …", "No hooks
+  installed") was replaced by the first `get_sessions` one IPC round-trip
+  after it was shown. FIXED — the fetch keeps the notice in front.
+- **FE-3** `main.js:415` — the sweep clears the tool line on a stalled
+  session but narration was shown regardless, so a "Stopped responding" card
+  narrated Claude mid-thought (live, `59c3026f`). FIXED.
+- **FE-4/FE-7** `main.js:635` — the tray blink needed a render inside a 30s
+  freshness window, which an occluded window may never get; and a completion
+  that flickered done → finishing → done blinked twice. FIXED — no freshness
+  gate (stale completions are acknowledged at boot, which is what it
+  guarded), and `celebrated` is keyed by outcome.
+- **FE-5** `main.js:311` — Claude Code fires `idle_prompt` sixty seconds after
+  every answer, so every finished chat became "Needs you", sorted above the
+  working ones, and `acknowledge` refused it because the state was not
+  settled: a card no click could dismiss, and the close button turned it into
+  a chip. This is the live half of the reported card. FIXED — a finished turn
+  whose only blocker is the idle notification is dismissable (and pre-acknowledged
+  at boot when stale); a real permission prompt still is not. The state
+  itself is unchanged: the card says what Claude Code said.
+- **FE-6** `main.js:462` — "Done · 2 running" during the 2.5s display hold
+  when the outstanding count arrived after the outcome showed. FIXED — the
+  chip hides on a settled state.
+- **FE-11/FE-13** — the 1s entrance fallback fired `syncHitRects` for a card
+  already gone; `view.lastShown` written and never read. FIXED.
+- **R-1** `pet.js:311` — `draw()` on every animation frame while frames change
+  ~5×/s, through a `drop-shadow` filter; the WebKit process averaged 8.6% of
+  a core over its lifetime against 1.3% at rest. FIXED — repaint only when
+  the row/frame changed; a crossfade still paints every frame.
+- **R-2** `narration.rs:118` — `decorate` opened, stat'ed and closed every
+  session's transcript three times a second, three quarters of them for idle
+  chats, while the docs said "only for sessions that are on screen". FIXED —
+  a session that is not running, has nothing outstanding and has had no event
+  since the last read is not reopened.
+- **R-4** `app.rs:1217` — the heartbeat was an atomic write (create, write,
+  rename) on every 300ms poll: 85% of the app's disk writes, for readers that
+  allow six seconds. FIXED — every two seconds.
+- **R-5** `main.js:762` — `set_hit_rects` (IPC, main-thread hop, cairo region,
+  XShape request) on every render even when nothing moved. FIXED — diffed.
+- **R-6** `derive.js:99`, `main.js` — the 800ms prompt debounce, the 2s settle
+  and the display holds were only re-evaluated on the next emit or the 1s
+  clock, so "Needs you" appeared up to a second late. FIXED — one timer aimed
+  at the nearest deadline on every render.
+- **R-7** `chats.rs:101` — the by-session map was rebuilt over ~275 records on
+  every tick between 3s rescans. FIXED — built at scan time.
+- **X-1** `doctor.rs:254`, `main.js:941,1261` — on Linux the hotkey row, the
+  welcome line and the menu button all showed the Windows sentence ("every
+  candidate chord is already taken"), and the doctor stayed amber on a correct
+  install. FIXED — the platform's honest sentence, and `ok`.
+- **X-2** `doctor.rs:335`, `desktop.rs:230` — a wrapper-script autostart entry
+  (this desktop's, and the one L-3 stopped the pet from overwriting) was still
+  a permanent warning whose advice, `pipsqueak autostart on`, replaced the
+  wrapper with the bare binary. FIXED — reported as `ok` and left alone, and
+  `set_autostart(true)` refuses to overwrite a present launcher.
+- **X-3** `main.rs` — `pipsqueak doctor` prints the same report as the tray.
+- **X-4** `desktop.rs:90` — `alert_on_waiting` was silent off Windows. FIXED —
+  `canberra-gtk-play -i message`, falling back to `paplay` on the freedesktop
+  file; `afplay` on macOS (untested).
+- **X-5** `control.rs:110` — `pipsqueak control on` spawned the bare binary
+  with inherited stdio and no session of its own: a Wayland-native pet (no
+  always-on-top, blank tray menu) that died with the shell and held the `/pet`
+  skill's stdout open. FIXED — through the login launcher when it is present
+  and not this binary, `Stdio::null()` and its own process group on Unix.
+- **X-6** `app.rs:1226` — `command.json` was drained without looking at its
+  age, so a `quit` written in the last moment before a logout ran on the next
+  login's first tick; and read and delete were separate, so a second command
+  landing between them was deleted unread. FIXED — claimed by rename, ignored
+  and logged past ten seconds.
+- **X-7** `state.rs` — two 0-byte `running.json.<pid>.tmp` files were the
+  tell of two hard stops (ext4 delayed allocation between create and rename).
+  FIXED — swept at startup, with a log line saying the previous stop was not
+  clean.
+- **X-8** `app.rs:586` — 118 "started" lines and zero "quit" lines: a crash, a
+  logout and a click on Quit were indistinguishable afterwards. FIXED — quits
+  are logged with their source, drained commands too.
+- **X-9** `main.rs:115` — `last-cli-result.txt` held 54 KB of headlines and
+  answer text after `pipsqueak sessions`, on every platform. FIXED — not
+  recorded for that command.
+- **X-11** `desktop.rs:205` — an autostart entry disabled the XDG way
+  (`Hidden=true`, what KDE writes) read as enabled. FIXED.
+- **X-12** `project.rs:89` — a relative `gitdir:` pointer
+  (`worktree.useRelativePaths`, git ≥ 2.48) read as a project called "..", and
+  a bare repository's worktrees never matched. FIXED — resolved against the
+  marker, and `<repo>.git/worktrees/` recognised.
+- **X-13** `main.js:355` — the ↗ arrow was offered for a chat the desktop app
+  had no record of, where on Linux the click did nothing and said nothing.
+  FIXED — hidden unless there is a chat id or a title to raise by.
+
 ## Parked (recorded, not fixed — reasons given)
+- **T-9 (idle-prompt "Needs you" rank)** — a finished chat still sorts above
+  working ones for the minute after its idle notification. Dismissable now
+  (FE-5); ranking it below "running" is a product call the owner should make
+  with the card in front of them.
+- **R-3 (stat-gated session reads)** `state.rs:598` — 12 file reads and
+  parses per 300ms tick, ~0.35% of a core. A `(mtime, len)` gate is unsafe:
+  kernel timestamps are coarse (ms), two hook writes inside one tick with the
+  same byte length would leave the second unread until the next change. Not
+  worth a stale card for a third of a percent.
+- **R-8/R-9** — any emit wakes the sprite loop for 15s even when the leader
+  is unchanged (cheap now that R-1 repaints only on change); a hidden window
+  still receives emits. Revisit if measured.
+- **FE-8/FE-9/FE-12/FE-14/FE-15** — reorder restarts a card's standing dot
+  animations; the expanded log rebuilds 24 `li` per tick; `cardsFor` mutates
+  hold state when called from a click; two unreachable `idle` labels; the
+  menu awaits five IPCs serially. Cosmetic.
+- **T-12/T-13/T-16** — the Task-call `subagents: 1` has no consumer;
+  `PROGRESS_EVENTS` and `ANSWERS_PROMPT` differ by the two compaction events
+  only; the `event_ms` doc says "older loses" while counters from older
+  events are deliberately kept. Cleanups.
+- **X-10** — `write_settings` takes the umask mode rather than the original
+  file's. **X-14** — `claude://resume` on Wayland selects the chat but cannot
+  raise the app (no activation token through `gio open`); untested by hand.
+  **X-15** — macOS: `autostart on` errors, the welcome button fails the same
+  way; no macOS CI job. **X-16** — `tauri-action@v0` floats a major.
 
 - **P-13 (counter increments rest on a best-effort lock)** `hook.rs:134`,
   `state.rs:477` — `FileLock::acquire` gives up after ~200ms and writes

@@ -59,6 +59,9 @@ fn store_dir() -> Option<PathBuf> {
 struct Cached {
     /// Keyed by path, so an unchanged record is never read twice.
     files: HashMap<PathBuf, (u64, String, Chat)>,
+    /// One winner per session id, rebuilt when the files are rescanned
+    /// rather than on every one of the three polls a second in between.
+    by_session: HashMap<String, Chat>,
     scanned: Option<Instant>,
 }
 
@@ -67,6 +70,7 @@ fn cache() -> &'static Mutex<Cached> {
     CACHE.get_or_init(|| {
         Mutex::new(Cached {
             files: HashMap::new(),
+            by_session: HashMap::new(),
             scanned: None,
         })
     })
@@ -78,9 +82,7 @@ pub fn lookup(session_id: &str) -> Option<Chat> {
         return None;
     }
     let guard = refreshed()?;
-    best_by_session(&guard.files)
-        .get(session_id)
-        .map(|chat| (*chat).clone())
+    guard.by_session.get(session_id).cloned()
 }
 
 /// Fills in the chat title and id on everything the overlay is about to show.
@@ -91,9 +93,8 @@ pub fn decorate(sessions: &mut [Session]) {
     let Some(guard) = refreshed() else {
         return;
     };
-    let by_session = best_by_session(&guard.files);
     for session in sessions.iter_mut() {
-        if let Some(chat) = by_session.get(session.session_id.as_str()) {
+        if let Some(chat) = guard.by_session.get(session.session_id.as_str()) {
             session.chat_id = chat.id.clone();
             session.chat_title = chat.title.clone();
         }
@@ -196,6 +197,10 @@ fn scan(cache: &mut Cached) {
 
     // An archived or deleted chat must stop answering for its session.
     cache.files.retain(|path, _| seen.contains(path));
+    cache.by_session = best_by_session(&cache.files)
+        .into_iter()
+        .map(|(cli, chat)| (cli.to_string(), chat.clone()))
+        .collect();
 }
 
 fn visit(dir: &Path, depth: usize, each: &mut impl FnMut(&Path, u64)) {

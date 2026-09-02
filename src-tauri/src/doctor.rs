@@ -252,6 +252,19 @@ fn overlay_check() -> Check {
 }
 
 fn hotkey_check(registered: &str) -> Check {
+    if !cfg!(windows) {
+        // Nothing is registered here and nothing can be: Wayland has no way
+        // for an ordinary application to claim a chord. The Windows sentence
+        // this used to show — "every candidate chord is already claimed" —
+        // sent people hunting for a program that did not exist, and kept the
+        // whole report amber on a correct install.
+        return ok(
+            "hotkey",
+            "Keyboard shortcut",
+            "No global hotkey on this platform. Bind `pipsqueak control toggle` to a key in your desktop's keyboard settings."
+                .into(),
+        );
+    }
     let wanted = state::load_config().hotkey;
     if wanted.trim().eq_ignore_ascii_case("off") || wanted.trim().is_empty() {
         return ok("hotkey", "Keyboard shortcut", "Turned off.".into());
@@ -335,15 +348,16 @@ fn autostart_check() -> Check {
             } else if crate::desktop::program_is_present(&registered) {
                 // Left alone on purpose: this is what a wrapper script looks
                 // like from here, and the pet no longer takes such an entry
-                // over. Saying "reinstalling corrects it" would be advice to
-                // undo a working setup.
-                warn(
+                // over. This used to be a warning whose advice was to run
+                // `pipsqueak autostart on`, which replaced the wrapper with
+                // the bare binary and lost whatever the wrapper was for.
+                ok(
                     "autostart",
                     "After a reboot",
                     format!(
-                        "Starts {registered}, which is not this program but does exist. \
-                         Left alone in case it launches the pet for you; \
-                         run `pipsqueak autostart on` to point it here instead."
+                        "Starts {registered} {}: not this program, but present, \
+                         so it is taken to be a launcher for it and left alone.",
+                        crate::desktop::AT_LOGIN
                     ),
                 )
             } else {

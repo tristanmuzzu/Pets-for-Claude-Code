@@ -133,6 +133,7 @@ pipsqueak control on      # show it, starting it if needed (also: off, toggle, q
 pipsqueak control byte    # switch pet
 pipsqueak autostart on    # start with the machine (also: off, status)
 pipsqueak sessions        # what the overlay would draw right now, as JSON
+pipsqueak doctor          # the same report as "Check my setup", in a terminal
 pipsqueak install         # register the Claude Code hooks
 pipsqueak uninstall       # remove them (backs up settings.json first)
 pipsqueak hook <Event>    # internal: consume one hook payload from stdin
