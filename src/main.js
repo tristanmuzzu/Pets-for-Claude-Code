@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PetRenderer, GREETING_ROW, JUMP_ROW } from './pet.js'
 import {
   ACTIVE,
+  CELEBRATE_AFTER_MS,
   DONE_LINGER_MS,
   RUNNING,
   SLEEP_AFTER_MS,
@@ -17,11 +18,28 @@ import {
   relativeTime,
   runningCount,
   turnElapsed,
+  turnOver,
   worthCelebrating
 } from './derive.js'
 
 /** `npm run dev` in a plain browser has no IPC; fall back to a demo loop. */
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+
+/**
+ * Two things only Windows can do, and the wording that depends on them.
+ *
+ * A global hotkey: Wayland has no way for an ordinary application to claim a
+ * chord, and the Windows sentence ("every candidate hotkey is already taken")
+ * sent people hunting for a program that did not exist. And raising a window
+ * by its title, which is what the ↗ arrow falls back to for a chat the
+ * desktop app has no record of: elsewhere that click did nothing and said
+ * nothing, so the arrow is not offered.
+ */
+const IS_WINDOWS = typeof navigator !== 'undefined' && /Windows/.test(navigator.userAgent)
+const HAS_GLOBAL_HOTKEY = IS_WINDOWS
+const CAN_RAISE_BY_TITLE = IS_WINDOWS
+const NO_HOTKEY_HERE =
+  'No global hotkey on this desktop. Bind "pipsqueak control toggle" to a key in your system keyboard settings.'
 
 /** Replaced at build time from package.json. See vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
@@ -155,6 +173,18 @@ const acknowledged = new Set()
 let promoted = null
 const outcomeKey = (session) => `${session.session_id}@${session.outcome_ms || 0}`
 const settled = (state) => state === 'done' || state === 'failed'
+/**
+ * A card a click may put away.
+ *
+ * A finished turn, and a finished turn that the idle notification has since
+ * turned into "Waiting for your reply": Claude Code fires that sixty seconds
+ * after every answer, so without this every chat not typed into for a minute
+ * became a "Needs you" card that no click could dismiss, sitting above the
+ * chats that were actually working. A real permission prompt is never
+ * dismissable — the question is still being asked.
+ */
+const dismissable = (state, session) =>
+  settled(state) || (state === 'waiting' && Boolean(session.outcome) && !session.pending_since)
 /** Recent enough that finishing is still news rather than a standing fact. */
 const isFresh = (session) => Date.now() - (session.outcome_ms || 0) < DONE_LINGER_MS
 
@@ -173,10 +203,11 @@ function viewFor(key) {
       wasUrgent: false,
       // A finished turn nobody has acknowledged yet.
       unread: false,
-      // Whether this completion has already been announced, so a card that
-      // sits there finished does not blink the tray on every render tick.
-      celebrated: false,
-      lastShown: '',
+      // Which completion has already been announced (its outcome key), so a
+      // card that sits there finished does not blink the tray on every render
+      // tick — and a completion that flickered through "finishing" and back
+      // does not blink twice.
+      celebrated: '',
       // The state currently on screen, and the earliest it may be replaced.
       heldState: '',
       heldUntil: 0
@@ -226,7 +257,7 @@ function effectiveState(key, session) {
   view.lastStable = RUNNING.has(raw) || raw === 'idle' ? raw : view.lastStable
   // Acknowledged means gone, immediately and without a farewell: holding the
   // state for another two seconds would make the click feel unheard.
-  if (settled(raw) && acknowledged.has(outcomeKey(session))) {
+  if (dismissable(raw, session) && acknowledged.has(outcomeKey(session))) {
     view.heldState = ''
     view.heldUntil = 0
     return 'idle'
@@ -310,7 +341,7 @@ function setStackHidden(hidden, { persist = true } = {}) {
 /** Marks a finished turn as seen, which is what removes its card. */
 function acknowledge(key) {
   const card = cardsFor(sessions).find((candidate) => candidate.key === key)
-  if (!card || !settled(card.state)) return false
+  if (!card || !dismissable(card.state, card.session)) return false
   // The display hold can keep "done" on screen after a new turn already
   // cleared the outcome. There is nothing to acknowledge then, and claiming
   // success anyway made the click do nothing at all: not dismissed, not
@@ -331,8 +362,9 @@ function buildCard(key) {
   const entered = () => {
     node.classList.remove('card-enter')
     // The rect measured mid-rise is a few pixels off; measure again now that
-    // the card is where it will stay.
-    syncHitRects()
+    // the card is where it will stay. Not for a card already gone: the 1s
+    // fallback below outlives a card dismissed inside its entrance.
+    if (node.isConnected) syncHitRects()
   }
   node.addEventListener('animationend', (event) => {
     if (event.target === node) entered()
@@ -406,13 +438,19 @@ function paintCard(node, card, compact = false) {
   // prompt's first line is a fair guess at the subject; this is the answer.
   node.querySelector('.title').textContent =
     session.chat_title || session.headline || ''
+  node.querySelector('.focus').hidden = !session.chat_id && !CAN_RAISE_BY_TITLE
 
   // What it is doing right now, which is the line the card is really for. Its
   // own sentence when it has said one, and the tool line when it has not:
   // "Editing render.js" is the category of the work, "Now the frontend: chat
   // titles and the done card" is the point of it. Written twice because a
   // collapsed card shows it on the head row instead of under it.
-  const said = holdLine(view, session.narration || session.activity || '') || restingLine(state)
+  // A stalled session's last sentence is not what it is doing now: the
+  // sweep clears the tool line for exactly that reason, and the narration
+  // has to go with it or the biggest text on a "Stopped responding" card is
+  // Claude mid-thought.
+  const line = session.stalled ? '' : session.narration || session.activity || ''
+  const said = holdLine(view, line) || restingLine(state)
   node.querySelector('.narration').textContent = said
   node.querySelector('.line').textContent = said
 
@@ -459,7 +497,7 @@ function paintCard(node, card, compact = false) {
   // carried "7 running" next to the word "Done".
   const outstanding = runningCount(session)
   const subagentChip = node.querySelector('.subagents')
-  subagentChip.hidden = outstanding < 1 || state === 'finishing'
+  subagentChip.hidden = outstanding < 1 || state === 'finishing' || settled(state)
   subagentChip.textContent = `${outstanding} running`
   subagentChip.title = 'Background commands and subagents this turn started and has not been told are finished'
   // Calls auto-mode refused this turn. Tool calls that merely failed used to
@@ -474,7 +512,7 @@ function paintCard(node, card, compact = false) {
   // chip is describing something that has finished, and saying so is the
   // difference between a fact and a claim that quietly expired.
   const calls = `tool ${blocked === 1 ? 'call' : 'calls'}`
-  blockedChip.title = session.turn_ended_ms
+  blockedChip.title = turnOver(session)
     ? `Auto-mode refused ${blocked} ${calls} in that turn`
     : `Auto-mode refused ${blocked} ${calls} this turn`
 
@@ -572,9 +610,41 @@ function buildChip(key) {
   return button
 }
 
+/**
+ * Re-render the moment a debounce, a settle or a hold expires.
+ *
+ * Every one of those is a deadline the card is waiting on, and nothing used
+ * to fire at it: renders came on emit or on the one-second clock, so "Needs
+ * you" appeared up to a second after the debounce it was waiting for, and
+ * Done the same after its settle. One timer, re-aimed on every render.
+ */
+let deadlineTimer = 0
+function scheduleDeadlineRender(groups) {
+  clearTimeout(deadlineTimer)
+  const now = Date.now()
+  let next = Infinity
+  const consider = (ms) => {
+    if (ms > now && ms < next) next = ms
+  }
+  for (const { key, session } of groups) {
+    if (session.waiting_since) consider(session.waiting_since + WAITING_DEBOUNCE_MS)
+    if (session.pending_since) consider(session.pending_since + WAITING_DEBOUNCE_MS)
+    if (session.settles_ms) consider(session.settles_ms)
+    if (session.outcome_ms) consider(session.outcome_ms + CELEBRATE_AFTER_MS)
+    const view = views.get(key)
+    if (view?.heldUntil) consider(view.heldUntil)
+  }
+  // The clock renders every second while things move and every ten once
+  // settled, so anything inside that window is this timer's job; further
+  // out, a later render will re-aim it.
+  if (next === Infinity || next - now > 10_000) return
+  deadlineTimer = setTimeout(render, next - now + 10)
+}
+
 function render() {
   const groups = cardsFor(sessions)
   const byKey = new Map(groups.map((group) => [group.key, group]))
+  scheduleDeadlineRender(groups)
 
   // A chat that is gone is never coming back under the same id, so anything
   // remembered about it is a leak. Keyed by session rather than by project,
@@ -635,11 +705,14 @@ function render() {
     if (
       group.key !== 'notice' &&
       settled(group.state) &&
-      !view.celebrated &&
-      isFresh(group.session) &&
+      view.celebrated !== outcomeKey(group.session) &&
       worthCelebrating(group.session)
     ) {
-      view.celebrated = true
+      // Not gated on freshness: the blink needs a render to land inside the
+      // news window, and an occluded window may not get one (WebView2
+      // throttles its timers to about one a minute). Stale completions are
+      // acknowledged at boot, which is the case freshness was guarding.
+      view.celebrated = outcomeKey(group.session)
       view.unread = true
       invoke('flash_tray').catch(() => {})
     }
@@ -647,9 +720,7 @@ function render() {
     // work that carried on after the turn ended.
     if (WORKING.has(group.state)) {
       view.unread = false
-      view.celebrated = false
     }
-    view.lastShown = group.state
   }
 
   // The card waits for you; the pet does not. A completion is worth a little
@@ -759,6 +830,7 @@ function renderChips(groups) {
  * transparent window stays click-through so the overlay never blocks the app
  * underneath it.
  */
+let lastHitRects = ''
 function syncHitRects() {
   const rects = []
   const add = (node) => {
@@ -771,6 +843,11 @@ function syncHitRects() {
   add(el.panel)
   if (!el.chips.hidden) add(el.chips)
   for (const node of cards.values()) add(node)
+  // Every render ended in this IPC, a main-thread hop and an X shape request,
+  // for rects that had not moved since the last one.
+  const encoded = JSON.stringify(rects)
+  if (encoded === lastHitRects) return
+  lastHitRects = encoded
   invoke('set_hit_rects', { rects }).catch(() => {})
 }
 
@@ -938,7 +1015,9 @@ function hotkeyLine() {
     .then((chord) => {
       node.textContent = chord
         ? `Press ${chord} any time to show or hide the pet.`
-        : 'No keyboard shortcut was available; set "hotkey" in ~/.pipsqueak/config.json.'
+        : HAS_GLOBAL_HOTKEY
+          ? 'No keyboard shortcut was available; set "hotkey" in ~/.pipsqueak/config.json.'
+          : NO_HOTKEY_HERE
     })
     .catch(() => {
       node.textContent = ''
@@ -1262,7 +1341,9 @@ async function openMenu() {
         showNotice(
           chord
             ? `${chord} shows and hides the pet. Change it with "hotkey" in ~/.pipsqueak/config.json.`
-            : 'Every candidate hotkey is already taken. Set "hotkey" in ~/.pipsqueak/config.json to a free one.'
+            : HAS_GLOBAL_HOTKEY
+              ? 'Every candidate hotkey is already taken. Set "hotkey" in ~/.pipsqueak/config.json to a free one.'
+              : NO_HOTKEY_HERE
         )
       )
     )
@@ -1603,7 +1684,12 @@ async function boot() {
     showNotice('No Claude Code hooks installed — right-click the pet and choose Check my setup.')
   }
 
-  sessions = await invoke('get_sessions').catch(() => [])
+  // Behind any notice the boot just raised: replacing the array wholesale
+  // dropped the "Updated to …" card one IPC round-trip after it was shown.
+  sessions = [
+    ...sessions.filter((s) => s.session_id === 'notice'),
+    ...(await invoke('get_sessions').catch(() => []))
+  ]
   sessions.forEach((session) => {
     seenSessions.add(session.session_id)
     // Whatever finished before the overlay started is history, not news. A

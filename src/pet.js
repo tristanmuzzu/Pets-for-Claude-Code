@@ -155,6 +155,8 @@ export class PetRenderer {
 
   applySize() {
     const { frameWidth, frameHeight } = this.manifest
+    // Resizing clears the canvas, so whatever was drawn is gone.
+    this.drawn = null
     this.canvas.width = frameWidth
     this.canvas.height = frameHeight
     this.ctx.imageSmoothingEnabled = false
@@ -292,7 +294,12 @@ export class PetRenderer {
         this.advance()
       }
     }
-    this.draw()
+    // Frames change five times a second and this runs sixty. Repainting an
+    // identical frame — through the drop-shadow filter on the canvas — was
+    // most of what the awake sprite cost. A crossfade is the one case where
+    // every frame is new.
+    const stamp = this.outgoing ? null : `${this.row}:${this.frame}`
+    if (stamp === null || stamp !== this.drawn) this.draw()
 
     // Settle on the first frame of a resting loop and stop asking for frames.
     // Stopping mid-stride would freeze the pet in a walking pose, so this only
@@ -351,6 +358,7 @@ export class PetRenderer {
 
   draw() {
     const { ctx, image, manifest } = this
+    this.drawn = this.outgoing ? null : `${this.row}:${this.frame}`
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
     if (!image) return
     const { frameWidth: fw, frameHeight: fh } = manifest

@@ -246,7 +246,12 @@ test('the turn clock stops when the turn does', () => {
   // A two-minute turn that ended two minutes ago said "4m" and kept climbing,
   // because the elapsed was measured from the turn's start against a live
   // clock with nothing to stop it.
-  const ran = quiet({ turn_started_ms: NOW - 240_000, turn_ended_ms: NOW - 110_000 })
+  const ran = quiet({
+    state: 'idle',
+    outcome: 'done',
+    turn_started_ms: NOW - 240_000,
+    turn_ended_ms: NOW - 110_000
+  })
   assert.equal(turnElapsed(ran, NOW), '2m')
   // Ten minutes later it still took two minutes.
   assert.equal(turnElapsed(ran, NOW + 600_000), '2m')
@@ -256,6 +261,23 @@ test('the turn clock stops when the turn does', () => {
   assert.equal(turnElapsed(running, NOW), '45s')
   // Nothing to time before the first turn.
   assert.equal(turnElapsed(quiet({ turn_started_ms: 0 }), NOW), '')
+
+  // A stop hook sent the same turn back to work: the outcome cleared, the
+  // state is running again, and the stamp from the vetoed Stop is stale.
+  const resumed = quiet({
+    state: 'running',
+    turn_started_ms: NOW - 120_000,
+    turn_ended_ms: NOW - 60_000
+  })
+  assert.equal(turnElapsed(resumed, NOW), '2m')
+  // The sweep gave up on it: frozen where the events stopped.
+  const stalled = quiet({
+    state: 'idle',
+    stalled: true,
+    turn_started_ms: NOW - 120_000,
+    turn_ended_ms: NOW - 60_000
+  })
+  assert.equal(turnElapsed(stalled, NOW), '1m')
 })
 
 test('a count of running work goes quiet when it can no longer be checked', () => {

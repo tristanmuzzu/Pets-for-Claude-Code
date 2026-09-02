@@ -251,7 +251,21 @@ export function duration(ms, now = Date.now()) {
 export function turnElapsed(session, now = Date.now()) {
   const started = session.turn_started_ms || 0
   if (!started) return ''
-  return duration(started, session.turn_ended_ms || now)
+  return duration(started, turnOver(session) ? session.turn_ended_ms : now)
+}
+
+/**
+ * Is the turn on this card over, so that its clock and counters are history?
+ *
+ * `turn_ended_ms` alone used to decide it, and it lied on a continued turn: a
+ * stop hook sends the same turn back to work, the outcome clears, the state
+ * goes back to running, and the stamp from the vetoed `Stop` stayed. The card
+ * read "12m" over a turn forty-six minutes in. A turn is over when it said how
+ * it ended, when the sweep gave up on it, or when it is simply not running.
+ */
+export function turnOver(session) {
+  if (!session.turn_ended_ms) return false
+  return Boolean(session.outcome) || Boolean(session.stalled) || !RUNNING.has(session.state)
 }
 
 /**
