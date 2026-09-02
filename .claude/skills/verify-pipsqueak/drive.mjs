@@ -140,7 +140,13 @@ async function hintLifecycle(s) {
     o.beforeHover = hint.hidden;
     ev('pointerenter', cx, cy);
     await dwell(1200); o.at1200ms = hint.hidden;
-    await dwell(1800); o.at3000ms = hint.hidden;
+    // Sampled at 3.6s for a 2.5s timer: headless Chrome aligns a background
+    // page's timers to whole-second wakeups, so a 2500ms setTimeout can land
+    // anywhere up to 3.5s and a sample taken at exactly 3.0s failed twice in
+    // a row against an app that was fine (measured 2026-09-02: the same
+    // probe passed at 3.6s, and the second visit, sampled later, always
+    // passed).
+    await dwell(2400); o.at3000ms = hint.hidden;
     o.hintBox = (() => { const h = hint.getBoundingClientRect(); return [Math.round(h.x), Math.round(h.y), Math.round(h.width), Math.round(h.height)]; })();
     ev('pointerleave', 20, 20);
     await sleep(400); o.afterLeave = hint.hidden;
@@ -152,7 +158,7 @@ async function hintLifecycle(s) {
   const checks = [
     ['hidden before the cursor arrives', o.beforeHover === true],
     ['still hidden at 1200ms, so a passing cursor never triggers it', o.at1200ms === true],
-    ['showing by 3000ms (HINT_DELAY_MS is 2500)', o.at3000ms === false],
+    ['showing by 3600ms (HINT_DELAY_MS is 2500, plus headless timer alignment)', o.at3000ms === false],
     ['positioned beside the pet, not at the origin', o.hintBox[0] > 0 && o.hintBox[1] > 0],
     ['hidden again once the cursor leaves (74f7262)', o.afterLeave === true],
     ['shows again on a second visit (bb55af0, e242576)', o.secondVisit === false],
