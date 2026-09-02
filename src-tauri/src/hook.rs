@@ -1958,8 +1958,10 @@ mod tests {
     /// the moment the card was saying "Needs you".
     #[test]
     fn a_background_turn_ending_is_not_a_person_being_asked() {
-        let mut session = Session::default();
-        session.background = true;
+        let mut session = Session {
+            background: true,
+            ..Default::default()
+        };
         feed(
             &mut session,
             "UserPromptSubmit",
@@ -2019,8 +2021,10 @@ mod tests {
     /// answers that, and it is exactly the case the alert exists for.
     #[test]
     fn a_background_session_at_a_permission_prompt_still_alerts() {
-        let mut session = Session::default();
-        session.background = true;
+        let mut session = Session {
+            background: true,
+            ..Default::default()
+        };
         feed(
             &mut session,
             "UserPromptSubmit",
@@ -2141,8 +2145,10 @@ mod tests {
     /// died.
     #[test]
     fn a_background_leg_that_failed_is_not_waiting_to_be_resumed() {
-        let mut session = Session::default();
-        session.background = true;
+        let mut session = Session {
+            background: true,
+            ..Default::default()
+        };
         feed(
             &mut session,
             "UserPromptSubmit",

@@ -91,13 +91,17 @@ fn worktree_owner(marker: &Path) -> Option<PathBuf> {
     let raw = text.split_once("gitdir:")?.1.trim().to_string();
     // Git 2.48+ can write the pointer relative to the marker
     // (`worktree.useRelativePaths`), which read as a project called "..".
+    // An absolute pointer is used as written: canonicalising it on Windows
+    // would add the `\\?\` verbatim prefix and stop matching the path the
+    // rest of the program uses. A relative one has to be resolved.
     let gitdir = if Path::new(&raw).is_absolute() {
         PathBuf::from(&raw)
     } else {
-        marker.parent()?.join(&raw)
+        let joined = marker.parent()?.join(&raw);
+        joined.canonicalize().unwrap_or(joined)
     };
-    let gitdir = gitdir.canonicalize().unwrap_or(gitdir);
-    owner_of_gitdir(&gitdir.to_string_lossy())
+    let text = gitdir.to_string_lossy();
+    owner_of_gitdir(text.strip_prefix("\\\\?\\").unwrap_or(&text))
 }
 
 /// The repository a worktree's `gitdir` pointer belongs to.

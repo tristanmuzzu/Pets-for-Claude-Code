@@ -186,7 +186,7 @@ mod linux_impl {
         match stat_of(pid) {
             // A zombie is a process that has exited and not been reaped. It
             // runs nothing, and it will never write another hook.
-            Some((state, _)) if matches!(state, 'Z' | 'X' | 'x') => false,
+            Some(('Z' | 'X' | 'x', _)) => false,
             Some((_, started)) => created == 0 || started == created,
             // Not readable is two different answers. No directory at all is
             // gone. A directory we may not read (a hardened `hidepid` mount)
