@@ -14,7 +14,8 @@ import {
   turnElapsed,
   worthCelebrating,
   CELEBRATE_AFTER_MS,
-  OUTSTANDING_STALE_MS
+  OUTSTANDING_STALE_MS,
+  OUTSTANDING_STALE_KNOWN_MS
 } from '../src/derive.js'
 
 const NOW = 1_000_000
@@ -147,6 +148,22 @@ test('outstanding work is written off once the session goes quiet', () => {
   })
   assert.equal(displayState(session, NOW + OUTSTANDING_STALE_MS - 1000), 'finishing')
   assert.equal(displayState(session, NOW + OUTSTANDING_STALE_MS + 1000), 'done')
+
+  // With the agent process known, the sweep would have retired the session
+  // had it died, so the silence is the background task still running. A
+  // six-minute build used to turn the card green while it was still going.
+  const vouched = quiet({
+    state: 'idle',
+    outcome: 'done',
+    outcome_ms: NOW,
+    settles_ms: NOW,
+    outstanding: 1,
+    updated_ms: NOW,
+    agent_pid: 4242
+  })
+  assert.equal(displayState(vouched, NOW + OUTSTANDING_STALE_MS + 1000), 'finishing')
+  assert.equal(runningCount(vouched, NOW + OUTSTANDING_STALE_MS + 1000), 1)
+  assert.equal(displayState(vouched, NOW + OUTSTANDING_STALE_KNOWN_MS + 1000), 'done')
 })
 
 test('a completion is announced only once it has held', () => {

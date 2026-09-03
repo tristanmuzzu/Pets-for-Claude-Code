@@ -277,8 +277,10 @@ work went into not claiming things:
   them in a couple of hundred milliseconds. Crying wolf teaches you to ignore the
   one that matters.
 - **Nothing at all once the agent is gone.** A sweep retires sessions whose
-  process has exited, and drops silent work back to idle after five minutes. It
-  says "stopped responding", not "done".
+  process has exited, and drops silent work back to idle after five minutes
+  (longer when a tool call declared its own timeout, or when work the turn
+  started is still listed as running). It says "stopped responding", not
+  "done".
 - **A dangerous command says so.** A force push, an `rm -rf`, a `DROP TABLE`,
   all get a warning on the card that's asking you to approve them.
 

@@ -151,8 +151,10 @@ overlay is already reading that file for the live line.
 Which is the distinction the Claude Code sidebar draws with a blinking dot, a
 hollow one, and a blue one. A count that never drains — because the overlay
 started watching after the launch and missed the completion — is written off
-after five minutes of total silence, the same cutoff that retires a session
-which stopped producing events.
+after a stretch of total silence: an hour when the hooks recorded the agent's
+process (a dead one is retired by the sweep within seconds, so the silence is
+the work itself; a six-minute build used to turn the card green at five), and
+five minutes when nothing vouches for the process.
 
 Two things are deliberately not done here. The pet does not read the
 assistant's prose looking for phrases like "waiting for" — that is guessing

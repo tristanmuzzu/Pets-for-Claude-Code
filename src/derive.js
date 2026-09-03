@@ -54,10 +54,23 @@ export const WORKING = new Set(['thinking', 'running', 'compacting', 'finishing'
  *
  * Every launch is recorded in the transcript and so is every completion, but
  * the overlay can start watching halfway through and see only one half. This
- * is the backstop: the same five minutes after which a running session is
- * assumed dead, applied to the work it started.
+ * is the backstop for a session whose agent process is *not* known: the same
+ * five minutes after which such a session is assumed dead, applied to the
+ * work it started.
  */
 export const OUTSTANDING_STALE_MS = 5 * 60_000
+/**
+ * The same backstop when the agent process is known and alive.
+ *
+ * A background build or a monitor produces no event for as long as it runs,
+ * and five minutes of that turned "Finishing · 1 running" into "Done" with
+ * the task still going — the card guessing the work had finished because it
+ * had heard nothing, which is what a running background task sounds like. A
+ * known process cannot be a ghost: the sweep retires the session within
+ * seconds of it dying. So the only thing left to guard against is a missed
+ * completion, and an hour bounds that.
+ */
+export const OUTSTANDING_STALE_KNOWN_MS = 60 * 60_000
 /**
  * How long a completion must hold before it is worth interrupting anyone.
  *
@@ -153,13 +166,17 @@ export function displayState(session, now = Date.now()) {
  *
  * Counted from the transcript, where every background command, monitor and
  * subagent is given an id when it starts and named again when it finishes.
- * Written off after [`OUTSTANDING_STALE_MS`] of total silence, because a
- * session that has said nothing for that long is not waiting on anything: it
- * is over, and a card stuck on "finishing" would be its own kind of lie.
+ * Written off after a stretch of total silence — [`OUTSTANDING_STALE_MS`]
+ * when nothing vouches for the agent process, [`OUTSTANDING_STALE_KNOWN_MS`]
+ * when the hooks recorded it and the sweep would have retired the session
+ * had it died — because a session that has said nothing for that long with
+ * nobody checking is not waiting on anything, and a card stuck on
+ * "finishing" would be its own kind of lie.
  */
 export function stillWorking(session, now = Date.now()) {
   if (!(session.outstanding > 0)) return false
-  return now - (session.updated_ms || 0) < OUTSTANDING_STALE_MS
+  const patience = session.agent_pid ? OUTSTANDING_STALE_KNOWN_MS : OUTSTANDING_STALE_MS
+  return now - (session.updated_ms || 0) < patience
 }
 
 /**
