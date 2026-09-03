@@ -551,6 +551,15 @@ frontend, platform) whose findings follow. IDs: `L-` Linux, `T-` lifecycle,
   chip hides on a settled state.
 - **FE-11/FE-13** — the 1s entrance fallback fired `syncHitRects` for a card
   already gone; `view.lastShown` written and never read. FIXED.
+- **FE-16** `derive.js:60` — "Finishing · 1 running" turned green after five
+  minutes while the background task was still running: the write-off for a
+  count the overlay might have missed the completion of, and a running
+  background task is exactly five minutes of silence. Reported by the owner
+  2026-09-03. FIXED — an hour of patience when the hooks recorded the agent's
+  process (a dead one is retired by the sweep within seconds, so the silence
+  is the work), five minutes when nothing vouches for it. Measured live with a
+  400s background task: sampled every 30s, the card read `finishing · 1` at
+  323s, 354s and 384s, and drained to 0 on completion.
 - **R-1** `pet.js:311` — `draw()` on every animation frame while frames change
   ~5×/s, through a `drop-shadow` filter; the WebKit process averaged 8.6% of
   a core over its lifetime against 1.3% at rest. FIXED — repaint only when
