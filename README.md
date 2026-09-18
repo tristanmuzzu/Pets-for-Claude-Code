@@ -291,6 +291,11 @@ work went into not claiming things:
   `PermissionRequest` fires before anyone is asked, and auto-mode settles most of
   them in a couple of hundred milliseconds. Crying wolf teaches you to ignore the
   one that matters.
+- **"Needs you" clears the second you answer it.** No hook fires on a "yes",
+  so a long command used to keep the question on the card until it finished.
+  The pet watches for the shell the answer starts instead: a Bash prompt is
+  cleared within a second of approval on Linux, however long the command then
+  runs. Other platforms still wait for the command to end.
 - **Nothing at all once the agent is gone.** A sweep retires sessions whose
   process has exited, and drops silent work back to idle after five minutes
   (longer when a tool call declared its own timeout, or when work the turn

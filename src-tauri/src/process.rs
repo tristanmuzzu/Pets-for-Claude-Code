@@ -72,6 +72,33 @@ pub fn is_alive(pid: u32, created: u64) -> bool {
     }
 }
 
+/// Has the agent started a shell at or after `since_ms`?
+///
+/// Nothing fires when a permission prompt is answered. The hooks say a tool
+/// was proposed (`PreToolUse`) and that it finished (`PostToolUse`), and the
+/// answer lives in the gap between, which for a long command is the whole
+/// time the card would go on saying "Needs you" over a build that is already
+/// running. For a Bash tool the answer is visible anyway: the shell is spawned
+/// only once the call is allowed, as a child of the agent's own process, so a
+/// shell child younger than the prompt is the prompt having been answered.
+///
+/// `None` when the platform cannot look, which the caller treats as "no
+/// opinion", never as "not answered".
+pub fn shell_started_since(pid: u32, since_ms: u64) -> Option<bool> {
+    if pid == 0 {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux_impl::shell_started_since(pid, since_ms)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = since_ms;
+        None
+    }
+}
+
 /// When this machine last booted, as milliseconds since the epoch.
 ///
 /// A session file updated before that moment was written by a process that
@@ -195,6 +222,71 @@ mod linux_impl {
         }
     }
 
+    /// Start times in `/proc/<pid>/stat` are clock ticks since boot at
+    /// USER_HZ, which the kernel fixes at 100 for everything under /proc
+    /// whatever CONFIG_HZ the build used.
+    const TICK_MS: u64 = 10;
+
+    /// Boot as milliseconds since the epoch, to the centisecond. `btime` in
+    /// /proc/stat is whole seconds, and a second is the entire margin between
+    /// a quick Enter on the prompt and the shell it starts.
+    fn boot_ms_fine() -> Option<u64> {
+        let uptime = fs::read_to_string("/proc/uptime").ok()?;
+        let seconds: f64 = uptime.split_whitespace().next()?.parse().ok()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as u64;
+        Some(now.saturating_sub((seconds * 1000.0) as u64))
+    }
+
+    /// Direct when the kernel keeps the lists (CONFIG_PROC_CHILDREN, on every
+    /// mainstream distribution); the whole process table otherwise. Per
+    /// thread, because a child is listed under the thread that spawned it and
+    /// the agent need not spawn from its main thread.
+    fn children_of(pid: u32) -> Vec<u32> {
+        if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
+            let mut readable = false;
+            let mut listed = Vec::new();
+            for list in tasks
+                .flatten()
+                .filter_map(|task| fs::read_to_string(task.path().join("children")).ok())
+            {
+                readable = true;
+                listed.extend(
+                    list.split_whitespace()
+                        .filter_map(|child| child.parse::<u32>().ok()),
+                );
+            }
+            // An empty list from a kernel that keeps them is the answer; a
+            // prompt nobody has answered yet has no children, and that is not
+            // a reason to walk the process table every second.
+            if readable {
+                return listed;
+            }
+        }
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|&child| parent_of(child) == Some(pid))
+            .collect()
+    }
+
+    fn is_shell(name: &str) -> bool {
+        matches!(name, "sh" | "bash" | "dash" | "zsh" | "fish" | "ksh")
+    }
+
+    pub fn shell_started_since(pid: u32, since_ms: u64) -> Option<bool> {
+        let boot = boot_ms_fine()?;
+        Some(children_of(pid).into_iter().any(|child| {
+            comm_of(child).is_some_and(|name| is_shell(&name))
+                && stat_of(child).is_some_and(|(_, ticks)| boot + ticks * TICK_MS >= since_ms)
+        }))
+    }
+
     pub fn boot_time_ms() -> Option<u64> {
         fs::read_to_string("/proc/stat")
             .ok()?
@@ -214,6 +306,30 @@ mod linux_impl {
             let line = "4242 (a (weird) name) S 1 4242 4242 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 1 0 179528 1000 200 18446744073709551615";
             assert_eq!(parse_stat(line), Some(('S', 179528)));
             assert_eq!(parse_stat("garbage"), None);
+        }
+
+        /// This test process is the "agent"; a shell it starts is the tell.
+        #[test]
+        fn a_shell_child_started_after_the_prompt_is_seen() {
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let me = std::process::id();
+            assert_eq!(shell_started_since(me, before), Some(false));
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 5"])
+                .spawn()
+                .expect("sh");
+            // The prompt was raised before the shell, so the shell counts...
+            assert_eq!(
+                shell_started_since(me, before.saturating_sub(1000)),
+                Some(true)
+            );
+            // ...and a prompt raised in the future has not been answered by it.
+            assert_eq!(shell_started_since(me, before + 60_000), Some(false));
+            let _ = child.kill();
+            let _ = child.wait();
         }
 
         /// The process running this test is alive under its own identity and

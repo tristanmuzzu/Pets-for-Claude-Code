@@ -839,6 +839,76 @@ pub fn sweep() -> usize {
     changed
 }
 
+/// Clears a permission prompt the human has already answered.
+///
+/// No hook reports the answer, so a "yes" to a long command left the card
+/// saying "Needs you" for as long as the command ran: measured 2026-09-18, a
+/// store upload approved after half a minute still showed the question four
+/// minutes later. The shell the answer starts is the evidence instead; see
+/// `process::shell_started_since`. Only a Bash prompt has that tell, and only
+/// once the agent's pid is known.
+pub fn settle_answered_prompts() -> usize {
+    let now = now_ms();
+    let Ok(entries) = fs::read_dir(sessions_dir()) else {
+        return 0;
+    };
+    let mut changed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        // Nearly every session, nearly all the time, is not at a prompt, so
+        // look before taking the lock the hooks contend for.
+        let Some(session) = read_session(&path) else {
+            continue;
+        };
+        if !at_shell_prompt(&session) {
+            continue;
+        }
+        let _lock = FileLock::acquire(&path);
+        let Some(mut session) = read_session(&path) else {
+            continue;
+        };
+        if !at_shell_prompt(&session)
+            || process::shell_started_since(session.agent_pid, session.pending_since) != Some(true)
+        {
+            continue;
+        }
+        mark_answered(&mut session, now);
+        if let Ok(bytes) = serde_json::to_vec(&session) {
+            let _ = write_atomic(&path, &bytes);
+            changed += 1;
+        }
+    }
+    changed
+}
+
+fn read_session(path: &Path) -> Option<Session> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+fn at_shell_prompt(session: &Session) -> bool {
+    session.pending_since > 0 && session.pending_tool == "Bash" && session.agent_pid != 0
+}
+
+/// The prompt was answered and the command is running: say so, the way the
+/// hooks would have if one fired at the answer.
+fn mark_answered(session: &mut Session, now: u64) {
+    let what = session.pending_detail.clone();
+    session.clear_permission();
+    session.waiting_since = 0;
+    session.waiting_reason.clear();
+    session.event = "Approved".to_string();
+    session.updated_ms = now;
+    let text = if what.is_empty() {
+        "Approved".to_string()
+    } else {
+        format!("Approved · {what}")
+    };
+    session.push_recent("running", &text, now);
+}
+
 /// Has this session died without saying so?
 ///
 /// Silence is the only evidence available, and it means different things. A
@@ -904,6 +974,44 @@ mod tests {
         assert!(has_stopped_responding(&quiet("running"), long, NOW));
         // And it takes more than a pause between tool calls.
         assert!(!has_stopped_responding(&quiet("running"), 1000, NOW));
+    }
+
+    /// A "yes" to a Bash prompt fires no hook. Once the shell it starts is
+    /// seen, the card has to stop asking. Only a shell can be seen starting,
+    /// so an Edit prompt has no such tell and keeps waiting for its hook.
+    #[test]
+    fn an_answered_shell_prompt_is_cleared_without_a_hook() {
+        let mut asked = quiet("running");
+        asked.pending_tool = "Bash".into();
+        asked.pending_detail = "run: cargo build".into();
+        asked.pending_since = 5;
+        asked.waiting_since = 9;
+        asked.waiting_reason = "Claude needs your permission to use Bash".into();
+        asked.agent_pid = 1;
+        assert!(at_shell_prompt(&asked));
+
+        mark_answered(&mut asked, NOW);
+        assert_eq!(asked.pending_since, 0);
+        assert_eq!(asked.waiting_since, 0);
+        assert!(asked.waiting_reason.is_empty());
+        assert!(asked.pending_detail.is_empty());
+        assert_eq!(asked.updated_ms, NOW);
+        assert_eq!(
+            asked.recent.last().map(|entry| entry.text.as_str()),
+            Some("Approved · run: cargo build")
+        );
+        assert!(!at_shell_prompt(&asked));
+
+        let mut edit = quiet("running");
+        edit.pending_tool = "Edit".into();
+        edit.pending_since = 5;
+        edit.agent_pid = 1;
+        assert!(!at_shell_prompt(&edit));
+
+        let mut unknown = quiet("running");
+        unknown.pending_tool = "Bash".into();
+        unknown.pending_since = 5;
+        assert!(!at_shell_prompt(&unknown), "no pid, nothing to look at");
     }
 
     const NOW: u64 = 1_000_000_000;

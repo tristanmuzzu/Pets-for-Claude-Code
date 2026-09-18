@@ -59,6 +59,10 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// around the clock, for a three-times-a-second answer nobody asked for. This
 /// keeps a three-fold margin under the readers' timeout.
 const BEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// How often to look for a permission prompt that has been answered. A "yes"
+/// fires no hook; the card should stop asking within the second, while you
+/// are still looking at it.
+const PROMPT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// A `pipsqueak control` command older than this was meant for a pet that is
 /// no longer the one reading it.
 const COMMAND_STALE_MS: u64 = 10_000;
@@ -1162,7 +1166,12 @@ fn spawn_poller(app: AppHandle) {
         //   clamped (0,0) -> (69,33) with window inner 360x640 ...
         let mut next_rescue = Instant::now() + SWEEP_INTERVAL;
         let mut next_beat = Instant::now();
+        let mut next_prompt_check = Instant::now();
         loop {
+            if Instant::now() >= next_prompt_check {
+                state::settle_answered_prompts();
+                next_prompt_check = Instant::now() + PROMPT_CHECK_INTERVAL;
+            }
             // Hooks can only ever say what happened; nothing writes a file to
             // report that Claude Code died. The sweep is the only thing that
             // can retire a session, so it has to run on a clock of its own.
