@@ -129,9 +129,19 @@ fn is_zero(value: &u64) -> bool {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    #[default]
+    Claude,
+    Codex,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct Session {
     pub session_id: String,
+    /// Missing in older hook files, which all belong to Claude Code.
+    pub provider: Provider,
     /// idle | thinking | running | compacting. Only forward progress moves it.
     pub state: String,
     /// What this turn is *about*. Set when the turn starts and replaced when it
@@ -189,6 +199,8 @@ pub struct Session {
     pub turn_started_ms: u64,
     /// Tool calls in the current turn.
     pub turn_tools: u64,
+    /// The Codex tail started mid-turn; this count is a lower bound.
+    pub turn_tools_partial: bool,
     pub tools: u64,
     pub recent: Vec<Entry>,
 
@@ -383,6 +395,11 @@ pub struct Config {
     /// Sessions rooted in a temp directory (scripted runs, evals) are hidden
     /// unless asked for. They are not projects and drown out real work.
     pub show_scratch: bool,
+    /// All agents, or just `claude` / `codex`. Presentation only.
+    pub agent_filter: String,
+    pub hidden_projects: Vec<String>,
+    /// One preferred conversation; provider-qualified session ID.
+    pub pinned_session: String,
     /// Beep when a project starts waiting on you.
     pub alert_on_waiting: bool,
     /// Blink the tray icon when a project finishes. The only channel that
@@ -423,6 +440,17 @@ impl Config {
         if self.pet.trim().is_empty() {
             self.pet = "byte".to_string();
         }
+        if !["all", "claude", "codex"].contains(&self.agent_filter.as_str()) {
+            self.agent_filter = "all".into();
+        }
+        self.hidden_projects
+            .retain(|key| !key.is_empty() && key.len() <= 4096);
+        self.hidden_projects.sort();
+        self.hidden_projects.dedup();
+        self.hidden_projects.truncate(256);
+        if self.pinned_session.len() > 128 {
+            self.pinned_session.clear();
+        }
     }
 }
 
@@ -437,6 +465,9 @@ impl Default for Config {
             click_through: false,
             show_bubble: true,
             show_scratch: false,
+            agent_filter: "all".into(),
+            hidden_projects: Vec::new(),
+            pinned_session: String::new(),
             alert_on_waiting: false,
             flash_on_finish: true,
             quiet: false,
@@ -959,5 +990,18 @@ mod tests {
             ..Config::default()
         };
         assert!(save_config(&config).is_err());
+    }
+    #[test]
+    fn tracking_preferences_round_trip_and_old_configs_default_to_all() {
+        let mut config: Config = serde_json::from_str(r#"{"pet":"byte","agent_filter":"codex","hidden_projects":["path:/a","path:/a"],"pinned_session":"codex:123"}"#).unwrap();
+        config.clamp();
+        let again: Config = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(again.agent_filter, "codex");
+        assert_eq!(again.hidden_projects, vec!["path:/a"]);
+        assert_eq!(again.pinned_session, "codex:123");
+        let old: Config = serde_json::from_str(r#"{"pet":"byte"}"#).unwrap();
+        assert_eq!(old.agent_filter, "all");
+        assert!(old.hidden_projects.is_empty());
+        assert!(old.pinned_session.is_empty());
     }
 }

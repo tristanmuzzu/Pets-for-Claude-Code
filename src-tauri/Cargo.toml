@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order because the installer round-trips ~/.claude/settings.json, a
 # hand-tuned file whose key order is the owner's, not ours to alphabetise.
 serde_json = { version = "1", features = ["preserve_order"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [features]
 default = ["custom-protocol"]

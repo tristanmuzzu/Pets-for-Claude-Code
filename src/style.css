@@ -52,9 +52,13 @@ body {
 }
 
 #stage {
-  position: relative;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: var(--stage-width, 100%);
+  height: var(--stage-height, 100%);
+  transform: scale(var(--ui-scale, 1));
+  transform-origin: bottom right;
 }
 
 #pet {
@@ -103,9 +107,16 @@ body {
   gap: 6px;
 }
 
+/*
+ * State is the card's left edge. One colour per state, the same one the dot
+ * and the status word use, drawn as a short bar inside the left border so it
+ * reads from across the room and on a compact row that has no status line.
+ * Idle has no bar: nothing is happening, so nothing is highlighted.
+ */
 .card {
+  position: relative;
   width: 100%;
-  padding: 9px 11px 10px;
+  padding: 9px 11px 10px 13px;
   border: 1px solid var(--edge);
   border-radius: 14px;
   background: var(--surface);
@@ -139,11 +150,27 @@ body {
   }
 }
 
-/* Only the card nearest the pet gets the speech tail. */
-#stack .card:first-of-type {
-  position: relative;
+/* The state bar. Inset from both ends so it sits clear of the rounded corners
+   instead of bending around them, and rounded on its free side like the
+   marker on a selected tab. */
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--stripe);
+  pointer-events: none;
 }
 
+.card[data-density="compact"]::before {
+  top: 7px;
+  bottom: 7px;
+}
+
+/* Only the card nearest the pet gets the speech tail. */
 #stack .card:first-of-type::after {
   content: "";
   position: absolute;
@@ -161,6 +188,23 @@ body {
   opacity: 0.5;
 }
 
+/* Cards and chips carry the same attribute and resolve it to the same colour;
+   what each one paints with it differs. The default sits in :where() so it has
+   no specificity of its own and any state rule below beats it. */
+:where(.card, .chips button) {
+  --state-color: var(--idle);
+  --stripe: transparent;
+}
+[data-state="thinking"] { --state-color: var(--thinking); --stripe: var(--state-color); }
+[data-state="running"] { --state-color: var(--running); --stripe: var(--state-color); }
+[data-state="finishing"] { --state-color: var(--running); --stripe: var(--state-color); }
+[data-state="compacting"] { --state-color: var(--compacting); --stripe: var(--state-color); }
+[data-state="done"] { --state-color: var(--done); --stripe: var(--state-color); }
+[data-state="failed"] { --state-color: var(--failed); --stripe: var(--state-color); }
+[data-state="waiting"] { --state-color: var(--waiting); --stripe: var(--state-color); }
+
+/* The two states that want you to look also get the border and a halo. The
+   halo is the only thing on the card allowed to reach outside it. */
 .card[data-state="waiting"] {
   border-color: rgba(255, 152, 56, 0.55);
   box-shadow:
@@ -267,20 +311,14 @@ body.settled #pet.asleep {
   flex: none;
 }
 
-.card[data-state="thinking"] .dot { background: var(--thinking); }
-.card[data-state="running"] .dot { background: var(--running); }
-.card[data-state="waiting"] .dot { background: var(--waiting); animation: blink 1.1s ease-in-out infinite; }
-.card[data-state="failed"] .dot { background: var(--failed); }
-.card[data-state="done"] .dot { background: var(--done); }
-.card[data-state="compacting"] .dot { background: var(--compacting); }
+.card .dot,
+.chips button .dot { background: var(--state-color); }
+[data-state="waiting"] .dot { animation: blink 1.1s ease-in-out infinite; }
 /* Still working, and the blink says the working is not this session's own
    doing: the turn has ended and what it started has not. Deliberately the
    working colour rather than the finished one — green is a claim this card is
    not yet entitled to make. */
-.card[data-state="finishing"] .dot {
-  background: var(--running);
-  animation: blink 1.6s ease-in-out infinite;
-}
+[data-state="finishing"] .dot { animation: blink 1.6s ease-in-out infinite; }
 
 @keyframes blink {
   50% { opacity: 0.25; }
@@ -401,7 +439,7 @@ body.settled #pet.asleep {
  */
 .card[data-density="compact"] {
   min-height: 0;
-  padding: 6px 9px;
+  padding: 6px 9px 6px 11px;
 }
 
 .card[data-density="compact"] .card-head {
@@ -466,10 +504,10 @@ body.settled #pet.asleep {
   font-variant-numeric: tabular-nums;
 }
 
-.card[data-state="waiting"] .status .kind { color: var(--waiting); }
-.card[data-state="failed"] .status .kind { color: var(--failed); }
-.card[data-state="done"] .status .kind { color: var(--done); }
-.card[data-state="finishing"] .status .kind { color: var(--running); }
+/* The word wears the stripe's colour, so word, dot and edge agree. Idle keeps
+   plain ink: "Idle" in grey next to a grey dot would be three ways of saying
+   nothing. */
+.card:not([data-state="idle"]) .status .kind { color: var(--state-color); }
 
 /*
  * What the session is blocked on. The only line on a card worth interrupting
@@ -554,7 +592,10 @@ body.settled #pet.asleep {
   margin: 7px 0 0;
   padding: 7px 0 0;
   border-top: 1px solid var(--edge);
-  max-height: 116px;
+  /* Opened on purpose, so this one list may scroll — but never so tall that it
+     pushes its own card past the room the stack has. On a short window it
+     shrinks instead, which keeps the card whole. */
+  max-height: min(116px, max(52px, calc(var(--stage-height, 640px) - 300px)));
   overflow-y: auto;
   font-family: var(--mono);
   font-size: 11px;
@@ -596,6 +637,10 @@ body.settled #pet.asleep {
   gap: 4px;
 }
 
+/* A chip has no status line and no room for a bar, so here the state is the
+   whole pill: its border and a faint wash of the same colour. This is the view
+   the chats live in when the cards are folded away, so a dot alone was too
+   small a thing to carry it. */
 .chips button {
   display: flex;
   align-items: center;
@@ -609,8 +654,34 @@ body.settled #pet.asleep {
   cursor: pointer;
 }
 
+.chips button:not([data-state="idle"]) {
+  border-color: color-mix(in srgb, var(--state-color) 55%, transparent);
+  background: color-mix(in srgb, var(--state-color) 9%, var(--surface));
+}
+
+.chips button[data-state="waiting"],
+.chips button[data-state="failed"] {
+  border-color: color-mix(in srgb, var(--state-color) 80%, transparent);
+  background: color-mix(in srgb, var(--state-color) 16%, var(--surface));
+  color: var(--ink);
+}
+
+.chips button[data-state="waiting"] {
+  box-shadow: 0 0 0 3px rgba(255, 152, 56, 0.16);
+}
+
 .chips button:hover {
   color: var(--ink);
+}
+
+/* Reads as a count, not as something to press. */
+.chips-more {
+  font: 11px/1 system-ui, sans-serif;
+  padding: 5px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--edge);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .chips .dot {
@@ -634,7 +705,7 @@ body.settled #pet.asleep {
   bottom: 106px;
   width: 322px;
   /* Fits inside the window above the pet, with room for the arrow. */
-  max-height: 480px;
+  max-height: min(480px, calc(var(--stage-height, 640px) - 120px));
   overflow-y: auto;
   padding: 12px 13px 13px;
   border: 1px solid var(--edge);
@@ -789,7 +860,7 @@ body.settled #pet.asleep {
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.42);
   /* However long the menu gets, it stops at the top of the window instead of
      running off it, which used to clip the first few items. */
-  max-height: calc(100vh - 120px);
+  max-height: calc(var(--stage-height, 640px) - 120px);
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
@@ -856,3 +927,57 @@ body.settled #pet.asleep {
   content: "✓";
   float: right;
 }
+
+/* Which agent this is lives in the name and only the name, on cards and on
+   dismissed chips alike. The card's edges belong to state: an orange border
+   for Claude sat next to an orange halo for "needs you", and the two said
+   different things in the same colour. Text accompanies colour, so the name
+   is still readable when the colours are not. */
+[data-provider="claude"] { --agent-color: #e5a078; }
+[data-provider="codex"] { --agent-color: #90bdff; }
+.agent-label {
+  flex: none;
+  color: var(--agent-color, var(--muted));
+  font-size: 9.5px;
+  line-height: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.agent-label:empty { display: none; }
+.card[data-provider] .project { max-width: 30%; }
+
+/* A conversation title gets its own line on full cards, so an agent label
+   never squeezes the task name down to two unreadable words. */
+.card:not([data-density="compact"]) .card-head { flex-wrap: wrap; gap: 3px 6px; }
+.card:not([data-density="compact"]) .card-head > .title {
+  order: 1;
+  flex: 1 0 100%;
+  color: var(--ink);
+}
+.card:not([data-density="compact"]) .workspace { max-width: 60px; }
+
+/* Identity is carried by name as well as colour. Connection state is text. */
+.menu { width: 236px; }
+.connections { padding: 5px 7px; display: grid; gap: 8px; }
+.connection { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 11px/1.4 system-ui, sans-serif; }
+.connection strong { font-weight: 600; }
+.connection[data-provider="codex"] strong { color: #81baff; }
+.connection[data-provider="claude"] strong { color: #eeae84; }
+.connection span { color: var(--muted); }
+.connection[data-health="fallback"] span,
+.connection[data-health="missing"] span { color: #e6bb77; }
+.pin { opacity: .6; }
+.pin[aria-pressed="true"] { opacity: 1; color: #f5d990; background: rgba(245, 217, 144, .12); }
+.card[data-pinned="true"] .title::before { content: 'Pinned · '; color: var(--faint); font-size: 10px; }
+.project-toggle { width: 100%; text-align: left; overflow-wrap: anywhere; }
+.project-toggle[aria-pressed="false"] { color: var(--faint); }
+
+.menu .heading { margin: 0; }
+
+/* A ceiling, not a scroll port. `fitStack` drops cards from the far end until
+   the stack is under it, so the card nearest the pet — the one with the speech
+   tail — is always whole. Scrolling this box sliced the far card in half and
+   clipped the tail off the near one, which is what it looked like. */
+#stack { max-height: calc(var(--stage-height, 640px) - 120px); }
+#stack > * { flex-shrink: 0; }

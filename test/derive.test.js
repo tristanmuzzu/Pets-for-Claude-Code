@@ -314,3 +314,14 @@ test('a count of running work goes quiet when it can no longer be checked', () =
   assert.equal(displayState(quietForAges, NOW), 'done')
   assert.equal(runningCount(quietForAges, NOW), 0)
 })
+
+test('agent identity survives status changes and defaults old files to Claude', async () => {
+  const { agentIdentity } = await import('../src/derive.js')
+  assert.equal(agentIdentity({ session_id: 'legacy' }).id, 'claude')
+  for (const state of ['thinking', 'running', 'waiting', 'done', 'failed']) {
+    assert.deepEqual(agentIdentity({ provider: 'codex', state }), {
+      id: 'codex', label: 'Codex', name: 'Codex'
+    })
+  }
+  assert.equal(agentIdentity({ session_id: 'notice' }).label, '')
+})

@@ -100,6 +100,51 @@ struct Watch {
     /// id when the thing is launched, and the same id in the notification when
     /// it completes. Keeping the set is just subtracting one from the other.
     outstanding: BTreeSet<String>,
+    /// Ids that arrived from a hook payload and that the transcript has never
+    /// mentioned, with the turn they arrived on.
+    ///
+    /// THE BUG THIS EXISTS FOR
+    ///
+    /// A `Stop` reported one background shell; the card said "Finishing · 1
+    /// running" and kept saying it for half an hour, across several finished
+    /// turns, with nothing running anywhere on the machine (measured
+    /// 2026-09-12: no shell, no subagent, the launched process reparented to
+    /// systemd long before). The id could not be subtracted, because
+    /// subtraction only ever happens against the transcript, and this id had
+    /// never been in the transcript to begin with — it was not launched
+    /// through a tool call that writes one. The other escape hatch is a newer
+    /// `background_tasks` array overwriting the set, and later stops omit the
+    /// key entirely rather than sending an empty array, so no correction ever
+    /// came. The give-up timer could not save it either: an hour of patience
+    /// that every keystroke resets is not a timer during a conversation.
+    ///
+    /// So an id the transcript cannot vouch for lives exactly one turn, which
+    /// is what this file already claimed: "a shape this build has never seen
+    /// cannot strand a card on 'still working' for more than one turn". Work
+    /// that really is still running is reported again on the next stop and
+    /// comes straight back, and anything the transcript did name is confirmed
+    /// and keeps the normal lifecycle — so a card still refuses to say "Done"
+    /// over five subagents that have not finished.
+    unconfirmed: BTreeSet<String>,
+    /// The turn `unconfirmed` belongs to, as `prompt_id`. Empty before the
+    /// first hook correction.
+    unconfirmed_turn: String,
+    /// Ids that had their turn and were never vouched for, so a hook that keeps
+    /// reporting the same ghost cannot raise it again.
+    ///
+    /// Measured on the session that produced this bug: `background_tasks` is
+    /// NOT dropped once the work ends. The same id, with `status: "running"`,
+    /// came back on every single stop for forty minutes, with nothing behind
+    /// it. Expiry alone would therefore have changed nothing a person could
+    /// see — the count fell during the turn and was restored by the next stop,
+    /// which is the exact moment the card is read.
+    ///
+    /// So the pet's own evidence outranks the report: the transcript is a file
+    /// this process read, the list is something another process said. An id
+    /// the file has never named, after a full turn to name it, is not counted
+    /// again until the file does name it — at which point `track_tasks` clears
+    /// it from here and it is ordinary outstanding work once more.
+    rejected: BTreeSet<String>,
     /// The last authoritative correction taken from a hook payload, so it is
     /// applied once instead of on every one of the three polls a second.
     synced_ms: u64,
@@ -134,10 +179,30 @@ pub fn decorate(sessions: &mut [Session], mode: Mode) {
         // Claude Code's own answer wins over anything inferred from the file.
         // Applied before the read so a launch that happened after the snapshot
         // still counts.
+        // The turn boundary is settled first, and on the turn alone, so the
+        // outcome does not depend on whether a poll happened to land between a
+        // new prompt and the stop that follows it. Three polls a second nearly
+        // always means it did, which is a coin-flip dressed as a rule.
+        if !watch.unconfirmed.is_empty() && session.prompt_id != watch.unconfirmed_turn {
+            // Whatever the file never vouched for has had its one turn.
+            for id in std::mem::take(&mut watch.unconfirmed) {
+                watch.outstanding.remove(&id);
+                watch.rejected.insert(id);
+            }
+        }
         if session.tasks_ms > watch.synced_ms {
             watch.synced_ms = session.tasks_ms;
-            watch.outstanding = session.tasks.iter().cloned().collect();
+            watch.outstanding = session
+                .tasks
+                .iter()
+                .filter(|id| !watch.rejected.contains(*id))
+                .cloned()
+                .collect();
+            // Nothing here has been corroborated by the transcript yet. What
+            // the transcript names later is confirmed by `track_tasks`.
+            watch.unconfirmed = watch.outstanding.clone();
         }
+        watch.unconfirmed_turn = session.prompt_id.clone();
         // A transcript only grows while something is happening: a turn fires
         // hook events, and background work reports into the file before the
         // hook that follows it. So a session that is not running, has nothing
@@ -233,7 +298,12 @@ fn follow(path: &Path, watch: &mut Watch, mode: Mode) {
     let text = String::from_utf8_lossy(&buffer[..complete]);
 
     for line in text.lines() {
-        track_tasks(line, &mut watch.outstanding);
+        track_tasks(
+            line,
+            &mut watch.outstanding,
+            &mut watch.unconfirmed,
+            &mut watch.rejected,
+        );
         if mode == Mode::Off {
             continue;
         }
@@ -274,7 +344,14 @@ const OVER: [&str; 4] = ["completed", "failed", "stopped", "killed"];
 /// and only trusting the four shapes Claude Code actually launches work with
 /// takes those 302 down to 11, every one of which is a real task that outlived
 /// its session.
-fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
+/// `confirmed` names ids the transcript has now vouched for, so a hook-sourced
+/// id stops being on its one-turn clock the moment the file corroborates it.
+fn track_tasks(
+    line: &str,
+    outstanding: &mut BTreeSet<String>,
+    unconfirmed: &mut BTreeSet<String>,
+    rejected: &mut BTreeSet<String>,
+) {
     // Endings first, and by substring, because a notification is delivered as
     // an XML-ish blob inside a JSON string rather than as fields.
     if line.contains("task-notification") {
@@ -312,11 +389,15 @@ fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
         if !is_todo {
             if let Some(id) = field("backgroundTaskId").filter(|id| plausible_id(id)) {
                 outstanding.insert(id.to_string());
+                unconfirmed.remove(id);
+                rejected.remove(id);
             }
             if status == "async_launched" {
                 for key in ["agentId", "taskId"] {
                     if let Some(id) = field(key).filter(|id| plausible_id(id)) {
                         outstanding.insert(id.to_string());
+                        unconfirmed.remove(id);
+                        rejected.remove(id);
                     }
                 }
             }
@@ -326,6 +407,8 @@ fn track_tasks(line: &str, outstanding: &mut BTreeSet<String>) {
             if result.contains_key("timeoutMs") || result.contains_key("persistent") {
                 if let Some(id) = field("taskId").filter(|id| plausible_id(id)) {
                     outstanding.insert(id.to_string());
+                    unconfirmed.remove(id);
+                    rejected.remove(id);
                 }
             }
         }
@@ -483,9 +566,157 @@ mod tests {
     fn tracked(lines: &[&str]) -> Vec<String> {
         let mut out = BTreeSet::new();
         for line in lines {
-            track_tasks(line, &mut out);
+            track_tasks(line, &mut out, &mut BTreeSet::new(), &mut BTreeSet::new());
         }
         out.into_iter().collect()
+    }
+
+    /// `decorate` ends by dropping every watch whose path it was not given,
+    /// which is right in production — one call sees every session on screen —
+    /// and means two of these running at once wipe each other's state and turn
+    /// a re-seed into a pass or a fail depending on the scheduler. Measured: 4
+    /// failures in 12 runs before this.
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A transcript in a directory of its own, so the global watch cache keyed
+    /// by path cannot see another test's file.
+    fn transcript(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pipsqueak-narration-{name}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("transcript.jsonl");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn session_at(path: &Path, prompt_id: &str, tasks: &[&str], tasks_ms: u64) -> Session {
+        Session {
+            session_id: "s1".to_string(),
+            transcript: path.to_string_lossy().to_string(),
+            prompt_id: prompt_id.to_string(),
+            tasks: tasks.iter().map(|t| t.to_string()).collect(),
+            tasks_ms,
+            updated_ms: tasks_ms,
+            ..Session::default()
+        }
+    }
+
+    /// The card that said "Finishing · 1 running" for half an hour with nothing
+    /// running: a hook named a background task the transcript never mentions,
+    /// and later stops omitted the key rather than sending an empty array.
+    #[test]
+    fn a_task_the_transcript_never_saw_is_let_go_after_one_turn() {
+        let _exclusive = exclusive();
+        let path = transcript("unvouched", "{\"type\":\"assistant\"}\n");
+        let mut one = [session_at(&path, "turn-a", &["slhnflide"], 9_000)];
+        decorate(&mut one, Mode::Off);
+        assert_eq!(
+            one[0].outstanding, 1,
+            "the hook said so, so the card says so"
+        );
+
+        // Same turn, no fresh answer from the hook: the count stands.
+        let mut again = [session_at(&path, "turn-a", &["slhnflide"], 9_000)];
+        decorate(&mut again, Mode::Off);
+        assert_eq!(again[0].outstanding, 1, "one turn means one whole turn");
+
+        // The next turn, still with no answer: it has had its turn.
+        let mut next = [session_at(&path, "turn-b", &["slhnflide"], 9_000)];
+        decorate(&mut next, Mode::Off);
+        assert_eq!(next[0].outstanding, 0, "nothing vouches for it any more");
+    }
+
+    /// The measured shape of the bug: the hook does not stop reporting it. The
+    /// same id, still `status: "running"`, arrives on every stop for forty
+    /// minutes with nothing behind it, so expiry alone would be undone at the
+    /// exact moment the card is read.
+    #[test]
+    fn a_ghost_the_hook_keeps_reporting_does_not_come_back() {
+        let _exclusive = exclusive();
+        let path = transcript("ghost", "{\"type\":\"assistant\"}\n");
+        let mut one = [session_at(&path, "turn-a", &["slhnflide"], 9_000)];
+        decorate(&mut one, Mode::Off);
+        assert_eq!(one[0].outstanding, 1);
+
+        // Next turn, no fresh answer yet: it has had its turn.
+        let mut two = [session_at(&path, "turn-b", &["slhnflide"], 9_000)];
+        decorate(&mut two, Mode::Off);
+        assert_eq!(two[0].outstanding, 0);
+
+        // That turn's stop reports the very same id as running, again.
+        let mut three = [session_at(&path, "turn-b", &["slhnflide"], 10_000)];
+        decorate(&mut three, Mode::Off);
+        assert_eq!(
+            three[0].outstanding, 0,
+            "the file has still never named it, so saying it twice is not evidence"
+        );
+    }
+
+    /// And the way back: the transcript naming it clears the rejection, because
+    /// the file outranks the report in both directions.
+    #[test]
+    fn a_rejected_id_the_transcript_later_names_counts_again() {
+        let _exclusive = exclusive();
+        let path = transcript("rejected-then-named", "{\"type\":\"assistant\"}\n");
+        let mut one = [session_at(&path, "turn-a", &["bg-77"], 9_000)];
+        decorate(&mut one, Mode::Off);
+        let mut two = [session_at(&path, "turn-b", &["bg-77"], 9_000)];
+        decorate(&mut two, Mode::Off);
+        assert_eq!(two[0].outstanding, 0, "rejected");
+
+        std::fs::write(
+            &path,
+            "{\"type\":\"assistant\"}\n{\"toolUseResult\":{\"backgroundTaskId\":\"bg-77\"}}\n",
+        )
+        .unwrap();
+        let mut three = [session_at(&path, "turn-b", &["bg-77"], 10_000)];
+        three[0].updated_ms = 11_000;
+        decorate(&mut three, Mode::Off);
+        assert_eq!(
+            three[0].outstanding, 1,
+            "the file named it, so it is real work"
+        );
+    }
+
+    /// The protection this must not break: work the transcript did name stays
+    /// counted across as many turns as it takes.
+    #[test]
+    fn a_task_the_transcript_named_survives_the_next_turn() {
+        let _exclusive = exclusive();
+        let launched = r#"{"toolUseResult":{"backgroundTaskId":"bg-1234"}}"#;
+        let path = transcript("vouched", &format!("{launched}\n"));
+        let mut one = [session_at(&path, "turn-a", &["bg-1234"], 9_000)];
+        decorate(&mut one, Mode::Off);
+        assert_eq!(one[0].outstanding, 1);
+
+        let mut next = [session_at(&path, "turn-b", &["bg-1234"], 9_000)];
+        decorate(&mut next, Mode::Off);
+        assert_eq!(
+            next[0].outstanding, 1,
+            "the transcript vouched for it, so it keeps the normal lifecycle"
+        );
+    }
+
+    /// Repeating an id the file has never named does not make it true, however
+    /// the polls happen to fall — with a poll between the turn and the stop, or
+    /// with both arriving in the same one.
+    #[test]
+    fn saying_it_again_is_not_evidence_whenever_the_poll_lands() {
+        let _exclusive = exclusive();
+        let path = transcript("reported-again", "{\"type\":\"assistant\"}\n");
+        let mut one = [session_at(&path, "turn-a", &["slow-1"], 9_000)];
+        decorate(&mut one, Mode::Off);
+        assert_eq!(one[0].outstanding, 1);
+
+        // No poll saw the bare turn change: the new turn and its newer answer
+        // arrive together.
+        let mut next = [session_at(&path, "turn-b", &["slow-1"], 10_000)];
+        decorate(&mut next, Mode::Off);
+        assert_eq!(next[0].outstanding, 0, "same answer either way");
     }
 
     /// The shapes below are copied from a real transcript. They are not a

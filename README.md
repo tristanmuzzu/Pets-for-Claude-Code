@@ -90,6 +90,20 @@ it says and thinks. The last one is the default and the one that feels alive.
   you which. Windows only; on Linux you bind `pipsqueak control toggle` in your
   desktop's keyboard settings. See [Install](#install).
 
+## Codex and Claude Code together
+
+Pipsqueak also follows **local Codex Desktop and CLI tasks automatically**.
+Run both agents at once, even in the same repository: every conversation gets
+its own card. The agent's name in the card header says which it is: **Codex
+in blue, Claude in orange**. The card's edge belongs to state, not to the agent:
+a coloured bar down the left, the status dot and the status word all share one
+colour for thinking, working, needs you, failed and done. The distinction stays
+visible when cards collapse into rows or chips.
+
+Codex needs no setup changes. Claude Code uses the hooks described below.
+See [Codex integration](docs/guides/codex.md) for custom `CODEX_HOME`, local-only
+tracking, and which waiting events Codex exposes.
+
 ## More than one project
 
 Run agents in four repos and you get four cards, not one bubble flickering
@@ -183,7 +197,8 @@ Two things Linux doesn't get:
 
 ### Then, on both
 
-On first launch a panel offers to register the Claude Code hooks. That's the only
+Codex connects automatically from its local session logs. For Claude Code,
+on first launch a panel offers to register its hooks. That's the only
 step that touches your config, and it says exactly what it edits. Then restart
 Claude Code, because it reads its hooks at startup. That's the whole setup.
 
@@ -312,6 +327,7 @@ does.
 
 ## Docs
 
+- [Codex and Claude Code together](docs/guides/codex.md)
 - [How it works](docs/guides/how-it-works.md), hooks and state and why each
   claim is delayed or withheld
 - [Configuration and CLI](docs/guides/configuration.md)
@@ -332,3 +348,16 @@ scratch against the documented Claude Code hook API and the published pet atlas
 contract.
 
 MIT. Take it, fork it, make it yours.
+
+### Tracking both agents
+
+The pet menu has saved **All / Codex / Claude** filters and a **Projects** chooser.
+Hidden projects stay quiet across both agents. Pin a conversation from its card
+to keep it expanded while other tasks run; urgent tasks remain visible beside it.
+The menu also shows live connection health for each agent. Codex Desktop's local
+live status on Linux/macOS catches approval and input waits, with an explicit
+local-log fallback if the connection is unavailable. See [the integration guide](docs/guides/codex.md).
+
+The **S / M / L** buttons resize the whole companion: pet, bubbles, text, menus,
+and spacing. The pet stays anchored while its window resizes. On shorter screens,
+menus and crowded stacks scroll so their controls remain reachable.

@@ -3,6 +3,8 @@
 mod app;
 mod attention;
 mod chats;
+mod codex;
+mod codex_live;
 mod control;
 mod desktop;
 mod doctor;
@@ -20,13 +22,13 @@ mod text;
 use std::fs;
 
 const HELP: &str = "\
-Pipsqueak, a desktop pet that shows what Claude Code is doing.
+Pipsqueak, a desktop pet for Claude Code and Codex.
 
 USAGE:
   pipsqueak                 Run the overlay (default)
   pipsqueak control <what>  on | off | toggle | quit | status | <pet name>
   pipsqueak autostart <on>  on | off | status: start with the machine
-  pipsqueak sessions        Print what the overlay would show right now, as JSON
+  pipsqueak sessions        Print local session logs and hook state, as JSON
   pipsqueak doctor          The same report as the tray's Check my setup
   pipsqueak install         Register Claude Code hooks in ~/.claude/settings.json
   pipsqueak uninstall       Remove them again
@@ -73,6 +75,7 @@ fn sessions() -> Result<String, String> {
     let mut sessions = state::read_sessions();
     chats::decorate(&mut sessions);
     narration::decorate(&mut sessions, narration::Mode::parse("thoughts"));
+    sessions.extend(codex::snapshot(narration::Mode::parse("thoughts")));
     serde_json::to_string_pretty(&sessions).map_err(|e| e.to_string())
 }
 

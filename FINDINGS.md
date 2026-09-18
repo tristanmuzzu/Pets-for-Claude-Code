@@ -623,6 +623,113 @@ frontend, platform) whose findings follow. IDs: `L-` Linux, `T-` lifecycle,
   had no record of, where on Linux the click did nothing and said nothing.
   FIXED — hidden unless there is a chat id or a title to raise by.
 
+## After v0.8.0 — the stack that scrolled, and the arrow that did nothing, 2026-09-12
+
+Reported from the desktop it runs on (Ubuntu 26.04 / GNOME 50.1, Wayland): the
+cards "look very cut off at the bottom of the top", and the ↗ arrow opens a
+Codex task but does nothing for a Claude Code one. Both reproduced, both fixed.
+
+- **F-16 (FIXED)** `style.css` `#stack.scrolling` — the stack scrolled once it
+  ran out of room, and a `column-reverse` box with `overflow-y: auto` is cut at
+  both ends: the far card is sliced through the middle of its text at the top
+  edge, and the near card loses its speech tail, because the tail is an
+  `::after` hanging 7px *below* the box that is now clipping. Reproduced at
+  `--stage-height: 360px` with five chats — which is what the largest pet size
+  on a laptop actually produces, since the window is clamped to the work area
+  and the scene is divided by the scale factor. Fixed by deleting the scroll:
+  `fitStack` measures the children against the computed `max-height` and drops
+  cards from the far end until they are under it, so the card nearest the pet
+  is the last to go and is never cut. Dropped chats are still on screen as
+  chips, and below that as a `+N` count. Ladder: cards, then chips, then the
+  one-line form of the last card.
+- **F-17 (FIXED)** `main.js` `fitStack` — the first cut of F-16 started from
+  the full set on every render, so in the overflow case it built the card that
+  did not fit, measured, and threw it away again three times a second. The
+  fitted count is now a starting hint, and growth is gated on measured slack of
+  at least one one-line card.
+- **F-18 (WRONG — raised and reverted the same day)** `main.js` `render` — the
+  pass above read "Hide the cards" literally, saw a chip left on screen for
+  every live chat, and took them away so that hiding left the pet alone. That
+  was a feature, not a leftover: the chip row IS the collapsed state, and
+  clicking the pet to get one small pill per chat — still running, or finished —
+  without a stack of cards in the corner is what the click is for. Reported
+  within the hour by the person who uses it, reverted. The lesson is the cheap
+  one: a label is not a specification, and a behaviour that looks redundant on a
+  demo dataset may be the behaviour someone relies on. Ask before removing.
+  What remains open from that observation, unchanged and untouched: a chip
+  click does nothing while the cards are hidden, because the reveal it performs
+  is gated on `config.showBubble`, which hiding has just set false. The comment
+  on the handler says that is intended ("not at all when the user has the cards
+  hidden"), so it stays a question for the owner rather than a fix.
+- **L-7 (FIXED)** `desktop.rs::open_url` — on Linux the arrow handed the URL to
+  `xdg-open` spawned from a worker thread. The deep link arrived and the app
+  switched chats, but the window stayed behind whatever was in front and GNOME
+  posted "Claude is ready" instead of raising it. That notification is the
+  tell: it is what the compositor shows when a focus request carries no
+  activation token. Measured both ways against a throwaway scheme handler that
+  printed its environment: `xdg-open` → `XDG_ACTIVATION_TOKEN=<unset>`; a URI
+  opened through a GDK launch context taken from the display →
+  `XDG_ACTIVATION_TOKEN=da6dc733-…_TIME0`. Codex was unaffected because its
+  window was usually being opened rather than raised, and a window being mapped
+  for the first time competes with nothing for focus. Now opened through
+  `gio::AppInfo::launch_default_for_uri` with that context, on the main thread,
+  with a claim flag so a slow main thread cannot launch the URL twice.
+- **L-8 (FIXED)** `desktop.rs::open_url` — the same call reported
+  `spawn().is_ok()`, which is true whenever `xdg-open` itself starts, so the
+  arrow could never report a failure and the frontend's "Could not open this
+  task" notice was unreachable on Linux. `launch_default_for_uri` fails when
+  nothing is registered for the scheme, which is the case worth telling: the
+  desktop app is not installed.
+
+## After v0.8.0 — the card that counted a task nobody was running, 2026-09-12
+
+Reported live: a finished turn reading `Finishing · 1 running · 12 actions · 5m`
+with nothing running. Checked against the machine rather than the card — no
+shell, no subagent, no build; the one process that session had launched was the
+overlay itself, reparented to systemd and not a child of anything.
+
+- **L-9 (FIXED)** `narration.rs::decorate` — the session record held
+  `tasks: ['slhnflide']`, an id that appears nowhere else: not in the
+  transcript, not in any file under `~/.claude`, and with no process behind it.
+  The count it produced could never fall, so every finished turn in that session
+  read "Finishing · N running" instead of "Done", for as long as the session
+  lived.
+
+  **First diagnosis, and why it was wrong.** It looked like the hook had stopped
+  mentioning the task: `tasks_ms` was half an hour stale across several
+  completed turns, which would mean the correction simply never re-ran. Watching
+  it longer disproved that — `tasks_ms` does advance, on every stop, still
+  carrying the same id with `status: "running"`. Claude Code is not dropping the
+  key; it is actively re-asserting a task that no longer exists. A one-turn
+  expiry built on the first reading would therefore have changed nothing anyone
+  could see: the count falls during the turn and is restored by the stop, which
+  is the exact moment the card is read. Caught before shipping, but only because
+  the numbers were re-read rather than assumed.
+
+  **Fix.** The pet's own evidence outranks the report. The transcript is a file
+  this process read; the list is something another process said. An id the
+  transcript has never named gets one turn — the bound this file already
+  claimed in prose, "cannot strand a card on 'still working' for more than one
+  turn" — and is then not counted again unless the transcript does name it, at
+  which point it is ordinary outstanding work with the normal lifecycle. The
+  turn boundary is evaluated before the hook answer so the result cannot depend
+  on whether a poll landed between a prompt and the stop after it.
+
+  **The trade, stated plainly.** Async work of a shape the transcript does not
+  record in a form this build recognises now counts for one turn instead of
+  forever. That is the case the hook answer was added for. It is a real loss,
+  taken deliberately: the alternative on the evidence is a card that is
+  permanently wrong, and any shape the transcript does record — background
+  shells, monitors, async subagents — is unaffected.
+
+  Four regression tests, each failing with the expiry removed.
+- **T-1 (FIXED, same change)** `narration.rs` tests — the new tests were flaky,
+  4 failures in 12 runs, and only under the full module. `decorate` ends by
+  dropping every watch whose path it was not given, which is correct in
+  production, where one call sees every session on screen, and means two
+  parallel tests wipe each other's state so a re-seed passes or fails on the
+  scheduler. They take a shared lock now. 0 failures in 12 runs after.
+
 ## Parked (recorded, not fixed — reasons given)
 - **T-9 (idle-prompt "Needs you" rank)** — a finished chat still sorts above
   working ones for the minute after its idle notification. Dismissable now

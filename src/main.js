@@ -2,8 +2,13 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PetRenderer, GREETING_ROW, JUMP_ROW } from './pet.js'
+import { sceneSize } from './size.js'
 import {
   ACTIVE,
+  agentIdentity,
+  projectKey,
+  sessionVisible,
+  cardLayout,
   CELEBRATE_AFTER_MS,
   DONE_LINGER_MS,
   RUNNING,
@@ -44,10 +49,6 @@ const NO_HOTKEY_HERE =
 /** Replaced at build time from package.json. See vite.config.js. */
 const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '0.0.0'
 
-/** How many chat cards are shown in full before the stack collapses. */
-const SLOT_LIMIT = 3
-/** How many chats fit once they are one line each. */
-const DENSE_LIMIT = 6
 
 const el = {
   stack: document.getElementById('stack'),
@@ -59,7 +60,8 @@ const el = {
   panelClose: document.getElementById('panel-close'),
   pet: document.getElementById('pet'),
   hint: document.getElementById('hint'),
-  template: document.getElementById('card-template')
+  template: document.getElementById('card-template'),
+  chipsMore: document.getElementById('chips-more')
 }
 
 const appWindow = IS_TAURI ? getCurrentWindow() : null
@@ -71,6 +73,9 @@ let config = {
   clickThrough: false,
   showBubble: true,
   showScratch: false,
+  agentFilter: 'all',
+  hiddenProjects: [],
+  pinnedSession: '',
   alertOnWaiting: false,
   flashOnFinish: true,
   quiet: false,
@@ -80,6 +85,18 @@ let config = {
   updateCheck: false,
   updateDismissed: ''
 }
+/** Keep DOM geometry and native hit rectangles in the same coordinate space. */
+function applyScale() {
+  const size = sceneSize(config.scale, window.innerWidth, window.innerHeight)
+  const stage = document.getElementById('stage')
+  stage.style.setProperty('--ui-scale', size.factor)
+  stage.style.setProperty('--stage-width', `${size.width}px`)
+  stage.style.setProperty('--stage-height', `${size.height}px`)
+  renderer.setScale(2)
+  renderer.wake()
+  syncHitRects()
+}
+
 let sessions = []
 /** When any project was last doing something, for the doze. */
 let lastLiveAt = Date.now()
@@ -185,6 +202,24 @@ const settled = (state) => state === 'done' || state === 'failed'
  */
 const dismissable = (state, session) =>
   settled(state) || (state === 'waiting' && Boolean(session.outcome) && !session.pending_since)
+/**
+ * An urgent state that is actually asking for something.
+ *
+ * The same distinction `dismissable` makes, from the other side. A real
+ * permission prompt is a question being asked and takes its card back; the
+ * idle notification Claude Code fires sixty seconds after every answer is not,
+ * and must not.
+ *
+ * THE BUG THIS EXISTS FOR
+ *
+ * The card by the pet could not be closed during a live chat. Closing it
+ * collapsed it to a chip correctly, and then about a minute later it was back,
+ * and a minute after that, for as long as the conversation went on — because
+ * every arrival of that idle "Waiting for your reply" counted as a transition
+ * into an urgent state, and the reveal below un-collapses on any of those. It
+ * also un-hid the whole stack, so clicking the pet did not stick either.
+ */
+const demandsAttention = (state, session) => URGENT.has(state) && !dismissable(state, session)
 /** Recent enough that finishing is still news rather than a standing fact. */
 const isFresh = (session) => Date.now() - (session.outcome_ms || 0) < DONE_LINGER_MS
 
@@ -201,6 +236,10 @@ function viewFor(key) {
       // evidence at all.
       lastStable: 'idle',
       wasUrgent: false,
+      // The narrower edge: urgent AND actually asking for something. Its own
+      // field so an idle notification cannot swallow the edge a real
+      // permission prompt needs.
+      wasDemanding: false,
       // A finished turn nobody has acknowledged yet.
       unread: false,
       // Which completion has already been announced (its outcome key), so a
@@ -234,14 +273,14 @@ const projectName = (session) => session.project || session.session_id.slice(0, 
 function cardsFor(list) {
   const out = []
   for (const session of list) {
-    if (session.scratch && !config.showScratch) continue
+    if (!sessionVisible(session, config)) continue
     const key = session.session_id
     const state = effectiveState(key, session)
     out.push({
       key,
       session,
       state,
-      live: ACTIVE.has(state),
+      live: ACTIVE.has(state) || key === config.pinnedSession,
       // The chat's own name when the desktop app knows it, and the project
       // otherwise: what a one-line chip has room to say.
       label: session.chat_title || projectName(session)
@@ -374,9 +413,17 @@ function buildCard(key) {
   setTimeout(entered, 1000)
   node.querySelector('.close').addEventListener('click', (event) => {
     event.stopPropagation()
+    if (config.pinnedSession === key) { config.pinnedSession = ''; saveConfig() }
     // Closing a finished card dismisses it outright. Leaving a chip behind
     // would keep a project in the row that means "still going on".
     if (!acknowledge(key)) collapsed.add(key)
+    render()
+  })
+  node.querySelector('.pin').addEventListener('click', async (event) => {
+    event.stopPropagation()
+    config.pinnedSession = config.pinnedSession === key ? '' : key
+    collapsed.delete(key)
+    await saveConfig()
     render()
   })
   node.querySelector('.focus').addEventListener('click', (event) => {
@@ -388,7 +435,9 @@ function buildCard(key) {
       sessionId: key,
       project: card ? projectName(card.session) : '',
       workspace: card?.session.workspace ?? ''
-    }).catch(() => {})
+    }).then((opened) => {
+      if (!opened) showNotice('Could not open this task. Check that its desktop app is installed.')
+    }).catch(() => showNotice('Could not open this task. Try opening it from its desktop app.'))
   })
   node.addEventListener('click', () => {
     const view = viewFor(key)
@@ -421,6 +470,16 @@ function buildCard(key) {
 function paintCard(node, card, compact = false) {
   const { session, key, state } = card
 
+  const agent = agentIdentity(session)
+  node.dataset.provider = agent.id
+  const pin = node.querySelector('.pin')
+  pin.hidden = key === 'notice'
+  const pinned = config.pinnedSession === key
+  node.dataset.pinned = String(pinned)
+  pin.setAttribute('aria-pressed', String(pinned))
+  pin.title = pinned ? 'Unpin conversation' : 'Pin conversation'
+  pin.setAttribute('aria-label', pin.title)
+  node.querySelector('.agent-label').textContent = agent.label
   node.dataset.state = state
   node.dataset.density = compact ? 'compact' : 'full'
   node.querySelector('.project').textContent = projectName(session)
@@ -438,7 +497,8 @@ function paintCard(node, card, compact = false) {
   // prompt's first line is a fair guess at the subject; this is the answer.
   node.querySelector('.title').textContent =
     session.chat_title || session.headline || ''
-  node.querySelector('.focus').hidden = !session.chat_id && !CAN_RAISE_BY_TITLE
+  node.querySelector('.focus').hidden = !session.chat_id && (agent.id === 'codex' || !CAN_RAISE_BY_TITLE)
+  node.querySelector('.focus').title = `Open this task in ${agent.name}`
 
   // What it is doing right now, which is the line the card is really for. Its
   // own sentence when it has said one, and the tool line when it has not:
@@ -528,7 +588,7 @@ function paintCard(node, card, compact = false) {
     part.hidden = !showCounters
   }
   if (showCounters) {
-    node.querySelector('.actions').textContent = `${actions} ${actions === 1 ? 'action' : 'actions'}`
+    node.querySelector('.actions').textContent = `${session.turn_tools_partial ? '≥' : ''}${actions} ${actions === 1 ? 'action' : 'actions'}`
     node.querySelector('.elapsed').textContent = turnElapsed(session)
   }
   // The exact call, and what the turn was asked for, are both still one hover
@@ -569,7 +629,7 @@ function kindLabel(state, session) {
   // the second lock on the same door.
   if (state === 'waiting') return 'Needs you'
   if (session.stalled) return 'Stopped responding'
-  if (state === 'failed') return 'Failed'
+  if (state === 'failed') return session.event === 'turn_aborted' ? 'Interrupted' : 'Failed'
   if (state === 'finishing') {
     // The count is the whole point: it is the reason this is not "Done". Kept
     // short because it shares the status line with the counters, and the
@@ -598,7 +658,9 @@ function buildChip(key) {
   dot.className = 'dot'
   const text = document.createElement('span')
   text.className = 'label'
-  button.append(dot, text)
+  const agent = document.createElement('span')
+  agent.className = 'agent-label'
+  button.append(dot, agent, text)
   button.addEventListener('click', () => {
     // Reveal to show THIS card, not a vote to show cards from now on — and not
     // at all when the user has the cards hidden.
@@ -663,7 +725,27 @@ function render() {
   for (const group of groups) {
     const view = viewFor(group.key)
     const urgent = URGENT.has(group.state)
-    if (urgent && !view.wasUrgent) {
+    // Two edges, because they answer two different questions. The tray blink is
+    // a glance and keeps the old rule: anything urgent, including the idle
+    // notification, is worth a flicker in the corner. Taking a put-away card
+    // back is the corner of the screen, and only a question actually being
+    // asked earns that.
+    //
+    // Tracked separately on purpose. Sharing one `wasUrgent` edge would mean an
+    // idle notification, arriving first, swallowed the edge — and the real
+    // permission prompt that followed it without passing through a quiet state
+    // would never take its card back at all.
+    const demands = demandsAttention(group.state, group.session)
+    if (urgent && !view.wasUrgent && group.state === 'waiting') {
+      // The state the whole overlay was built for — an agent waiting on you is
+      // dead time you are paying for twice — and it was the only state that
+      // could not reach you behind a fullscreen window. Done and Failed blink
+      // the tray; the one that is costing money in real time now does too. The
+      // sound stays opt-in.
+      invoke('flash_tray').catch(() => {})
+      if (config.alertOnWaiting) invoke('alert').catch(() => {})
+    }
+    if (demands && !view.wasDemanding) {
       collapsed.delete(group.key)
       slots = [group.key, ...slots.filter((key) => key !== group.key)]
       // "Anything that starts needing you takes the card back on its own" is a
@@ -681,17 +763,9 @@ function render() {
       // hidden, an urgent session gets the tray flash and the pet's own state
       // and nothing else.
       if (config.showBubble) setStackHidden(false, { persist: false })
-      if (group.state === 'waiting') {
-        // The state the whole overlay was built for — an agent waiting on you
-        // is dead time you are paying for twice — and it was the only state
-        // that could not reach you behind a fullscreen window. Done and Failed
-        // blink the tray; the one that is costing money in real time now does
-        // too. The sound stays opt-in.
-        invoke('flash_tray').catch(() => {})
-        if (config.alertOnWaiting) invoke('alert').catch(() => {})
-      }
     }
     view.wasUrgent = urgent
+    view.wasDemanding = demands
 
     // Finishing while you were looking at something else is the thing this
     // whole overlay exists to tell you about. The mark outlives the card.
@@ -752,18 +826,92 @@ function render() {
     slots = ['notice', ...slots.filter((key) => key !== 'notice')]
   }
   const wanted = stackHidden ? [] : slots.filter((key) => !collapsed.has(key))
-  const dense = wanted.filter((key) => key !== 'notice').length > SLOT_LIMIT
-  const visible = wanted.slice(0, dense ? DENSE_LIMIT : SLOT_LIMIT)
-  // Something urgent outranks what you were reading while it is urgent — and
-  // then gives the card back. Clearing `promoted` outright meant answering one
-  // permission prompt permanently stole the card from the chat you had chosen
-  // to watch, with no way back except noticing and clicking again.
-  const urgentKey = visible.find((key) => URGENT.has(byKey.get(key)?.state))
-  const detailed = dense
-    ? urgentKey ?? (visible.includes(promoted) ? promoted : visible[0])
-    : null
-  const visibleKeys = new Set(visible)
+  const { visible, full } = cardLayout(groups, wanted, { pinned: config.pinnedSession, promoted })
+  fitStack(visible, full, byKey, groups)
+  syncHitRects()
+}
 
+/**
+ * Paints the stack, then drops cards from the far end until it fits.
+ *
+ * `cardLayout` decides how many cards are worth showing; this decides how many
+ * there is room for, which is a different question on a short screen or at a
+ * large UI scale. The stack used to scroll instead, and scrolling a
+ * column-reverse box did two things at once that both looked broken: it sliced
+ * the far card in half at the top edge, and it clipped the speech tail off the
+ * near one, because the tail hangs below the box that was now clipping.
+ *
+ * Nothing is lost by trimming: a dropped chat is still on screen as a chip, on
+ * the row above the cards, with its state dot and its name. The card nearest
+ * the pet is the one the pet is "saying", so it is the last to go and is never
+ * cut.
+ */
+function fitStack(visible, full, byKey, groups) {
+  // Starting from the count that fitted last time rather than from all of them
+  // is what keeps this free in the steady state. Starting from the full set
+  // meant building the card that does not fit, measuring, and throwing it away
+  // again on every render — three template clones a second, for a card nobody
+  // ever saw. It is only a hint: both directions below are measured.
+  let shown = visible.slice(0, Math.max(1, Math.min(visible.length, fitted)))
+  // Chips are a row of pills and wrap, but enough live chats can still ask for
+  // more rows than there are. Cards go first, then chips, then the count of
+  // what is left over — which is still the truth, and still not cut off.
+  let cap = Infinity
+  // The last rung, for the largest pet on a short screen, where the ceiling is
+  // thinner than one full card: the one-line form of the same card. A card
+  // saying less is better than a card with its head sliced off.
+  let compact = false
+  let rest = []
+  const paint = () => {
+    const shownKeys = new Set(shown)
+    // Live chats only: a chip for a chat that has gone idle restores nothing
+    // when clicked, so it was a button whose only behavior was to vanish.
+    //
+    // Hiding the cards leaves the chips, deliberately. "Hide the cards" reads
+    // like it should leave the pet alone on the desktop, and a pass that went
+    // by the wording took the chips away with them (2026-09-12, reverted the
+    // same day). They are the point of the click: one small pill per chat, so
+    // you can still see at a glance what is running and what has finished
+    // without a stack of cards in the corner. The row IS the collapsed state.
+    rest = groups.filter((group) => !shownKeys.has(group.key) && group.live)
+    paintStack(shown, compact ? EMPTY : full, byKey, rest, cap)
+  }
+  paint()
+  // Grow first, and only into room that is demonstrably there: a card can not
+  // be smaller than its one-line form, so that is the test. Without it the
+  // stack would never take a card back after a window resize, or after a tall
+  // card collapsed.
+  while (shown.length < visible.length && stackRoom().slack >= COMPACT_CARD_PX) {
+    const before = shown
+    shown = visible.slice(0, shown.length + 1)
+    paint()
+    if (stackRoom().over) {
+      shown = before
+      paint()
+      break
+    }
+  }
+  // Then shrink, down the rungs, until it is under the ceiling.
+  // Bounded by the card count plus the chip count, both small.
+  for (let guard = 0; stackRoom().over && guard < 16; guard += 1) {
+    if (shown.length > 1) shown = shown.slice(0, -1)
+    else if (cap > 0) cap = Math.min(cap, rest.length) - 1
+    else if (!compact) compact = true
+    else break
+    paint()
+  }
+  fitted = shown.length
+}
+
+/** `full` for a stack where no card is allowed the room to be full. */
+const EMPTY = new Set()
+/** How many cards fitted last time. A hint for the next render, never a truth. */
+let fitted = Infinity
+/** A one-line card, which is the least room another card can possibly want. */
+const COMPACT_CARD_PX = 48
+
+function paintStack(visible, full, byKey, rest, chipCap) {
+  const visibleKeys = new Set(visible)
   for (const [key, node] of cards) {
     if (!visibleKeys.has(key)) {
       node.remove()
@@ -782,7 +930,7 @@ function render() {
       node = buildCard(key)
       cards.set(key, node)
     }
-    paintCard(node, group, detailed !== null && key !== detailed)
+    paintCard(node, group, !full.has(key))
     if (previous) {
       if (previous.nextElementSibling !== node) previous.after(node)
     } else if (el.stack.firstElementChild !== node) {
@@ -791,17 +939,45 @@ function render() {
     previous = node
   }
 
-  // Live chats only: a chip for a chat that has gone idle restores nothing
-  // when clicked, so it was a button whose only behavior was to vanish.
-  renderChips(groups.filter((group) => !visibleKeys.has(group.key) && group.live))
+  renderChips(rest, chipCap)
   // Re-appending an element that is already last still re-inserts it, which
   // restarts any animation in its subtree on every render tick.
   if (el.stack.lastElementChild !== el.chips) el.stack.append(el.chips)
-  syncHitRects()
+}
+
+/**
+ * Is the stack asking for more height than it is allowed?
+ *
+ * Measured from the children against the computed `max-height` rather than from
+ * `scrollHeight`, which stops reporting the overflow once the box no longer
+ * scrolls. `offsetHeight` rather than `getBoundingClientRect`, because the
+ * stage carries the UI-scale transform and the limit is in unscaled pixels.
+ */
+function stackRoom() {
+  const style = getComputedStyle(el.stack)
+  const limit = parseFloat(style.maxHeight)
+  // No ceiling to measure against is not an overflow, and not room to grow
+  // into either: leave the layout exactly as `cardLayout` asked for it.
+  if (!Number.isFinite(limit)) return { over: false, slack: 0 }
+  const gap = parseFloat(style.rowGap) || 0
+  let used = 0
+  let rows = 0
+  for (const child of el.stack.children) {
+    if (child.hidden) continue
+    const height = child.offsetHeight
+    if (!height) continue
+    used += height
+    rows += 1
+  }
+  used += Math.max(0, rows - 1) * gap
+  // One more row would cost its own gap as well as its height.
+  return { over: used > limit + 1, slack: limit - used - gap }
 }
 
 /** Diffed rather than rebuilt: replacing these every second made them flicker. */
-function renderChips(groups) {
+function renderChips(all, cap = Infinity) {
+  const groups = Number.isFinite(cap) ? all.slice(0, Math.max(0, cap)) : all
+  const overflow = all.length - groups.length
   const wanted = new Set(groups.map((group) => group.key))
   for (const [key, node] of chipNodes) {
     if (!wanted.has(key)) {
@@ -816,13 +992,23 @@ function renderChips(groups) {
       chipNodes.set(group.key, node)
       el.chips.append(node)
     }
-    node.querySelector('.dot').style.background = `var(--${group.state})`
+    const agent = agentIdentity(group.session)
+    node.dataset.provider = agent.id
+    node.querySelector('.agent-label').textContent = agent.label
+    node.dataset.state = group.state
     // A chat title is longer than a project name was, and a chip is a pill:
     // the row clips it and the tooltip carries the rest.
     node.lastElementChild.textContent = group.label
-    node.title = group.label
+    node.title = `${agent.name} · ${group.label}`
   }
-  el.chips.hidden = chipNodes.size === 0
+  // The remainder is a count rather than nothing: "and four more chats are
+  // running" is worth a row, and it is the only honest thing to say when there
+  // is no room to name them.
+  el.chipsMore.hidden = overflow < 1
+  el.chipsMore.textContent = `+${overflow}`
+  el.chipsMore.title = `${overflow} more ${overflow === 1 ? 'chat' : 'chats'} running, with no room for a chip`
+  if (el.chips.lastElementChild !== el.chipsMore) el.chips.append(el.chipsMore)
+  el.chips.hidden = chipNodes.size === 0 && overflow < 1
 }
 
 /**
@@ -841,6 +1027,9 @@ function syncHitRects() {
   add(el.pet)
   add(el.menu)
   add(el.panel)
+  // Per element rather than one rect over the whole stack: the gaps between
+  // cards stay click-through, so the window underneath is still reachable
+  // between them.
   if (!el.chips.hidden) add(el.chips)
   for (const node of cards.values()) add(node)
   // Every render ended in this IPC, a main-thread hop and an X shape request,
@@ -1066,11 +1255,12 @@ function autostartLine() {
 function showWelcome() {
   openPanel('Pipsqueak', () => {
     const nodes = [
-      para('This shows what Claude Code is doing, per project, while you get on with something else.'),
+      para('Follow Claude Code and Codex together, with a separate card for every conversation.'),
       para(
-        'It needs to register hooks in ~/.claude/settings.json. That file is backed up first, and only entries Pipsqueak added are ever removed.',
+        'Codex connects automatically through its local sessions. Blue outlines mean Codex; orange means Claude Code. The status dot tells you whether a task is working, waiting, or done.',
         'tight'
       ),
+      para('For Claude Code, install hooks in ~/.claude/settings.json. Your settings are backed up first.', 'tight'),
       action('Install Claude Code hooks', async (button) => {
         button.disabled = true
         button.textContent = 'Installing…'
@@ -1149,10 +1339,10 @@ async function showDoctor() {
         button.disabled = true
         const since = await invoke('watch_start').catch(() => Date.now())
         const deadline = Date.now() + WATCH_MS
-        status.textContent = 'Go and run anything in Claude Code now…'
+        status.textContent = 'Start a turn in Codex or Claude Code now…'
         const tick = setInterval(() => {
           const left = Math.ceil((deadline - Date.now()) / 1000)
-          if (left > 0) status.textContent = `Go and run anything in Claude Code now… ${left}s`
+          if (left > 0) status.textContent = `Start a turn in Codex or Claude Code now… ${left}s`
         }, 250)
         const finish = setTimeout(async () => {
           clearInterval(tick)
@@ -1189,6 +1379,72 @@ async function showDoctor() {
  */
 let menuExpanded = false
 
+let connectionTimer
+async function updateConnections(node) {
+  const state = await invoke('connection_status').catch(() => IS_TAURI ? null : {
+    codex: { status: 'demo' }, claude: { status: 'demo' }
+  })
+  const labels = {
+    codex: {
+      connected: state?.codex?.observed ? (state.codex.active ? `Live · ${state.codex.active} active` : 'Live · idle') : 'Live · awaiting task',
+      fallback: 'Local logs only', missing: 'Not found', demo: 'Preview'
+    },
+    claude: { receiving: 'Receiving events', ready: 'Hooks ready · quiet', missing: 'Hooks missing', demo: 'Preview' }
+  }
+  const details = {
+    connected: 'Connected to Codex Desktop. Approval and input waits are observed live.',
+    fallback: 'Reading local Codex logs. The desktop live connection is unavailable; approval waits may be missed.',
+    ready: 'Claude Code hooks are installed. No event in the last five minutes; ready for the next task.',
+    receiving: 'Claude Code sent an event in the last five minutes.',
+    missing: 'Open Check my setup below for connection details.',
+    demo: 'Browser preview; no agents are connected.'
+  }
+  node.replaceChildren(...['codex', 'claude'].map((id) => {
+    const status = state?.[id]?.status
+    const row = document.createElement('div')
+    row.className = 'connection'
+    row.dataset.provider = id
+    row.dataset.health = status || 'missing'
+    row.title = details[status] || 'Connection check unavailable. Try Check my setup.'
+    const name = document.createElement('strong')
+    name.textContent = id === 'codex' ? 'Codex' : 'Claude'
+    const text = document.createElement('span')
+    text.textContent = labels[id][status] || 'Check unavailable'
+    row.append(name, text)
+    return row
+  }))
+}
+
+function showProjects() {
+  const projects = new Map()
+  for (const session of sessions) {
+    if (session.session_id !== 'notice') projects.set(projectKey(session), projectName(session))
+  }
+  for (const key of config.hiddenProjects) {
+    if (!projects.has(key)) projects.set(key, key.replace(/^(path|name):/, '').split('/').pop() || key)
+  }
+  openPanel('Projects', () => {
+    const nodes = [para('Hidden projects stay quiet: no cards, sounds or tray alerts. These choices apply to both agents.')]
+    for (const [key, name] of [...projects].sort((a, b) => a[1].localeCompare(b[1]))) {
+      const shown = !config.hiddenProjects.includes(key)
+      const toggle = action(`${shown ? '✓' : '−'} ${name}`, async () => {
+        config.hiddenProjects = shown ? [...config.hiddenProjects, key] : config.hiddenProjects.filter((p) => p !== key)
+        await saveConfig(); render(); showProjects()
+      })
+      toggle.classList.add('project-toggle')
+      toggle.setAttribute('aria-pressed', String(shown))
+      toggle.setAttribute('aria-label', `${shown ? 'Hide' : 'Show'} project ${name}`)
+      toggle.title = key.replace(/^(path|name):/, '')
+      nodes.push(toggle)
+    }
+    if (!projects.size) nodes.push(para('Projects appear here when an agent starts working.'))
+    if (config.hiddenProjects.length) nodes.push(action('Show all projects', async () => {
+      config.hiddenProjects = []; await saveConfig(); render(); showProjects()
+    }))
+    return nodes
+  })
+}
+
 async function openMenu() {
   const pets = await invoke('list_pets').catch(() => [])
   const installed = await invoke('hooks_installed').catch(() => false)
@@ -1222,6 +1478,30 @@ async function openMenu() {
     return node
   }
 
+  const connections = document.createElement('div')
+  connections.className = 'connections'
+  connections.setAttribute('aria-label', 'Agent connections')
+  children.push(connections)
+  updateConnections(connections)
+  clearTimeout(connectionTimer)
+  const refresh = async () => {
+    if (el.menu.hidden || !connections.isConnected) return
+    await updateConnections(connections)
+    connectionTimer = setTimeout(refresh, 3000)
+  }
+  connectionTimer = setTimeout(refresh, 3000)
+  children.push(rule(), para('Show agents', 'heading'))
+  children.push(row(['all', 'codex', 'claude'].map((id) => button(
+    id === 'all' ? 'All' : id === 'codex' ? 'Codex' : 'Claude',
+    async () => { config.agentFilter = id; await saveConfig(); openMenu() },
+    config.agentFilter === id, true
+  ))))
+  children.push(button(`Projects${config.hiddenProjects.length ? ` · ${config.hiddenProjects.length} hidden` : ''}`, showProjects))
+  if (config.pinnedSession) children.push(button('Unpin conversation', async () => {
+    config.pinnedSession = ''; await saveConfig()
+  }))
+  children.push(rule())
+
   // Pets and sizes are picks from a short list, so they are chips on one line
   // rather than six full-width rows.
   children.push(
@@ -1238,8 +1518,9 @@ async function openMenu() {
           label,
           async () => {
             config.scale = value
-            renderer.setScale(value)
+            applyScale()
             await saveConfig()
+            openMenu()
           },
           config.scale === value,
           true
@@ -1251,8 +1532,8 @@ async function openMenu() {
 
   const narration = {
     off: 'Saying nothing while working',
-    speech: 'Saying what Claude tells you',
-    thoughts: 'Saying what Claude is thinking'
+    speech: 'Showing agent messages',
+    thoughts: 'Showing agent thoughts'
   }
   children.push(
     button(
@@ -1261,6 +1542,7 @@ async function openMenu() {
         const order = ['off', 'speech', 'thoughts']
         config.narrate = order[(order.indexOf(config.narrate) + 1) % order.length]
         await saveConfig()
+        openMenu()
       },
       config.narrate !== 'off',
       true
@@ -1402,7 +1684,7 @@ async function selectPet(id) {
   try {
     const payload = await loadPetPayload(id)
     await renderer.load(id, payload)
-    renderer.setScale(config.scale)
+    applyScale()
     config.pet = id
     await saveConfig()
   } catch (error) {
@@ -1411,13 +1693,15 @@ async function selectPet(id) {
 }
 
 async function saveConfig() {
-  await invoke('set_config', {
-    config: {
+  const stored = {
       pet: config.pet,
       scale: config.scale,
       click_through: config.clickThrough,
       show_bubble: config.showBubble,
       show_scratch: config.showScratch,
+      agent_filter: config.agentFilter,
+      hidden_projects: config.hiddenProjects,
+      pinned_session: config.pinnedSession,
       alert_on_waiting: config.alertOnWaiting,
       flash_on_finish: config.flashOnFinish,
       quiet: config.quiet,
@@ -1427,8 +1711,11 @@ async function saveConfig() {
       update_dismissed: config.updateDismissed,
       x: config.x ?? null,
       y: config.y ?? null
-    }
-  }).catch(() => {})
+  }
+  try {
+    if (IS_TAURI) await invoke('set_config', { config: stored })
+    else localStorage.setItem('pipsqueak-demo-config', JSON.stringify(stored))
+  } catch { showNotice('Could not save preferences. Please try again.') }
 }
 
 // --- interaction --------------------------------------------------------
@@ -1521,6 +1808,7 @@ function overPet(x, y) {
 }
 
 function wireInteraction() {
+  window.addEventListener('resize', () => { applyScale(); render() })
   let origin = null
 
   el.pet.addEventListener('pointerdown', (event) => {
@@ -1613,7 +1901,8 @@ function wireInteraction() {
 
 // --- boot ---------------------------------------------------------------
 async function boot() {
-  const stored = await invoke('get_config').catch(() => null)
+  const stored = IS_TAURI ? await invoke('get_config').catch(() => null)
+    : (() => { try { return JSON.parse(localStorage.getItem('pipsqueak-demo-config')) } catch { return null } })()
   if (stored) {
     config = {
       pet: stored.pet ?? 'byte',
@@ -1621,6 +1910,9 @@ async function boot() {
       clickThrough: Boolean(stored.click_through),
       showBubble: stored.show_bubble !== false,
       showScratch: Boolean(stored.show_scratch),
+      agentFilter: ['all', 'codex', 'claude'].includes(stored.agent_filter) ? stored.agent_filter : 'all',
+      hiddenProjects: Array.isArray(stored.hidden_projects) ? stored.hidden_projects : [],
+      pinnedSession: stored.pinned_session || '',
       alertOnWaiting: Boolean(stored.alert_on_waiting),
       flashOnFinish: stored.flash_on_finish !== false,
       quiet: Boolean(stored.quiet),
@@ -1642,7 +1934,7 @@ async function boot() {
     config.pet = 'pip'
     await renderer.load('pip', null)
   }
-  renderer.setScale(config.scale)
+  applyScale()
   renderer.start()
 
   wireInteraction()
@@ -1681,7 +1973,7 @@ async function boot() {
     // forever — which is deliberately the same thing a healthy idle pet does,
     // so a deaf install is indistinguishable from a quiet one. Say it, once
     // per launch, only while it is actually true.
-    showNotice('No Claude Code hooks installed — right-click the pet and choose Check my setup.')
+    showNotice('Codex connects automatically. To also track Claude Code, install its hooks from the pet menu.')
   }
 
   // Behind any notice the boot just raised: replacing the array wholesale
@@ -1709,7 +2001,11 @@ async function boot() {
     for (const session of incoming) {
       if (!seenSessions.has(session.session_id)) {
         seenSessions.add(session.session_id)
-        renderer.playOnce(GREETING_ROW)
+        // Codex's bounded tail can arrive a few polls after startup. An old
+        // completion discovered late is still history, not a new result.
+        const historical = session.outcome && Date.now() - (session.outcome_ms || 0) > DONE_LINGER_MS
+        if (historical) acknowledged.add(outcomeKey(session))
+        else if (sessionVisible(session, config)) renderer.playOnce(GREETING_ROW)
       }
     }
     const live = new Set(incoming.map((s) => s.session_id))
@@ -1724,6 +2020,10 @@ async function boot() {
     const kept = notice ? sessions.filter((s) => s.session_id === 'notice') : []
     sessions = [...kept, ...incoming]
     render()
+  })
+
+  await listen('pipsqueak://position', (event) => {
+    [config.x, config.y] = event.payload
   })
 
   await listen('pipsqueak://notice', (event) => showNotice(String(event.payload)))
@@ -1757,7 +2057,7 @@ async function boot() {
     const id = String(event.payload)
     try {
       await renderer.load(id, await loadPetPayload(id))
-      renderer.setScale(config.scale)
+      applyScale()
       config.pet = id
       await saveConfig()
     } catch (error) {
@@ -1853,6 +2153,7 @@ function startBrowserDemo() {
   // Two chats on the same repository, because that is the case the card layout
   // has to survive: they get a card each, and the project name on both.
   const projects = { migration: 'ledger' }
+  const agentsOnly = new URLSearchParams(location.search).get('demo') === 'agents'
   // Five chats rather than two: three is where the stack collapses, and a
   // layout whose rule you cannot see is a layout you cannot design.
   const scripts = {
@@ -1902,7 +2203,7 @@ function startBrowserDemo() {
   const started = Date.now() - 143_000
   const advance = () => {
     const now = Date.now()
-    sessions = Object.entries(scripts).map(([chat, steps], i) => {
+    sessions = Object.entries(scripts).filter(([chat]) => !agentsOnly || ['ledger', 'migration'].includes(chat)).map(([chat, steps], i) => {
       const [want, kind, headline] = steps[(tick + i) % steps.length]
       // The demo speaks in display states; the real files speak in the three
       // separate fields, so translate rather than special-case the renderer.
@@ -1913,6 +2214,7 @@ function startBrowserDemo() {
       else if (want === 'waiting') durable = 'running'
       return {
         session_id: chat,
+        provider: ['orchestrator', 'atlas', 'migration'].includes(chat) ? 'codex' : 'claude',
         project: projects[chat] ?? chat,
         chat_title: titles[chat] ?? '',
         workspace: i === 1 ? 'feature-x' : '',

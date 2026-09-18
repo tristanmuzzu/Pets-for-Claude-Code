@@ -2163,6 +2163,7 @@ name = "pipsqueak"
 version = "0.8.0"
 dependencies = [
  "cairo-rs",
+ "chrono",
  "gdk",
  "gtk",
  "serde",

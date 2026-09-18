@@ -9,7 +9,11 @@
     <main id="stage">
       <!-- column-reverse: the first child renders closest to the pet -->
       <div id="stack">
-        <div id="chips" class="chips" hidden></div>
+        <div id="chips" class="chips" hidden>
+          <!-- What is left when even the chips run out of room. Not a button:
+               there is nothing it could usefully do. -->
+          <span id="chips-more" class="chips-more" hidden></span>
+        </div>
       </div>
 
       <div id="menu" class="menu" hidden></div>
@@ -37,12 +41,14 @@
       <article class="card" data-state="idle">
         <header class="card-head">
           <span class="dot" aria-hidden="true"></span>
+          <span class="agent-label"></span>
           <span class="project"></span>
           <span class="title"></span>
           <span class="line"></span>
           <span class="workspace" hidden></span>
           <span class="unread" hidden title="Finished while you were away">●</span>
           <span class="age"></span>
+          <button class="icon pin" type="button" aria-label="Pin conversation" title="Pin conversation" aria-pressed="false"><svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true" fill="currentColor"><path d="M16 9V4h1V2H7v2h1v5l-2 2v2h5v7l1 2 1-2v-7h5v-2z"/></svg></button>
           <button class="icon focus" type="button" title="Open this chat">↗</button>
           <button class="icon close" type="button" title="Dismiss this card">×</button>
         </header>

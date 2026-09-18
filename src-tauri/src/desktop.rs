@@ -72,18 +72,111 @@ pub fn focus_window_titled(fragments: &[String]) -> bool {
 /// URL: given a scheme it does not recognise it falls back to treating the
 /// string as a path and opens a file window, which is what the ↗ arrow did
 /// before this existed.
-pub fn open_url(url: &str) -> bool {
+pub fn open_url(app: &tauri::AppHandle, url: &str) -> bool {
     #[cfg(windows)]
     {
+        let _ = app;
         windows_impl::shell_open(url)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        #[cfg(target_os = "macos")]
-        let opener = "open";
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let opener = "xdg-open";
-        quiet_command(opener).arg(url).spawn().is_ok()
+        let _ = app;
+        quiet_command("open").arg(url).spawn().is_ok()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_impl::open_uri(app, url)
+    }
+}
+
+/// Handing a URL to another application on a Wayland desktop.
+///
+/// THE BUG THIS EXISTS FOR
+///
+/// The ↗ arrow did nothing visible for Claude Code on Linux. The deep link was
+/// delivered — the desktop app received it and switched to the chat — but the
+/// window stayed behind whatever the user was looking at, and GNOME posted a
+/// "Claude is ready" notification instead of raising it. That notification is
+/// the tell: it is what GNOME shows when an application asks for the focus and
+/// the compositor refuses, which it does for any request that does not carry a
+/// token proving a user action asked for it.
+///
+/// `xdg-open`, spawned from a background thread with a bare environment, has no
+/// such token to pass on. The launching application is the only one that can
+/// mint one, from its own surface and the input event that started this, and
+/// GDK does exactly that when a URL is opened through a launch context taken
+/// from the display: `XDG_ACTIVATION_TOKEN` on Wayland, `DESKTOP_STARTUP_ID` on
+/// X11. The target then hands the token back to the compositor with its raise
+/// request, and the raise is allowed.
+///
+/// Codex was unaffected, which is what made this look like a Claude Code bug:
+/// its window was usually being opened rather than raised, and a window that is
+/// being mapped for the first time is not competing with anything for focus.
+///
+/// The second thing this fixes is the answer. `spawn().is_ok()` reported
+/// success whenever `xdg-open` itself started, which is to say always, so the
+/// arrow never once said it had failed. `launch_default_for_uri` fails loudly
+/// when nothing is registered for the scheme, which is the case the user needs
+/// told: the desktop app is not installed.
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux_impl {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    /// GTK has to be touched on the main thread, and commands arrive on a
+    /// worker. Long enough to cross the loop, short enough that a wedged main
+    /// thread costs a click rather than the window.
+    const MAIN_THREAD_TIMEOUT: Duration = Duration::from_secs(4);
+
+    pub fn open_uri(app: &tauri::AppHandle, url: &str) -> bool {
+        let (tx, rx) = mpsc::channel();
+        let uri = url.to_string();
+        // Whoever gets here first owns the launch. Without this, a main thread
+        // that is merely slow rather than wedged would open the URL twice: once
+        // from the fallback after the wait gave up, and again when the queued
+        // closure finally ran.
+        let claim = Arc::new(AtomicBool::new(false));
+        let claimed = claim.clone();
+        let queued = app.run_on_main_thread(move || {
+            if claimed.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let result = launch(&uri);
+            // Nothing was handed over after all, so the claim goes back before
+            // the answer does — the waiting side reads it on the way past.
+            if result.is_none() {
+                claimed.store(false, Ordering::SeqCst);
+            }
+            let _ = tx.send(result);
+        });
+        if queued.is_err() {
+            return fallback(url, &claim);
+        }
+        match rx.recv_timeout(MAIN_THREAD_TIMEOUT) {
+            // Only the "nothing handles this scheme" answer is worth a second
+            // attempt; a missing display is the same answer twice.
+            Ok(Some(opened)) => opened,
+            Ok(None) | Err(_) => fallback(url, &claim),
+        }
+    }
+
+    /// `None` when there is no display to take a launch context from, which is
+    /// not an answer about the URL and so is left to the caller.
+    fn launch(uri: &str) -> Option<bool> {
+        // The context is what carries the token. Without a display there is
+        // none to mint, and launching without one is the old behaviour.
+        let context = gtk::gdk::Display::default()?.app_launch_context()?;
+        Some(gtk::gio::AppInfo::launch_default_for_uri(uri, Some(&context)).is_ok())
+    }
+
+    /// The old path, kept for the cases GDK cannot answer: no display, or a
+    /// main thread that never got to the closure. Loses the token with it.
+    fn fallback(url: &str, claim: &Arc<AtomicBool>) -> bool {
+        if claim.swap(true, Ordering::SeqCst) {
+            return true;
+        }
+        super::quiet_command("xdg-open").arg(url).spawn().is_ok()
     }
 }
 

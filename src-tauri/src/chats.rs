@@ -131,11 +131,11 @@ fn best_by_session(files: &HashMap<PathBuf, (u64, String, Chat)>) -> HashMap<&st
 /// the existing chat, opens it, and raises the window. The same link with an id
 /// the app has *not* seen would import a CLI transcript instead, which is why
 /// only ids read back out of the app's own records are ever passed here.
-pub fn open(chat_id: &str) -> bool {
+pub fn open(app: &tauri::AppHandle, chat_id: &str) -> bool {
     if !is_plain_id(chat_id) {
         return false;
     }
-    crate::desktop::open_url(&format!("claude://resume?session={chat_id}"))
+    crate::desktop::open_url(app, &format!("claude://resume?session={chat_id}"))
 }
 
 /// Ids come off disk and end up in a URL handed to the shell, so anything that

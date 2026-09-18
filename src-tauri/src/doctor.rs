@@ -75,6 +75,7 @@ fn fail(id: &'static str, label: &'static str, detail: String, fix: Option<&'sta
 pub fn run(hotkey: &str) -> Report {
     let checks = vec![
         hooks_check(),
+        codex_check(),
         binary_check(),
         storage_check(),
         overlay_check(),
@@ -94,6 +95,15 @@ pub fn run(hotkey: &str) -> Report {
         checks,
         version: env!("CARGO_PKG_VERSION"),
         platform: std::env::consts::OS,
+    }
+}
+
+fn codex_check() -> Check {
+    let path = crate::codex::home().join("sessions");
+    match fs::read_dir(&path) {
+        Ok(_) => ok("codex", "Codex local tasks", "Local session folder is readable. Tasks are discovered automatically; no hooks or config changes needed.".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => warn("codex", "Codex local tasks", "No local sessions yet. Start a task in Codex Desktop or CLI. A custom CODEX_HOME must also be set for Pipsqueak.".into()),
+        Err(_) => fail("codex", "Codex local tasks", "Cannot read the Codex session folder. Check its permissions and CODEX_HOME.".into(), None),
     }
 }
 
@@ -137,7 +147,7 @@ fn hooks_check() -> Check {
         fail(
             "hooks",
             "Claude Code hooks",
-            "Not installed. Nothing will ever reach the pet until they are.".into(),
+            "Not installed. Install hooks to track Claude Code; Codex works independently.".into(),
             Some("install"),
         )
     } else {
@@ -372,7 +382,8 @@ fn autostart_check() -> Check {
 }
 
 fn traffic_check() -> Check {
-    let sessions = read_sessions();
+    let mut sessions = read_sessions();
+    sessions.extend(crate::codex::snapshot(crate::narration::Mode::Off));
     if sessions.is_empty() {
         return warn(
             "traffic",
@@ -406,12 +417,13 @@ pub fn watch_start() -> u64 {
 /// cannot tell "you did not do anything" from "the hooks are not firing", and
 /// saying the wrong one wastes someone's afternoon.
 pub fn watch_result(since: u64) -> (&'static str, String) {
-    let sessions = read_sessions();
+    let mut sessions = read_sessions();
+    sessions.extend(crate::codex::snapshot(crate::narration::Mode::Off));
     let touched: Vec<&state::Session> = sessions.iter().filter(|s| s.updated_ms >= since).collect();
     if touched.is_empty() {
         return (
             "none",
-            "No hook events arrived. Either nothing ran, or the hooks are not firing. Check that the events above are registered and that Claude Code was restarted after installing them."
+            "No activity arrived from either agent. Start a local Codex task or a Claude Code turn. For Claude Code, check the hooks and restart it after installing them."
                 .into(),
         );
     }
@@ -433,7 +445,7 @@ pub fn watch_result(since: u64) -> (&'static str, String) {
     (
         "ok",
         format!(
-            "{} event(s) arrived from: {}. The chain works end to end.",
+            "{} session(s) updated from: {}. Live activity reached the pet.",
             touched.len(),
             projects.join(", ")
         ),

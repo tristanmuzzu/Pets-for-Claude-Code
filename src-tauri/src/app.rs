@@ -174,7 +174,26 @@ fn current_sessions() -> Vec<Session> {
     let mut sessions = read_sessions();
     chats::decorate(&mut sessions);
     narration::decorate(&mut sessions, narration::mode());
+    sessions.extend(crate::codex::sessions(narration::mode()));
     sessions
+}
+
+#[tauri::command]
+fn connection_status() -> Value {
+    let live = crate::codex_live::summary();
+    let latest = read_sessions()
+        .iter()
+        .map(|s| s.updated_ms)
+        .max()
+        .unwrap_or(0);
+    let recent = latest > 0 && state::now_ms().saturating_sub(latest) < 5 * 60 * 1000;
+    let hooks = install::installed();
+    let codex_logs = std::fs::read_dir(crate::codex::home().join("sessions")).is_ok();
+    serde_json::json!({
+        "codex": {"status": if live["connected"] == true && (live["desired_tasks"] == 0 || live["observed_tasks"] != 0) { "connected" } else if codex_logs { "fallback" } else { "missing" },
+            "observed": live["observed_tasks"], "active": live["active_tasks"]},
+        "claude": {"status": if !hooks { "missing" } else if recent { "receiving" } else { "ready" }, "last_event_ms": latest}
+    })
 }
 
 #[tauri::command]
@@ -192,7 +211,9 @@ fn set_config(app: AppHandle, config: Config) -> Result<(), String> {
     }
     narration::set_mode(narration::Mode::parse(&config.narrate));
     sync_tray_toggles(&app, &config);
-    state::save_config(&config).map_err(|e| e.to_string())
+    state::save_config(&config).map_err(|e| e.to_string())?;
+    ensure_size(&app);
+    Ok(())
 }
 
 /// Moves the tray checkboxes to match a config changed anywhere else.
@@ -472,9 +493,12 @@ fn open_pets_dir() -> Result<(), String> {
 /// own records have; without one there is nothing to aim at but a window title,
 /// and every chat shares the same one.
 #[tauri::command]
-fn focus_session(session_id: String, project: String, workspace: String) -> bool {
+fn focus_session(app: AppHandle, session_id: String, project: String, workspace: String) -> bool {
+    if session_id.starts_with("codex:") {
+        return crate::codex::open(&app, &session_id);
+    }
     if let Some(chat) = chats::lookup(&session_id) {
-        if chats::open(&chat.id) {
+        if chats::open(&app, &chat.id) {
             // The app raises itself when it handles the link. Matching a title
             // as well would only find the same window and risk fighting it.
             return true;
@@ -725,6 +749,15 @@ fn place_window(app: &AppHandle, config: &Config) {
 /// slightly wrong, after a resolution change, a scaling change, or a window
 /// that grew between versions, gets nudged back instead of thrown away.
 fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32) {
+    clamp_to_display_for_size(window, x, y, window.inner_size().unwrap_or_default())
+}
+
+fn clamp_to_display_for_size(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    size: tauri::PhysicalSize<u32>,
+) -> (i32, i32) {
     let Ok(monitors) = window.available_monitors() else {
         return (x, y);
     };
@@ -741,7 +774,6 @@ fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32)
     // three launches at a fixed 1920x1080: x went 1674 -> 1449 -> 1254 with
     // nobody touching it. The window is undecorated, so the part that has to
     // fit on screen is exactly the inner size.
-    let size = window.inner_size().unwrap_or_default();
     let (w, h) = (size.width as i32, size.height as i32);
     let mid_x = x + w / 2;
     let mid_y = y + h / 2;
@@ -802,17 +834,42 @@ fn clamp_to_display(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32)
     out
 }
 
-/// The overlay's size as `tauri.conf.json` declares it, in logical pixels.
-///
-/// Read from the config rather than repeated as a constant, so the window and
-/// the thing that repairs the window cannot drift apart.
+/// Medium is the declared layout; user size scales the whole window. Cap it
+/// to this display's work area so large menus remain reachable on laptops.
 fn configured_size(app: &AppHandle) -> Option<LogicalSize<f64>> {
-    app.config()
+    let base = app
+        .config()
         .app
         .windows
         .iter()
-        .find(|w| w.label == WINDOW_LABEL)
-        .map(|w| LogicalSize::new(w.width, w.height))
+        .find(|w| w.label == WINDOW_LABEL)?;
+    let window = app.get_webview_window(WINDOW_LABEL)?;
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    let available = monitor.map(|m| {
+        let area = m.work_area();
+        (
+            area.size.width as f64 / m.scale_factor(),
+            area.size.height as f64 / m.scale_factor(),
+        )
+    });
+    let (width, height) =
+        scaled_window_size(base.width, base.height, load_config().scale, available);
+    Some(LogicalSize::new(width, height))
+}
+
+fn scaled_window_size(
+    width: f64,
+    height: f64,
+    scale: f64,
+    available: Option<(f64, f64)>,
+) -> (f64, f64) {
+    let factor = scale / 2.0;
+    let (w, h) = (width * factor, height * factor);
+    available.map_or((w, h), |(aw, ah)| (w.min(aw), h.min(ah)))
 }
 
 /// Puts the overlay back to its declared size after something else changed it.
@@ -827,8 +884,8 @@ fn configured_size(app: &AppHandle) -> Option<LogicalSize<f64>> {
 /// down the middle. A restart fixed it, which is the tell: nothing was wrong
 /// with the config, only with the live window.
 ///
-/// The window is `resizable: false` and carries min = max = 360x640 size hints,
-/// so *no* outside resize is legitimate. The compositor does it anyway when the
+/// The window is `resizable: false`; the selected pet size determines its
+/// expected dimensions. An outside resize must not override that preference. The compositor does it anyway when the
 /// GDK scale factor changes underneath a running client. Since every such resize
 /// is wrong by definition, the repair is simply to ask for the declared size
 /// back whenever the observed one differs.
@@ -840,6 +897,27 @@ fn configured_size(app: &AppHandle) -> Option<LogicalSize<f64>> {
 /// whatever caused it, not just the one cause we know about.
 ///
 /// Returns whether it had to correct anything.
+struct Resizing {
+    requested: Option<(u32, u32, Instant)>,
+    destination: Option<(u32, u32, i32, i32)>,
+}
+static RESIZING: Mutex<Resizing> = Mutex::new(Resizing {
+    requested: None,
+    destination: None,
+});
+
+fn settled_position(
+    pending: &mut Option<(u32, u32, i32, i32)>,
+    have: (u32, u32),
+) -> Option<(i32, i32)> {
+    let (w, h, x, y) = (*pending)?;
+    if w.abs_diff(have.0) > 1 || h.abs_diff(have.1) > 1 {
+        return None;
+    }
+    *pending = None;
+    Some((x, y))
+}
+
 fn ensure_size(app: &AppHandle) -> bool {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
         return false;
@@ -851,22 +929,84 @@ fn ensure_size(app: &AppHandle) -> bool {
         return false;
     };
     let want = want.to_physical::<u32>(scale);
-    // A pixel of slack: logical -> physical -> logical rounds, and a permanent
-    // one-pixel disagreement would mean asking for a resize on every sweep.
-    let off = |a: u32, b: u32| a.abs_diff(b) > 1;
-    if !off(have.width, want.width) && !off(have.height, want.height) {
+    let Ok(mut resize) = RESIZING.lock() else {
+        return false;
+    };
+    if have.width.abs_diff(want.width) <= 1 && have.height.abs_diff(want.height) <= 1 {
+        let position = settled_position(&mut resize.destination, (have.width, have.height));
+        if resize.destination.is_none() {
+            resize.requested = None;
+        }
+        drop(resize);
+        if let Some((x, y)) = position {
+            // Move only AFTER GTK confirms the new dimensions. Moving while
+            // shrinking otherwise gets clamped to the previous, larger bounds.
+            let _ = window.set_position(PhysicalPosition::new(x, y));
+            let mut config = load_config();
+            config.x = Some(x);
+            config.y = Some(y);
+            let _ = state::save_config(&config);
+            let _ = app.emit("pipsqueak://position", (x, y));
+            return true;
+        }
         return false;
     }
+    // The poller and Resized callback can both see the previous dimensions.
+    // Keep one destination through duplicate callbacks and rapid S/M/L changes.
+    if !request_resize(
+        &mut resize.requested,
+        (want.width, want.height),
+        Instant::now(),
+    ) {
+        return false;
+    }
+    let anchor = resize
+        .destination
+        .map(|(w, h, x, y)| (x + w as i32, y + h as i32))
+        .or_else(|| {
+            window
+                .outer_position()
+                .ok()
+                .map(|p| (p.x + have.width as i32, p.y + have.height as i32))
+        });
+    if let Some((right, bottom)) = anchor {
+        let (x, y) = clamp_to_display_for_size(
+            &window,
+            right - want.width as i32,
+            bottom - want.height as i32,
+            want,
+        );
+        resize.destination = Some((want.width, want.height, x, y));
+    }
+    drop(resize);
     log::write(&format!(
         "window was {}x{} at scale {scale}, restoring {}x{}",
         have.width, have.height, want.width, want.height
     ));
     let _ = window.set_size(want);
+    false
+}
+
+fn request_resize(
+    pending: &mut Option<(u32, u32, Instant)>,
+    want: (u32, u32),
+    now: Instant,
+) -> bool {
+    if pending
+        .is_some_and(|(w, h, at)| (w, h) == want && now.duration_since(at) < Duration::from_secs(2))
+    {
+        return false;
+    }
+    *pending = Some((want.0, want.1, now));
     true
 }
 
 /// Rescues the overlay when the display it was on disappears while running.
 fn ensure_on_screen(app: &AppHandle) {
+    // A pending resize owns placement until the compositor confirms its size.
+    if RESIZING.lock().map_or(true, |r| r.destination.is_some()) {
+        return;
+    }
     // A hidden window has no position worth trusting and nothing to rescue:
     // moving it would only overwrite the spot the pet comes back to.
     if !app
@@ -1232,7 +1372,7 @@ pub fn reload_frontend(app: &AppHandle) {
 
 /// Tells other invocations of the binary that an overlay is already up.
 fn beat() {
-    let payload = serde_json::json!({ "ms": state::now_ms(), "pid": std::process::id() });
+    let payload = serde_json::json!({ "ms": state::now_ms(), "pid": std::process::id(), "codex_live": crate::codex_live::summary() });
     let _ = state::write_atomic(
         &state::heartbeat_path(),
         serde_json::to_vec(&payload).unwrap_or_default().as_slice(),
@@ -1517,6 +1657,7 @@ pub fn run() {
         .manage(TrayToggles::default())
         .invoke_handler(tauri::generate_handler![
             get_sessions,
+            connection_status,
             get_config,
             set_config,
             set_hit_rects,
@@ -1551,6 +1692,12 @@ pub fn run() {
                 .0
                 .store(config.click_through, Ordering::Relaxed);
             narration::set_mode(narration::Mode::parse(&config.narrate));
+            if let (Some(window), Some(size)) = (
+                handle.get_webview_window(WINDOW_LABEL),
+                configured_size(&handle),
+            ) {
+                let _ = window.set_size(size);
+            }
             place_window(&handle, &config);
             if let Some(window) = handle.get_webview_window(WINDOW_LABEL) {
                 // Order matters, and differs by platform. Setting click-through
@@ -1595,6 +1742,7 @@ pub fn run() {
             // The heartbeat must exist before anything can race us: the
             // poller's first tick used to be the first beat, and a `control`
             // call landing in that gap launched a second overlay.
+            crate::codex_live::start();
             beat();
             spawn_poller(handle.clone());
             #[cfg(target_os = "linux")]
@@ -1604,4 +1752,61 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to start Pipsqueak");
+}
+
+#[cfg(test)]
+mod sizing_tests {
+    use super::{request_resize, scaled_window_size, settled_position};
+    use std::time::{Duration, Instant};
+    #[test]
+    fn all_presets_scale_the_entire_window() {
+        assert_eq!(scaled_window_size(360.0, 640.0, 1.5, None), (270.0, 480.0));
+        assert_eq!(scaled_window_size(360.0, 640.0, 2.0, None), (360.0, 640.0));
+        assert_eq!(scaled_window_size(360.0, 640.0, 3.0, None), (540.0, 960.0));
+    }
+    #[test]
+    fn large_window_fits_a_short_display_without_reducing_text_size() {
+        assert_eq!(
+            scaled_window_size(360.0, 640.0, 3.0, Some((1366.0, 720.0))),
+            (540.0, 720.0)
+        );
+    }
+    #[test]
+    fn asynchronous_resize_does_not_move_the_anchor_twice() {
+        let now = Instant::now();
+        let mut pending = None;
+        assert!(request_resize(&mut pending, (270, 480), now));
+        assert!(!request_resize(
+            &mut pending,
+            (270, 480),
+            now + Duration::from_millis(10)
+        ));
+        assert!(request_resize(
+            &mut pending,
+            (540, 960),
+            now + Duration::from_millis(20)
+        ));
+        assert!(!request_resize(
+            &mut pending,
+            (540, 960),
+            now + Duration::from_millis(30)
+        ));
+        // A compositor that ignored the request can be retried, boundedly.
+        assert!(request_resize(
+            &mut pending,
+            (540, 960),
+            now + Duration::from_secs(3)
+        ));
+    }
+    #[test]
+    fn shrinking_waits_for_confirmed_dimensions_before_repositioning() {
+        let mut pending = Some((360, 640, 1531, 425));
+        assert_eq!(settled_position(&mut pending, (540, 960)), None);
+        assert!(pending.is_some());
+        assert_eq!(
+            settled_position(&mut pending, (360, 640)),
+            Some((1531, 425))
+        );
+        assert_eq!(settled_position(&mut pending, (360, 640)), None);
+    }
 }

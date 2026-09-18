@@ -297,3 +297,40 @@ export function turnOver(session) {
 export function runningCount(session, now = Date.now()) {
   return stillWorking(session, now) ? session.outstanding || 0 : 0
 }
+
+/** Identity is independent of status, and legacy hook files are Claude Code. */
+export function agentIdentity(session) {
+  if (session.session_id === 'notice') return { id: 'pipsqueak', label: '', name: 'Pipsqueak' }
+  return session.provider === 'codex'
+    ? { id: 'codex', label: 'Codex', name: 'Codex' }
+    : { id: 'claude', label: 'Claude', name: 'Claude Code' }
+}
+
+/** Stable across agents and worktree sessions. Names are a legacy fallback. */
+export function projectKey(session) {
+  let root = (session.project_root || session.cwd || '').replaceAll('\\', '/').replace(/\/+$/, '')
+  if (/^[a-z]:/i.test(root)) root = root.toLowerCase()
+  return root ? `path:${root}` : `name:${session.project || session.session_id}`
+}
+
+export function sessionVisible(session, prefs) {
+  if (session.session_id === 'notice') return true
+  if (session.scratch && !prefs.showScratch) return false
+  if (prefs.agentFilter && prefs.agentFilter !== 'all' && agentIdentity(session).id !== prefs.agentFilter) return false
+  return !(prefs.hiddenProjects || []).includes(projectKey(session))
+}
+
+/** Reserve space for a pin and urgent work, even beyond the six-card limit. */
+export function cardLayout(groups, wanted, { pinned = '', promoted = null } = {}) {
+  const byKey = new Map(groups.map((g) => [g.key, g]))
+  const pin = wanted.includes(pinned) ? pinned : null
+  const urgent = wanted.find((key) => URGENT.has(byKey.get(key)?.state))
+  const reserved = [...new Set([wanted.includes('notice') ? 'notice' : null, pin, urgent].filter(Boolean))]
+  const ordered = [...reserved, ...wanted.filter((key) => !reserved.includes(key))]
+  const dense = wanted.filter((key) => key !== 'notice').length > 3 || Boolean(pin && wanted.length > 2)
+  const visible = ordered.slice(0, dense ? 6 : 3)
+  const full = dense
+    ? new Set(['notice', pin, urgent || (visible.includes(promoted) ? promoted : null) || pin || visible[0]].filter(Boolean))
+    : new Set(visible)
+  return { visible, full }
+}

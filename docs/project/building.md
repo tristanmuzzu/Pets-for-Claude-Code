@@ -141,3 +141,35 @@ than assumed.
 **macOS**
 
 - [ ] Builds at all. If there is no hardware to check on, say so in the notes.
+
+### Mixed-agent preview
+
+`npm run dev` demonstrates both provider colors across the dense stack.
+Open `http://localhost:1420/?demo=agents` for two full cards on one project,
+one Claude Code and one Codex. Collapse either card to verify its labeled chip,
+then click the chip to restore it. Check at the native 360 × 640 overlay size.
+Codex parser regression fixtures are synthetic and live in `codex.rs`; no
+private transcript is checked in.
+
+The live Codex adapter test uses an anonymous Unix socket pair, so restricted
+sandboxes must allow local sockets for the Rust suite. It tests passive registration,
+fragmented frames, approval flags and disconnect fallback without talking to a real
+agent. The browser demo persists its filter/pin preferences in local storage, separate
+from the native config. Clear `pipsqueak-demo-config` to reset preview choices.
+
+### Size regression check
+
+S/M/L scale the entire medium layout (360 × 640), including cards, text, menus,
+spacing and sprite, by 0.75 / 1 / 1.5. `sceneSize` controls the frontend transform;
+the renderer stays at scale 2 to avoid double-scaling the sprite. Hit rectangles
+come from the transformed DOM. The native window uses the same ratio and keeps
+its bottom-right corner anchored, capped to the monitor's work area. Check Large
+on a short viewport too: menus and overflowing stacks must scroll. Verify all
+three presets, a reload, and native pointer targets after resizing.
+
+On GTK, `set_size` is asynchronous: coalesce duplicate requests and apply the
+saved anchor position only after `inner_size` confirms the new dimensions.
+Moving during a shrink lets the compositor clamp against the old larger window.
+The display-rescue loop must also wait for pending placement. Native regression:
+cycle Medium → Small → Large → Medium and compare the bottom-right corner after
+each size settles; frontend screenshots alone cannot detect this race.
